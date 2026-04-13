@@ -666,6 +666,52 @@ llvm::Value* InExpression::codegen(CodeGenContext& ctx) {
     return result;
 }
 
+// ---- Conditional expression ----
+
+llvm::Value* ConditionalExpr::codegen(CodeGenContext& ctx) {
+    auto condV = condition->codegen(ctx);
+    if (!condV) return nullptr;
+
+    auto func = ctx.builder->GetInsertBlock()->getParent();
+    auto thenBB = llvm::BasicBlock::Create(*ctx.llvmContext, "cond_then", func);
+    auto elseBB = llvm::BasicBlock::Create(*ctx.llvmContext, "cond_else");
+    auto mergeBB = llvm::BasicBlock::Create(*ctx.llvmContext, "cond_merge");
+
+    ctx.builder->CreateCondBr(condV, thenBB, elseBB);
+
+    // Then
+    ctx.builder->SetInsertPoint(thenBB);
+    auto thenV = thenExpr->codegen(ctx);
+    if (!thenV) return nullptr;
+    ctx.builder->CreateBr(mergeBB);
+    thenBB = ctx.builder->GetInsertBlock(); // update in case codegen changed block
+
+    // Else
+    func->insert(func->end(), elseBB);
+    ctx.builder->SetInsertPoint(elseBB);
+    auto elseV = elseExpr->codegen(ctx);
+    if (!elseV) return nullptr;
+    ctx.builder->CreateBr(mergeBB);
+    elseBB = ctx.builder->GetInsertBlock();
+
+    // Merge with PHI
+    func->insert(func->end(), mergeBB);
+    ctx.builder->SetInsertPoint(mergeBB);
+
+    // Type-match: promote if needed
+    if (thenV->getType() != elseV->getType()) {
+        if (thenV->getType()->isDoubleTy() && elseV->getType()->isIntegerTy())
+            elseV = ctx.builder->CreateSIToFP(elseV, thenV->getType());
+        else if (elseV->getType()->isDoubleTy() && thenV->getType()->isIntegerTy())
+            thenV = ctx.builder->CreateSIToFP(thenV, elseV->getType());
+    }
+
+    auto phi = ctx.builder->CreatePHI(thenV->getType(), 2, "condval");
+    phi->addIncoming(thenV, thenBB);
+    phi->addIncoming(elseV, elseBB);
+    return phi;
+}
+
 // ---- Input expressions ----
 
 llvm::Value* InIntExpression::codegen(CodeGenContext& ctx) {

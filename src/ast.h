@@ -157,6 +157,16 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
+// Conditional expression: IF cond THEN expr1 ELSE expr2
+class ConditionalExpr : public Expression {
+public:
+    ExprPtr condition, thenExpr, elseExpr;
+    ConditionalExpr(ExprPtr c, ExprPtr t, ExprPtr e)
+        : condition(std::move(c)), thenExpr(std::move(t)),
+          elseExpr(std::move(e)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
 // Built-in input expressions
 class InIntExpression : public Expression {
 public:

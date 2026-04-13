@@ -614,6 +614,9 @@ primary
     | T_ININT     { $$ = new InIntExpression(); }
     | T_INREAL    { $$ = new InRealExpression(); }
     | T_INCHAR    { $$ = new InCharExpression(); }
+    | T_IF expr T_THEN expr T_ELSE primary {
+        $$ = new ConditionalExpr(ExprPtr($2), ExprPtr($4), ExprPtr($6));
+      }
     ;
 
 arg_list
