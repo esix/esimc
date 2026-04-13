@@ -1,0 +1,48 @@
+BEGIN
+    CLASS Point(REAL x, REAL y);
+    BEGIN
+        PROCEDURE show;
+        BEGIN
+            OutText("(");
+            OutReal(x, 1, 1);
+            OutText(", ");
+            OutReal(y, 1, 1);
+            OutText(")")
+        END;
+    END;
+
+    Point CLASS ColorPoint(INTEGER r, INTEGER g, INTEGER b);
+    BEGIN
+        PROCEDURE showColor;
+        BEGIN
+            OutText(" rgb=");
+            OutInt(r, 1);
+            OutText(",");
+            OutInt(g, 1);
+            OutText(",");
+            OutInt(b, 1)
+        END;
+    END;
+
+    REF(Point) p;
+    REF(ColorPoint) cp;
+
+    p :- NEW Point(3.0, 4.0);
+    p.show();
+    OutImage;
+
+    cp :- NEW ColorPoint(1.0, 2.0, 255, 128, 0);
+    cp.show();
+    cp.showColor();
+    OutImage;
+
+    OutText("p.x = ");
+    OutReal(p.x, 1, 1);
+    OutImage;
+
+    IF cp IS ColorPoint THEN
+    BEGIN
+        OutText("cp IS ColorPoint: TRUE")
+    END;
+    OutImage
+END

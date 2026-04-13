@@ -1,0 +1,27 @@
+begin
+    class Base;
+    virtual:
+        procedure Foo is
+            procedure Foo;
+        ;
+    begin
+        procedure Foo;
+        begin
+            outtext("Base");
+        end;
+    end;
+
+    Base class Derived;
+    begin
+        procedure Foo;
+        begin
+            outtext("Derived");
+        end;
+    end;
+
+    ref(Base) obj;
+    obj :- new Base;
+    obj.Foo;
+    obj :- new Derived;
+    obj.Foo;
+end

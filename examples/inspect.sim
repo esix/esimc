@@ -1,0 +1,60 @@
+BEGIN
+    CLASS Shape;
+    BEGIN
+        PROCEDURE describe;
+        BEGIN
+            OutText("I am a shape")
+        END;
+    END;
+
+    Shape CLASS Circle(REAL radius);
+    BEGIN
+        PROCEDURE describe;
+        BEGIN
+            OutText("Circle r=");
+            OutReal(radius, 1, 2)
+        END;
+    END;
+
+    Shape CLASS Square(REAL side);
+    BEGIN
+        PROCEDURE describe;
+        BEGIN
+            OutText("Square s=");
+            OutReal(side, 1, 2)
+        END;
+    END;
+
+    REF(Shape) s;
+
+    s :- NEW Circle(3.14);
+    INSPECT s
+        WHEN Circle DO
+        BEGIN
+            OutText("It's a circle!");
+            OutImage
+        END
+        WHEN Square DO
+        BEGIN
+            OutText("It's a square!");
+            OutImage
+        END
+        OTHERWISE
+        BEGIN
+            OutText("Unknown shape");
+            OutImage
+        END;
+
+    s :- NEW Square(5.0);
+    INSPECT s
+        WHEN Circle DO
+        BEGIN
+            OutText("It's a circle!");
+            OutImage
+        END
+        WHEN Square DO
+        BEGIN
+            OutText("It's a square!");
+            OutImage
+        END
+END

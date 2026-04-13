@@ -1,0 +1,31 @@
+BEGIN
+    CLASS Counter(INTEGER limit);
+    BEGIN
+        INTEGER i;
+        FOR i := 1 STEP 1 UNTIL limit DO
+        BEGIN
+            OutText("  Counter: ");
+            OutInt(i, 3);
+            OutImage;
+            DETACH
+        END
+    END;
+
+    REF(Counter) c;
+    c :- NEW Counter(5);
+
+    OutText("Main: resuming...");
+    OutImage;
+    RESUME(c);
+
+    OutText("Main: resuming...");
+    OutImage;
+    RESUME(c);
+
+    OutText("Main: resuming...");
+    OutImage;
+    RESUME(c);
+
+    OutText("Main: done.");
+    OutImage
+END

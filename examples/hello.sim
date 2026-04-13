@@ -1,0 +1,9 @@
+BEGIN
+    INTEGER x;
+    x := 42;
+    OutText("Hello, Simula!");
+    OutImage;
+    OutText("x = ");
+    OutInt(x, 4);
+    OutImage
+END

@@ -1,0 +1,42 @@
+BEGIN
+    PROCEDURE greet(TEXT name);
+    BEGIN
+        OutText("Hello, ");
+        OutText(name);
+        OutImage
+    END;
+
+    INTEGER PROCEDURE factorial(INTEGER n);
+    BEGIN
+        IF n <= 1 THEN
+            factorial := 1
+        ELSE
+            factorial := n * factorial(n - 1)
+    END;
+
+    INTEGER PROCEDURE fib(INTEGER n);
+    BEGIN
+        IF n <= 1 THEN
+            fib := n
+        ELSE
+            fib := fib(n - 1) + fib(n - 2)
+    END;
+
+    INTEGER i;
+
+    greet("World");
+
+    OutText("Factorials: ");
+    FOR i := 1 STEP 1 UNTIL 10 DO
+    BEGIN
+        OutInt(factorial(i), 8)
+    END;
+    OutImage;
+
+    OutText("Fibonacci:  ");
+    FOR i := 0 STEP 1 UNTIL 9 DO
+    BEGIN
+        OutInt(fib(i), 4)
+    END;
+    OutImage
+END
