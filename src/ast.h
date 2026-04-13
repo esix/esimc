@@ -22,7 +22,6 @@ using StmtPtr = std::unique_ptr<Statement>;
 using StmtList = std::vector<StmtPtr>;
 using ExprList = std::vector<ExprPtr>;
 
-// Parameter specification for procedures and class constructors
 struct ParamSpec {
     std::string name;
     int type; // VarDeclaration::Type value
@@ -53,6 +52,13 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
+class CharLiteral : public Expression {
+public:
+    char value;
+    explicit CharLiteral(char v) : value(v) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
 class BooleanLiteral : public Expression {
 public:
     bool value;
@@ -74,7 +80,7 @@ public:
 
 class BinaryOp : public Expression {
 public:
-    enum Op { ADD, SUB, MUL, DIV, IDIV, EQ, NE, LT, LE, GT, GE, AND, OR };
+    enum Op { ADD, SUB, MUL, DIV, IDIV, EQ, NE, LT, LE, GT, GE, AND, OR, CONCAT };
     Op op;
     ExprPtr lhs, rhs;
     BinaryOp(Op o, ExprPtr l, ExprPtr r)
@@ -100,7 +106,6 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// NEW ClassName or NEW ClassName(args)
 class NewExpression : public Expression {
 public:
     std::string className;
@@ -110,7 +115,6 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// obj.member (field access)
 class MemberAccess : public Expression {
 public:
     ExprPtr object;
@@ -120,7 +124,6 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// obj.method(args) (method call)
 class MethodCall : public Expression {
 public:
     ExprPtr object;
@@ -131,13 +134,11 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// THIS ClassName
 class ThisExpression : public Expression {
 public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// expr IS ClassName
 class IsExpression : public Expression {
 public:
     ExprPtr object;
@@ -147,13 +148,28 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// expr IN ClassName (same or derived)
 class InExpression : public Expression {
 public:
     ExprPtr object;
     std::string className;
     InExpression(ExprPtr o, std::string c)
         : object(std::move(o)), className(std::move(c)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
+// Built-in input expressions
+class InIntExpression : public Expression {
+public:
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
+class InRealExpression : public Expression {
+public:
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
+class InCharExpression : public Expression {
+public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
@@ -169,15 +185,46 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// INTEGER x; REAL y; BOOLEAN z; TEXT t;
+// Multiple statements without scope (for multi-var declarations)
+class CompoundStmt : public Statement {
+public:
+    StmtList statements;
+    explicit CompoundStmt(StmtList stmts) : statements(std::move(stmts)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
+// Variable declaration: INTEGER x; REAL y; CHARACTER ch;
 class VarDeclaration : public Statement {
 public:
-    enum Type { INTEGER, REAL, BOOLEAN, TEXT };
+    enum Type { INTEGER, REAL, BOOLEAN, TEXT, CHARACTER };
     Type type;
     std::string name;
     ExprPtr init;
     VarDeclaration(Type t, std::string n, ExprPtr i = nullptr)
         : type(t), name(std::move(n)), init(std::move(i)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
+// ARRAY declaration: INTEGER ARRAY a(1:10)
+class ArrayDeclaration : public Statement {
+public:
+    VarDeclaration::Type elementType;
+    std::string name;
+    ExprPtr lowerBound, upperBound;
+    ArrayDeclaration(VarDeclaration::Type t, std::string n, ExprPtr lo, ExprPtr hi)
+        : elementType(t), name(std::move(n)),
+          lowerBound(std::move(lo)), upperBound(std::move(hi)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
+// Array element assignment: a(i) := expr
+class ArrayAssignment : public Statement {
+public:
+    std::string name;
+    ExprPtr index;
+    ExprPtr value;
+    ArrayAssignment(std::string n, ExprPtr i, ExprPtr v)
+        : name(std::move(n)), index(std::move(i)), value(std::move(v)) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
@@ -212,7 +259,7 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// var :- expr (reference assignment)
+// var :- expr
 class RefAssignment : public Statement {
 public:
     std::string name;
@@ -227,6 +274,33 @@ class ExprStatement : public Statement {
 public:
     ExprPtr expr;
     explicit ExprStatement(ExprPtr e) : expr(std::move(e)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
+// LABEL name1, name2;
+class LabelDeclaration : public Statement {
+public:
+    std::vector<std::string> labels;
+    explicit LabelDeclaration(std::vector<std::string> l)
+        : labels(std::move(l)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
+// name: statement
+class LabeledStatement : public Statement {
+public:
+    std::string label;
+    StmtPtr statement;
+    LabeledStatement(std::string l, StmtPtr s)
+        : label(std::move(l)), statement(std::move(s)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
+// GOTO name
+class GotoStatement : public Statement {
+public:
+    std::string label;
+    explicit GotoStatement(std::string l) : label(std::move(l)) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
@@ -264,7 +338,7 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// PROCEDURE name(params); specs; body
+// PROCEDURE name(params); body
 class ProcedureDecl : public Statement {
 public:
     std::string name;
@@ -279,8 +353,7 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// CLASS name(params); specs; BEGIN ... END
-// or: ParentClass CLASS name(params); specs; BEGIN ... END
+// CLASS name(params); BEGIN ... END
 class ClassDecl : public Statement {
 public:
     std::string name;
@@ -303,20 +376,18 @@ public:
     };
     ExprPtr object;
     std::vector<WhenClause> whenClauses;
-    StmtPtr otherwiseBody; // may be null
+    StmtPtr otherwiseBody;
     InspectStatement(ExprPtr o, std::vector<WhenClause> w, StmtPtr ow = nullptr)
         : object(std::move(o)), whenClauses(std::move(w)),
           otherwiseBody(std::move(ow)) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// DETACH
 class DetachStatement : public Statement {
 public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// RESUME(expr)
 class ResumeStatement : public Statement {
 public:
     ExprPtr object;
@@ -324,7 +395,6 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// CALL(expr)
 class CallStatement : public Statement {
 public:
     ExprPtr object;
@@ -350,6 +420,16 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
+class OutFixStatement : public Statement {
+public:
+    ExprPtr value;
+    ExprPtr decimals;
+    ExprPtr width;
+    OutFixStatement(ExprPtr v, ExprPtr d, ExprPtr w)
+        : value(std::move(v)), decimals(std::move(d)), width(std::move(w)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
 class OutTextStatement : public Statement {
 public:
     ExprPtr text;
@@ -358,6 +438,11 @@ public:
 };
 
 class OutImageStatement : public Statement {
+public:
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
+class InImageStatement : public Statement {
 public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };

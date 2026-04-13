@@ -1,0 +1,62 @@
+BEGIN
+    ! Test multi-variable declarations
+    INTEGER a, b, c;
+    a := 10; b := 20; c := a + b;
+    OutText("a+b = "); OutInt(c, 4); OutImage;
+
+    ! Test CHARACTER type and char literals
+    CHARACTER ch;
+    ch := 'A';
+    OutText("char: "); OutInt(Rank(ch), 4); OutImage;
+    ch := Char(66);
+    OutText("Char(66) = rank "); OutInt(Rank(ch), 4); OutImage;
+
+    ! Test ARRAY
+    INTEGER ARRAY arr(1:5);
+    INTEGER i;
+    FOR i := 1 STEP 1 UNTIL 5 DO
+        arr(i) := i * i;
+
+    OutText("Squares: ");
+    FOR i := 1 STEP 1 UNTIL 5 DO
+        OutInt(arr(i), 4);
+    OutImage;
+
+    ! Test ABS
+    OutText("ABS(-42) = "); OutInt(Abs(-42), 4); OutImage;
+
+    ! Test MOD
+    OutText("17 MOD 5 = "); OutInt(Mod(17, 5), 4); OutImage;
+
+    ! Test GOTO/LABEL
+    LABEL done;
+    OutText("Before goto");
+    OutImage;
+    GOTO done;
+    OutText("SKIPPED");
+    OutImage;
+    done: OutText("After label");
+    OutImage;
+
+    ! Test Simula-style parameter specs
+    PROCEDURE show(x, y);
+        INTEGER x;
+        INTEGER y;
+    BEGIN
+        OutText("x="); OutInt(x, 1);
+        OutText(" y="); OutInt(y, 1);
+        OutImage
+    END;
+
+    show(100, 200);
+
+    ! Test text concatenation
+    TEXT t;
+    t := "Hello" & " " & "World!";
+    OutText(t); OutImage;
+
+    ! Test OutFix
+    OutText("OutFix pi: ");
+    OutFix(3.14159, 3, 8);
+    OutImage
+END

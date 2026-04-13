@@ -195,3 +195,44 @@ void* simula_alloc(int64_t size) {
     }
     return p;
 }
+
+/* ================================================================
+ * Platform-independent: text operations
+ * ================================================================ */
+
+char* simula_blanks(int64_t n) {
+    char* s = (char*)malloc((size_t)(n + 1));
+    if (!s) {
+        fprintf(stderr, "simula_blanks: out of memory\n");
+        exit(1);
+    }
+    memset(s, ' ', (size_t)n);
+    s[n] = '\0';
+    return s;
+}
+
+char* simula_text_copy(const char* s) {
+    if (s == NULL) return strdup("");
+    return strdup(s);
+}
+
+char* simula_text_concat(const char* a, const char* b) {
+    if (a == NULL) a = "";
+    if (b == NULL) b = "";
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    char* result = (char*)malloc(la + lb + 1);
+    if (!result) {
+        fprintf(stderr, "simula_text_concat: out of memory\n");
+        exit(1);
+    }
+    memcpy(result, a, la);
+    memcpy(result + la, b, lb);
+    result[la + lb] = '\0';
+    return result;
+}
+
+int64_t simula_text_length(const char* s) {
+    if (s == NULL) return 0;
+    return (int64_t)strlen(s);
+}

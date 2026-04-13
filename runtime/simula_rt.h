@@ -14,6 +14,12 @@ typedef struct SimulaCoro SimulaCoro;
 /* Memory allocation */
 void* simula_alloc(int64_t size);
 
+/* Text operations */
+char* simula_blanks(int64_t n);
+char* simula_text_copy(const char* s);
+char* simula_text_concat(const char* a, const char* b);
+int64_t simula_text_length(const char* s);
+
 /* Coroutine management */
 SimulaCoro* simula_coro_create(void);
 void simula_coro_start(SimulaCoro* coro, void (*func)(void*), void* arg);

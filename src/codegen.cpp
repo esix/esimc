@@ -19,16 +19,26 @@ CodeGenContext::CodeGenContext() {
 
 llvm::Type* CodeGenContext::getLLVMType(int varDeclType) {
     switch (varDeclType) {
-        case VarDeclaration::INTEGER: return llvm::Type::getInt64Ty(*llvmContext);
-        case VarDeclaration::REAL:    return llvm::Type::getDoubleTy(*llvmContext);
-        case VarDeclaration::BOOLEAN: return llvm::Type::getInt1Ty(*llvmContext);
-        case VarDeclaration::TEXT:    return llvm::PointerType::getUnqual(*llvmContext);
-        default:                      return llvm::Type::getInt64Ty(*llvmContext);
+        case VarDeclaration::INTEGER:   return llvm::Type::getInt64Ty(*llvmContext);
+        case VarDeclaration::REAL:      return llvm::Type::getDoubleTy(*llvmContext);
+        case VarDeclaration::BOOLEAN:   return llvm::Type::getInt1Ty(*llvmContext);
+        case VarDeclaration::TEXT:      return llvm::PointerType::getUnqual(*llvmContext);
+        case VarDeclaration::CHARACTER: return llvm::Type::getInt8Ty(*llvmContext);
+        default:                        return llvm::Type::getInt64Ty(*llvmContext);
     }
 }
 
 llvm::Type* CodeGenContext::getRefType() {
     return llvm::PointerType::getUnqual(*llvmContext);
+}
+
+llvm::BasicBlock* CodeGenContext::getOrCreateLabel(const std::string& name) {
+    auto it = labelBlocks.find(name);
+    if (it != labelBlocks.end()) return it->second;
+    auto bb = llvm::BasicBlock::Create(*llvmContext, "label_" + name);
+    // Don't add to function yet - LabeledStatement will do that
+    labelBlocks[name] = bb;
+    return bb;
 }
 
 std::map<std::string, llvm::AllocaInst*> CodeGenContext::saveScope() {
@@ -53,7 +63,7 @@ llvm::Type* CodeGenContext::getFieldLLVMType(const std::string& className, const
     if (it == classes.end()) return nullptr;
     for (auto& f : it->second.fields) {
         if (f.name == fieldName) {
-            if (f.type == -1) return getRefType(); // REF field
+            if (f.type == -1) return getRefType();
             return getLLVMType(f.type);
         }
     }
@@ -83,7 +93,7 @@ void CodeGenContext::declareRuntimeFunctions() {
     auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
     auto voidTy = llvm::Type::getVoidTy(*llvmContext);
 
-    // printf
+    // printf (varargs)
     printfFunc = llvm::Function::Create(
         llvm::FunctionType::get(i32Ty, {ptrTy}, true),
         llvm::Function::ExternalLinkage, "printf", module.get());
@@ -92,6 +102,16 @@ void CodeGenContext::declareRuntimeFunctions() {
     putsFunc = llvm::Function::Create(
         llvm::FunctionType::get(i32Ty, {ptrTy}, false),
         llvm::Function::ExternalLinkage, "puts", module.get());
+
+    // scanf (varargs)
+    scanfFunc = llvm::Function::Create(
+        llvm::FunctionType::get(i32Ty, {ptrTy}, true),
+        llvm::Function::ExternalLinkage, "scanf", module.get());
+
+    // getchar
+    getcharFunc = llvm::Function::Create(
+        llvm::FunctionType::get(i32Ty, false),
+        llvm::Function::ExternalLinkage, "getchar", module.get());
 
     // simula_alloc(i64) -> ptr
     allocFunc = llvm::Function::Create(
@@ -117,6 +137,26 @@ void CodeGenContext::declareRuntimeFunctions() {
     coroResumeFunc = llvm::Function::Create(
         llvm::FunctionType::get(voidTy, {ptrTy}, false),
         llvm::Function::ExternalLinkage, "simula_coro_resume", module.get());
+
+    // simula_blanks(i64) -> ptr
+    blanksFunc = llvm::Function::Create(
+        llvm::FunctionType::get(ptrTy, {i64Ty}, false),
+        llvm::Function::ExternalLinkage, "simula_blanks", module.get());
+
+    // simula_text_copy(ptr) -> ptr
+    textCopyFunc = llvm::Function::Create(
+        llvm::FunctionType::get(ptrTy, {ptrTy}, false),
+        llvm::Function::ExternalLinkage, "simula_text_copy", module.get());
+
+    // simula_text_concat(ptr, ptr) -> ptr
+    textConcatFunc = llvm::Function::Create(
+        llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false),
+        llvm::Function::ExternalLinkage, "simula_text_concat", module.get());
+
+    // simula_text_length(ptr) -> i64
+    textLengthFunc = llvm::Function::Create(
+        llvm::FunctionType::get(i64Ty, {ptrTy}, false),
+        llvm::Function::ExternalLinkage, "simula_text_length", module.get());
 }
 
 llvm::AllocaInst* CodeGenContext::createEntryBlockAlloca(
@@ -177,6 +217,10 @@ llvm::Value* TextLiteral::codegen(CodeGenContext& ctx) {
     return ctx.builder->CreateGlobalString(value, "str");
 }
 
+llvm::Value* CharLiteral::codegen(CodeGenContext& ctx) {
+    return llvm::ConstantInt::get(llvm::Type::getInt8Ty(*ctx.llvmContext), (uint8_t)value);
+}
+
 llvm::Value* BooleanLiteral::codegen(CodeGenContext& ctx) {
     return llvm::ConstantInt::get(llvm::Type::getInt1Ty(*ctx.llvmContext), value ? 1 : 0);
 }
@@ -219,6 +263,25 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
     auto R = rhs->codegen(ctx);
     if (!L || !R) return nullptr;
 
+    // CONCAT: call simula_text_concat
+    if (op == CONCAT) {
+        return ctx.builder->CreateCall(ctx.textConcatFunc, {L, R}, "concat");
+    }
+
+    // Check for character comparisons (both i8)
+    bool isChar = L->getType()->isIntegerTy(8) && R->getType()->isIntegerTy(8);
+    if (isChar) {
+        switch (op) {
+            case EQ:  return ctx.builder->CreateICmpEQ(L, R, "eqtmp");
+            case NE:  return ctx.builder->CreateICmpNE(L, R, "netmp");
+            case LT:  return ctx.builder->CreateICmpULT(L, R, "lttmp");
+            case LE:  return ctx.builder->CreateICmpULE(L, R, "letmp");
+            case GT:  return ctx.builder->CreateICmpUGT(L, R, "gttmp");
+            case GE:  return ctx.builder->CreateICmpUGE(L, R, "getmp");
+            default: break;
+        }
+    }
+
     bool isReal = L->getType()->isDoubleTy() || R->getType()->isDoubleTy();
 
     // Promote to double if mixed
@@ -245,7 +308,7 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
             case LE:  return ctx.builder->CreateFCmpOLE(L, R, "letmp");
             case GT:  return ctx.builder->CreateFCmpOGT(L, R, "gttmp");
             case GE:  return ctx.builder->CreateFCmpOGE(L, R, "getmp");
-            case AND: case OR: break; // shouldn't happen with reals
+            case AND: case OR: case CONCAT: break;
         }
     }
 
@@ -263,6 +326,7 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
         case GE:  return ctx.builder->CreateICmpSGE(L, R, "getmp");
         case AND: return ctx.builder->CreateAnd(L, R, "andtmp");
         case OR:  return ctx.builder->CreateOr(L, R, "ortmp");
+        case CONCAT: break; // handled above
     }
     return nullptr;
 }
@@ -281,6 +345,113 @@ llvm::Value* UnaryOp::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    auto i8Ty = llvm::Type::getInt8Ty(*ctx.llvmContext);
+    auto doubleTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
+
+    // Check if it's an array access
+    auto ait = ctx.arrays.find(name);
+    if (ait != ctx.arrays.end()) {
+        auto& info = ait->second;
+        if (args.empty()) {
+            std::cerr << "Error: array '" << name << "' access requires an index\n";
+            return nullptr;
+        }
+        auto idxVal = args[0]->codegen(ctx);
+        if (!idxVal) return nullptr;
+        // Compute adjusted index = index - lowerBound
+        auto adjusted = ctx.builder->CreateSub(idxVal,
+            llvm::ConstantInt::get(i64Ty, info.lowerBound), "adj_idx");
+        auto gep = ctx.builder->CreateGEP(
+            llvm::ArrayType::get(info.elementType, info.size),
+            info.alloca, {llvm::ConstantInt::get(i64Ty, 0), adjusted}, "arr_elem");
+        return ctx.builder->CreateLoad(info.elementType, gep, "arr_val");
+    }
+
+    // Check built-in functions (identifiers are already lowered by the lexer)
+    if (name == "abs") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        if (val->getType()->isDoubleTy()) {
+            // fabs via select: val < 0 ? -val : val
+            auto neg = ctx.builder->CreateFNeg(val, "neg");
+            auto zero = llvm::ConstantFP::get(doubleTy, 0.0);
+            auto cmp = ctx.builder->CreateFCmpOLT(val, zero, "cmp");
+            return ctx.builder->CreateSelect(cmp, neg, val, "abs");
+        } else {
+            // integer abs: val < 0 ? -val : val
+            auto neg = ctx.builder->CreateNeg(val, "neg");
+            auto zero = llvm::ConstantInt::get(i64Ty, 0);
+            auto cmp = ctx.builder->CreateICmpSLT(val, zero, "cmp");
+            return ctx.builder->CreateSelect(cmp, neg, val, "abs");
+        }
+    }
+
+    if (name == "mod") {
+        if (args.size() < 2) return nullptr;
+        auto a = args[0]->codegen(ctx);
+        auto b = args[1]->codegen(ctx);
+        if (!a || !b) return nullptr;
+        return ctx.builder->CreateSRem(a, b, "mod");
+    }
+
+    if (name == "entier") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        return ctx.builder->CreateFPToSI(val, i64Ty, "entier");
+    }
+
+    if (name == "sign") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        // return -1, 0, or 1
+        auto zero = llvm::ConstantInt::get(i64Ty, 0);
+        auto one = llvm::ConstantInt::get(i64Ty, 1);
+        auto neg1 = llvm::ConstantInt::getSigned(i64Ty, -1);
+        auto isNeg = ctx.builder->CreateICmpSLT(val, zero, "isneg");
+        auto isPos = ctx.builder->CreateICmpSGT(val, zero, "ispos");
+        auto sel1 = ctx.builder->CreateSelect(isPos, one, zero, "sel1");
+        return ctx.builder->CreateSelect(isNeg, neg1, sel1, "sign");
+    }
+
+    if (name == "char") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        return ctx.builder->CreateTrunc(val, i8Ty, "char");
+    }
+
+    if (name == "rank") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        return ctx.builder->CreateZExt(val, i64Ty, "rank");
+    }
+
+    if (name == "blanks") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        return ctx.builder->CreateCall(ctx.blanksFunc, {val}, "blanks");
+    }
+
+    if (name == "copy") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        return ctx.builder->CreateCall(ctx.textCopyFunc, {val}, "copy");
+    }
+
+    if (name == "length") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        return ctx.builder->CreateCall(ctx.textLengthFunc, {val}, "length");
+    }
+
     // Check if it's a method call on THIS (within a class)
     if (ctx.currentThis && !ctx.currentClassName.empty()) {
         auto& ci = ctx.classes[ctx.currentClassName];
@@ -297,6 +468,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // Look up in module functions
     auto func = ctx.module->getFunction(name);
     if (!func) {
         std::cerr << "Error: unknown function '" << name << "'\n";
@@ -339,13 +511,12 @@ llvm::Value* NewExpression::codegen(CodeGenContext& ctx) {
     // Constructor params start at field index 2
     size_t argIdx = 0;
     for (auto& param : ci.fields) {
-        if (param.structIndex < 2) continue; // skip classId and coro
+        if (param.structIndex < 2) continue;
         if (argIdx < args.size()) {
             auto val = args[argIdx]->codegen(ctx);
             if (val) {
                 auto fieldPtr = ctx.builder->CreateStructGEP(
                     ci.structType, obj, param.structIndex, param.name + "_ptr");
-                // Type convert if needed
                 auto destTy = ci.structType->getElementType(param.structIndex);
                 if (val->getType() != destTy) {
                     if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
@@ -371,18 +542,12 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
     auto obj = object->codegen(ctx);
     if (!obj) return nullptr;
 
-    // Determine the class name from the object
     std::string clsName;
-
-    // Check if the object expression is an Identifier and look up its ref type
     if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
         clsName = ctx.resolveRefType(ident->name);
     }
-    if (clsName.empty() && !ctx.currentClassName.empty()) {
-        // Could be THIS
-        if (dynamic_cast<ThisExpression*>(object.get())) {
-            clsName = ctx.currentClassName;
-        }
+    if (clsName.empty() && dynamic_cast<ThisExpression*>(object.get())) {
+        clsName = ctx.currentClassName;
     }
 
     if (clsName.empty()) {
@@ -439,7 +604,7 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
     }
 
     std::vector<llvm::Value*> argsV;
-    argsV.push_back(obj); // this pointer
+    argsV.push_back(obj);
     for (auto& arg : args) {
         auto v = arg->codegen(ctx);
         if (!v) return nullptr;
@@ -466,11 +631,8 @@ llvm::Value* IsExpression::codegen(CodeGenContext& ctx) {
         return nullptr;
     }
 
-    // Load class ID from object (field index 0)
-    auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
-
-    // Use a generic two-field struct to access the class ID
+    auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
     auto baseTy = llvm::StructType::get(*ctx.llvmContext, {i64Ty, ptrTy});
     auto idPtr = ctx.builder->CreateStructGEP(baseTy, obj, 0, "classid_ptr");
     auto classId = ctx.builder->CreateLoad(i64Ty, idPtr, "classid");
@@ -495,7 +657,6 @@ llvm::Value* InExpression::codegen(CodeGenContext& ctx) {
     auto idPtr = ctx.builder->CreateStructGEP(baseTy, obj, 0, "classid_ptr");
     auto classId = ctx.builder->CreateLoad(i64Ty, idPtr, "classid");
 
-    // OR together checks for each class ID in the hierarchy
     llvm::Value* result = ctx.builder->getFalse();
     for (int id : ids) {
         auto cmp = ctx.builder->CreateICmpEQ(classId,
@@ -503,6 +664,34 @@ llvm::Value* InExpression::codegen(CodeGenContext& ctx) {
         result = ctx.builder->CreateOr(result, cmp, "in_or");
     }
     return result;
+}
+
+// ---- Input expressions ----
+
+llvm::Value* InIntExpression::codegen(CodeGenContext& ctx) {
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    auto func = ctx.builder->GetInsertBlock()->getParent();
+    auto alloca = ctx.createEntryBlockAlloca(func, "inint_tmp", i64Ty);
+    ctx.builder->CreateStore(llvm::ConstantInt::get(i64Ty, 0), alloca);
+    auto fmt = ctx.builder->CreateGlobalString("%lld", "intinfmt");
+    ctx.builder->CreateCall(ctx.scanfFunc, {fmt, alloca});
+    return ctx.builder->CreateLoad(i64Ty, alloca, "inint");
+}
+
+llvm::Value* InRealExpression::codegen(CodeGenContext& ctx) {
+    auto doubleTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
+    auto func = ctx.builder->GetInsertBlock()->getParent();
+    auto alloca = ctx.createEntryBlockAlloca(func, "inreal_tmp", doubleTy);
+    ctx.builder->CreateStore(llvm::ConstantFP::get(doubleTy, 0.0), alloca);
+    auto fmt = ctx.builder->CreateGlobalString("%lf", "realinfmt");
+    ctx.builder->CreateCall(ctx.scanfFunc, {fmt, alloca});
+    return ctx.builder->CreateLoad(doubleTy, alloca, "inreal");
+}
+
+llvm::Value* InCharExpression::codegen(CodeGenContext& ctx) {
+    auto i8Ty = llvm::Type::getInt8Ty(*ctx.llvmContext);
+    auto ch = ctx.builder->CreateCall(ctx.getcharFunc, {}, "getch");
+    return ctx.builder->CreateTrunc(ch, i8Ty, "inchar");
 }
 
 // ============================================================
@@ -521,6 +710,14 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
     return last;
 }
 
+llvm::Value* CompoundStmt::codegen(CodeGenContext& ctx) {
+    llvm::Value* last = nullptr;
+    for (auto& stmt : statements) {
+        last = stmt->codegen(ctx);
+    }
+    return last;
+}
+
 llvm::Value* VarDeclaration::codegen(CodeGenContext& ctx) {
     auto ty = ctx.getLLVMType(type);
     auto func = ctx.builder->GetInsertBlock()->getParent();
@@ -529,11 +726,93 @@ llvm::Value* VarDeclaration::codegen(CodeGenContext& ctx) {
 
     if (init) {
         auto val = init->codegen(ctx);
-        if (val) ctx.builder->CreateStore(val, alloca);
+        if (val) {
+            // Type convert if needed
+            auto destTy = alloca->getAllocatedType();
+            if (val->getType() != destTy) {
+                if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
+                    val = ctx.builder->CreateSIToFP(val, destTy);
+                else if (destTy->isIntegerTy(64) && val->getType()->isDoubleTy())
+                    val = ctx.builder->CreateFPToSI(val, destTy);
+            }
+            ctx.builder->CreateStore(val, alloca);
+        }
     } else {
         ctx.builder->CreateStore(llvm::Constant::getNullValue(ty), alloca);
     }
     return alloca;
+}
+
+llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
+    auto elemTy = ctx.getLLVMType(elementType);
+
+    // Evaluate bounds
+    auto loVal = lowerBound->codegen(ctx);
+    auto hiVal = upperBound->codegen(ctx);
+    if (!loVal || !hiVal) return nullptr;
+
+    long long lo = 0, hi = 0;
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(loVal)) {
+        lo = ci->getSExtValue();
+    }
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(hiVal)) {
+        hi = ci->getSExtValue();
+    }
+
+    long long size = hi - lo + 1;
+    if (size <= 0) size = 1;
+
+    auto arrTy = llvm::ArrayType::get(elemTy, size);
+    auto func = ctx.builder->GetInsertBlock()->getParent();
+    auto alloca = ctx.createEntryBlockAlloca(func, name, arrTy);
+
+    // Zero-initialize the array
+    ctx.builder->CreateStore(llvm::Constant::getNullValue(arrTy), alloca);
+
+    // Store in arrays map
+    ArrayInfo info;
+    info.alloca = alloca;
+    info.elementType = elemTy;
+    info.lowerBound = lo;
+    info.size = size;
+    ctx.arrays[name] = info;
+
+    return alloca;
+}
+
+llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
+    auto ait = ctx.arrays.find(name);
+    if (ait == ctx.arrays.end()) {
+        std::cerr << "Error: unknown array '" << name << "'\n";
+        return nullptr;
+    }
+    auto& info = ait->second;
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+
+    auto idxVal = index->codegen(ctx);
+    if (!idxVal) return nullptr;
+
+    // Compute adjusted index = index - lowerBound
+    auto adjusted = ctx.builder->CreateSub(idxVal,
+        llvm::ConstantInt::get(i64Ty, info.lowerBound), "adj_idx");
+
+    auto arrTy = llvm::ArrayType::get(info.elementType, info.size);
+    auto gep = ctx.builder->CreateGEP(arrTy, info.alloca,
+        {llvm::ConstantInt::get(i64Ty, 0), adjusted}, "arr_elem");
+
+    auto val = value->codegen(ctx);
+    if (!val) return nullptr;
+
+    // Type convert if needed
+    if (val->getType() != info.elementType) {
+        if (info.elementType->isDoubleTy() && val->getType()->isIntegerTy())
+            val = ctx.builder->CreateSIToFP(val, info.elementType);
+        else if (info.elementType->isIntegerTy(64) && val->getType()->isDoubleTy())
+            val = ctx.builder->CreateFPToSI(val, info.elementType);
+    }
+
+    ctx.builder->CreateStore(val, gep);
+    return val;
 }
 
 llvm::Value* RefDeclaration::codegen(CodeGenContext& ctx) {
@@ -555,6 +834,13 @@ llvm::Value* Assignment::codegen(CodeGenContext& ctx) {
     if (name == ctx.currentProcName && ctx.returnValueAlloca) {
         auto val = value->codegen(ctx);
         if (!val) return nullptr;
+        auto destTy = ctx.returnValueAlloca->getAllocatedType();
+        if (val->getType() != destTy) {
+            if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
+                val = ctx.builder->CreateSIToFP(val, destTy);
+            else if (destTy->isIntegerTy(64) && val->getType()->isDoubleTy())
+                val = ctx.builder->CreateFPToSI(val, destTy);
+        }
         ctx.builder->CreateStore(val, ctx.returnValueAlloca);
         return val;
     }
@@ -563,7 +849,6 @@ llvm::Value* Assignment::codegen(CodeGenContext& ctx) {
     if (it != ctx.locals.end()) {
         auto val = value->codegen(ctx);
         if (!val) return nullptr;
-        // Type convert if needed
         auto destTy = it->second->getAllocatedType();
         if (val->getType() != destTy) {
             if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
@@ -653,6 +938,55 @@ llvm::Value* ExprStatement::codegen(CodeGenContext& ctx) {
     return expr->codegen(ctx);
 }
 
+// ---- Labels and GOTO ----
+
+llvm::Value* LabelDeclaration::codegen(CodeGenContext& ctx) {
+    // Pre-create the basic blocks for each declared label
+    for (auto& lbl : labels) {
+        ctx.getOrCreateLabel(lbl);
+    }
+    return nullptr;
+}
+
+llvm::Value* LabeledStatement::codegen(CodeGenContext& ctx) {
+    auto func = ctx.builder->GetInsertBlock()->getParent();
+    auto labelBB = ctx.getOrCreateLabel(label);
+
+    // If current block has no terminator, branch to the label block
+    auto curBB = ctx.builder->GetInsertBlock();
+    if (!curBB->getTerminator()) {
+        ctx.builder->CreateBr(labelBB);
+    }
+
+    // Add label block to function if not already added
+    if (!labelBB->getParent()) {
+        func->insert(func->end(), labelBB);
+    }
+    ctx.builder->SetInsertPoint(labelBB);
+
+    // Codegen the labeled statement
+    if (statement) {
+        statement->codegen(ctx);
+    }
+    return nullptr;
+}
+
+llvm::Value* GotoStatement::codegen(CodeGenContext& ctx) {
+    auto func = ctx.builder->GetInsertBlock()->getParent();
+    auto targetBB = ctx.getOrCreateLabel(label);
+
+    // Create unconditional branch to the target
+    ctx.builder->CreateBr(targetBB);
+
+    // Create a new basic block for any dead code that follows
+    auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_goto", func);
+    ctx.builder->SetInsertPoint(afterBB);
+
+    return nullptr;
+}
+
+// ---- Control flow ----
+
 llvm::Value* IfStatement::codegen(CodeGenContext& ctx) {
     auto condV = condition->codegen(ctx);
     if (!condV) return nullptr;
@@ -670,13 +1004,15 @@ llvm::Value* IfStatement::codegen(CodeGenContext& ctx) {
 
     ctx.builder->SetInsertPoint(thenBB);
     thenBranch->codegen(ctx);
-    ctx.builder->CreateBr(mergeBB);
+    if (!ctx.builder->GetInsertBlock()->getTerminator())
+        ctx.builder->CreateBr(mergeBB);
 
     if (elseBranch) {
         func->insert(func->end(), elseBB);
         ctx.builder->SetInsertPoint(elseBB);
         elseBranch->codegen(ctx);
-        ctx.builder->CreateBr(mergeBB);
+        if (!ctx.builder->GetInsertBlock()->getTerminator())
+            ctx.builder->CreateBr(mergeBB);
     }
 
     func->insert(func->end(), mergeBB);
@@ -699,7 +1035,8 @@ llvm::Value* WhileStatement::codegen(CodeGenContext& ctx) {
     func->insert(func->end(), bodyBB);
     ctx.builder->SetInsertPoint(bodyBB);
     body->codegen(ctx);
-    ctx.builder->CreateBr(condBB);
+    if (!ctx.builder->GetInsertBlock()->getTerminator())
+        ctx.builder->CreateBr(condBB);
 
     func->insert(func->end(), afterBB);
     ctx.builder->SetInsertPoint(afterBB);
@@ -759,7 +1096,6 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
 
     // Build parameter types
     std::vector<llvm::Type*> paramTypes;
-    // If inside a class, first param is 'this' pointer
     bool isMethod = !ctx.currentClassName.empty();
     if (isMethod) {
         paramTypes.push_back(ctx.getRefType());
@@ -786,11 +1122,15 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto savedRetAlloca = ctx.returnValueAlloca;
     auto savedThis = ctx.currentThis;
     auto savedClassName = ctx.currentClassName;
+    auto savedArrays = ctx.arrays;
+    auto savedLabelBlocks = ctx.labelBlocks;
 
     // Create entry block
     auto entry = llvm::BasicBlock::Create(*ctx.llvmContext, "entry", func);
     ctx.builder->SetInsertPoint(entry);
     ctx.locals.clear();
+    ctx.arrays.clear();
+    ctx.labelBlocks.clear();
 
     // Set up parameters
     auto argIt = func->arg_begin();
@@ -825,11 +1165,13 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     body->codegen(ctx);
 
     // Return
-    if (hasReturnType) {
-        auto retVal = ctx.builder->CreateLoad(retTy, ctx.returnValueAlloca, "retval");
-        ctx.builder->CreateRet(retVal);
-    } else {
-        ctx.builder->CreateRetVoid();
+    if (!ctx.builder->GetInsertBlock()->getTerminator()) {
+        if (hasReturnType) {
+            auto retVal = ctx.builder->CreateLoad(retTy, ctx.returnValueAlloca, "retval");
+            ctx.builder->CreateRet(retVal);
+        } else {
+            ctx.builder->CreateRetVoid();
+        }
     }
 
     llvm::verifyFunction(*func, &llvm::errs());
@@ -842,6 +1184,8 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     ctx.returnValueAlloca = savedRetAlloca;
     ctx.currentThis = savedThis;
     ctx.currentClassName = savedClassName;
+    ctx.arrays = savedArrays;
+    ctx.labelBlocks = savedLabelBlocks;
 
     return func;
 }
@@ -865,7 +1209,7 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         auto pit = ctx.classes.find(parentName);
         if (pit != ctx.classes.end()) {
             for (auto& pf : pit->second.fields) {
-                if (pf.structIndex < 2) continue; // skip classId and coro
+                if (pf.structIndex < 2) continue;
                 ci.fields.push_back(pf);
                 ci.fields.back().structIndex = (int)fieldTypes.size();
                 fieldTypes.push_back(pit->second.structType->getElementType(pf.structIndex));
@@ -888,12 +1232,8 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
     // Create struct type
     ci.structType = llvm::StructType::create(*ctx.llvmContext, fieldTypes, name);
 
-    // Register class before processing body (so body can reference the class)
+    // Register class before processing body
     ctx.classes[name] = ci;
-
-    // Body VarDeclarations/RefDeclarations are treated as local variables
-    // in the body function (they live on the coroutine stack and persist
-    // across DETACH/RESUME). They are NOT struct fields.
 
     // Save state
     auto savedBlock = ctx.builder->GetInsertBlock();
@@ -903,15 +1243,16 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
     auto savedRefTypes = ctx.refTypes;
     auto savedProcName = ctx.currentProcName;
     auto savedRetAlloca = ctx.returnValueAlloca;
+    auto savedArrays = ctx.arrays;
+    auto savedLabelBlocks = ctx.labelBlocks;
 
     ctx.currentClassName = name;
     ctx.currentProcName = "";
     ctx.returnValueAlloca = nullptr;
 
-    // Second pass: compile procedure declarations as methods
+    // First pass: compile procedure declarations as methods
     for (auto& stmt : bodyStmts) {
         if (dynamic_cast<ProcedureDecl*>(stmt.get())) {
-            // Temporarily set class context for method compilation
             stmt->codegen(ctx);
         }
     }
@@ -931,6 +1272,8 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
     ctx.currentThis->setName("this");
     ctx.locals.clear();
     ctx.refTypes.clear();
+    ctx.arrays.clear();
+    ctx.labelBlocks.clear();
 
     // Set up ref types for REF fields
     for (auto& fi : ctx.classes[name].fields) {
@@ -939,14 +1282,15 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         }
     }
 
-    // Execute body statements (VarDecls create local allocas on the coroutine stack,
-    // ProcedureDecls were already compiled above)
+    // Execute body statements (skip ProcedureDecls already compiled)
     for (auto& stmt : bodyStmts) {
         if (dynamic_cast<ProcedureDecl*>(stmt.get())) continue;
         stmt->codegen(ctx);
     }
 
-    ctx.builder->CreateRetVoid();
+    if (!ctx.builder->GetInsertBlock()->getTerminator()) {
+        ctx.builder->CreateRetVoid();
+    }
     llvm::verifyFunction(*bodyFunc, &llvm::errs());
 
     // Restore state
@@ -957,6 +1301,8 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
     ctx.refTypes = savedRefTypes;
     ctx.currentProcName = savedProcName;
     ctx.returnValueAlloca = savedRetAlloca;
+    ctx.arrays = savedArrays;
+    ctx.labelBlocks = savedLabelBlocks;
 
     return nullptr;
 }
@@ -996,7 +1342,8 @@ llvm::Value* InspectStatement::codegen(CodeGenContext& ctx) {
 
         ctx.builder->SetInsertPoint(whenBB);
         wc.body->codegen(ctx);
-        ctx.builder->CreateBr(mergeBB);
+        if (!ctx.builder->GetInsertBlock()->getTerminator())
+            ctx.builder->CreateBr(mergeBB);
 
         func->insert(func->end(), nextBB);
         ctx.builder->SetInsertPoint(nextBB);
@@ -1006,7 +1353,8 @@ llvm::Value* InspectStatement::codegen(CodeGenContext& ctx) {
     if (otherwiseBody) {
         otherwiseBody->codegen(ctx);
     }
-    ctx.builder->CreateBr(mergeBB);
+    if (!ctx.builder->GetInsertBlock()->getTerminator())
+        ctx.builder->CreateBr(mergeBB);
 
     func->insert(func->end(), mergeBB);
     ctx.builder->SetInsertPoint(mergeBB);
@@ -1046,7 +1394,6 @@ llvm::Value* ResumeStatement::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* CallStatement::codegen(CodeGenContext& ctx) {
-    // CALL is treated as RESUME for now
     auto obj = object->codegen(ctx);
     if (!obj) return nullptr;
 
@@ -1074,11 +1421,22 @@ llvm::Value* OutRealStatement::codegen(CodeGenContext& ctx) {
     if (!val) return nullptr;
     auto dec = decimals->codegen(ctx);
     if (!dec) return nullptr;
-    // Use a fixed format for now: %.*f
     auto fmt = ctx.builder->CreateGlobalString("%.*f", "realfmt");
-    // dec is the precision
     auto decI32 = ctx.builder->CreateTrunc(dec, llvm::Type::getInt32Ty(*ctx.llvmContext), "dec32");
     return ctx.builder->CreateCall(ctx.printfFunc, {fmt, decI32, val});
+}
+
+llvm::Value* OutFixStatement::codegen(CodeGenContext& ctx) {
+    auto val = value->codegen(ctx);
+    if (!val) return nullptr;
+    auto dec = decimals->codegen(ctx);
+    if (!dec) return nullptr;
+    auto w = width->codegen(ctx);
+    if (!w) return nullptr;
+    auto fmt = ctx.builder->CreateGlobalString("%*.*f", "fixfmt");
+    auto widthI32 = ctx.builder->CreateTrunc(w, llvm::Type::getInt32Ty(*ctx.llvmContext), "width32");
+    auto decI32 = ctx.builder->CreateTrunc(dec, llvm::Type::getInt32Ty(*ctx.llvmContext), "dec32");
+    return ctx.builder->CreateCall(ctx.printfFunc, {fmt, widthI32, decI32, val});
 }
 
 llvm::Value* OutTextStatement::codegen(CodeGenContext& ctx) {
@@ -1091,6 +1449,11 @@ llvm::Value* OutTextStatement::codegen(CodeGenContext& ctx) {
 llvm::Value* OutImageStatement::codegen(CodeGenContext& ctx) {
     auto nl = ctx.builder->CreateGlobalString("", "newline");
     return ctx.builder->CreateCall(ctx.putsFunc, {nl});
+}
+
+llvm::Value* InImageStatement::codegen(CodeGenContext& ctx) {
+    // No-op for now
+    return nullptr;
 }
 
 // ---- Program ----

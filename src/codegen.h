@@ -19,17 +19,23 @@ struct ClassInfo {
     std::string parentName;
     int classId;
     llvm::StructType* structType;
-    // All fields in order: (name, type_enum, fieldIndex_in_struct)
     struct FieldInfo {
         std::string name;
         int type; // VarDeclaration::Type or -1 for REF
-        std::string refClassName; // if type == -1
-        int structIndex; // index in the LLVM struct
+        std::string refClassName;
+        int structIndex;
     };
     std::vector<FieldInfo> fields;
     std::map<std::string, llvm::Function*> methods;
-    llvm::Function* bodyFunc; // class body function for coroutine
-    int coroFieldIndex; // index of coroutine ptr in struct (always 1)
+    llvm::Function* bodyFunc;
+    int coroFieldIndex;
+};
+
+struct ArrayInfo {
+    llvm::AllocaInst* alloca;
+    llvm::Type* elementType;
+    long long lowerBound;
+    long long size;
 };
 
 class CodeGenContext {
@@ -41,6 +47,12 @@ public:
     // Scope: variable name -> alloca
     std::map<std::string, llvm::AllocaInst*> locals;
 
+    // Array info
+    std::map<std::string, ArrayInfo> arrays;
+
+    // Label -> basic block (within current function)
+    std::map<std::string, llvm::BasicBlock*> labelBlocks;
+
     // Class registry
     std::map<std::string, ClassInfo> classes;
     int nextClassId = 1;
@@ -48,7 +60,7 @@ public:
     // Current context for class body / procedure codegen
     llvm::Value* currentThis = nullptr;
     std::string currentClassName;
-    std::string currentProcName; // for return-by-name assignment
+    std::string currentProcName;
     llvm::AllocaInst* returnValueAlloca = nullptr;
 
     // REF type info: variable name -> class name
@@ -57,7 +69,8 @@ public:
     // Runtime functions (C library)
     llvm::Function* printfFunc = nullptr;
     llvm::Function* putsFunc = nullptr;
-    llvm::Function* sprintfFunc = nullptr;
+    llvm::Function* scanfFunc = nullptr;
+    llvm::Function* getcharFunc = nullptr;
 
     // Simula runtime functions
     llvm::Function* allocFunc = nullptr;
@@ -65,6 +78,10 @@ public:
     llvm::Function* coroStartFunc = nullptr;
     llvm::Function* coroDetachFunc = nullptr;
     llvm::Function* coroResumeFunc = nullptr;
+    llvm::Function* blanksFunc = nullptr;
+    llvm::Function* textCopyFunc = nullptr;
+    llvm::Function* textConcatFunc = nullptr;
+    llvm::Function* textLengthFunc = nullptr;
 
     CodeGenContext();
 
@@ -87,9 +104,10 @@ public:
     int getFieldIndex(const std::string& className, const std::string& fieldName);
     llvm::Type* getFieldLLVMType(const std::string& className, const std::string& fieldName);
     std::string resolveRefType(const std::string& varName);
-
-    // Collect all class IDs for a class and its parents (for IN operator)
     std::set<int> getClassIdSet(const std::string& className);
+
+    // Label helpers
+    llvm::BasicBlock* getOrCreateLabel(const std::string& name);
 };
 
 #endif // ESIMC_CODEGEN_H
