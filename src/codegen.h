@@ -29,13 +29,16 @@ struct ClassInfo {
     std::map<std::string, llvm::Function*> methods;
     llvm::Function* bodyFunc;
     int coroFieldIndex;
+    // Array metadata: name -> {lowerBound, size}
+    std::map<std::string, std::pair<long long, long long>> arrayMeta;
 };
 
 struct ArrayInfo {
-    llvm::AllocaInst* alloca;
+    llvm::Value* basePtr;    // pointer to start of array data (alloca or loaded ptr)
     llvm::Type* elementType;
     long long lowerBound;
     long long size;
+    bool isStackArray;       // true: basePtr is alloca of [N x T]; false: basePtr is ptr to T
 };
 
 class CodeGenContext {
@@ -114,6 +117,10 @@ public:
 
     // Label helpers
     llvm::BasicBlock* getOrCreateLabel(const std::string& name);
+
+    // Variable access: returns a pointer to the variable (alloca or GEP for class fields)
+    // and the LLVM type of the stored value. Returns {nullptr, nullptr} if not found.
+    std::pair<llvm::Value*, llvm::Type*> getVarPtr(const std::string& name);
 };
 
 #endif // ESIMC_CODEGEN_H

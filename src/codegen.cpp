@@ -41,6 +41,25 @@ llvm::BasicBlock* CodeGenContext::getOrCreateLabel(const std::string& name) {
     return bb;
 }
 
+std::pair<llvm::Value*, llvm::Type*> CodeGenContext::getVarPtr(const std::string& name) {
+    // Check local variables first
+    auto it = locals.find(name);
+    if (it != locals.end()) {
+        return {it->second, it->second->getAllocatedType()};
+    }
+    // Check class fields (accessed through currentThis)
+    if (currentThis && !currentClassName.empty()) {
+        int idx = getFieldIndex(currentClassName, name);
+        if (idx >= 0) {
+            auto& ci = classes[currentClassName];
+            auto gep = builder->CreateStructGEP(ci.structType, currentThis, idx, name + "_fptr");
+            auto fieldTy = ci.structType->getElementType(idx);
+            return {gep, fieldTy};
+        }
+    }
+    return {nullptr, nullptr};
+}
+
 std::map<std::string, llvm::AllocaInst*> CodeGenContext::saveScope() {
     return locals;
 }
@@ -384,12 +403,17 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         }
         auto idxVal = args[0]->codegen(ctx);
         if (!idxVal) return nullptr;
-        // Compute adjusted index = index - lowerBound
         auto adjusted = ctx.builder->CreateSub(idxVal,
             llvm::ConstantInt::get(i64Ty, info.lowerBound), "adj_idx");
-        auto gep = ctx.builder->CreateGEP(
-            llvm::ArrayType::get(info.elementType, info.size),
-            info.alloca, {llvm::ConstantInt::get(i64Ty, 0), adjusted}, "arr_elem");
+        llvm::Value* gep;
+        if (info.isStackArray) {
+            auto arrTy = llvm::ArrayType::get(info.elementType, info.size);
+            gep = ctx.builder->CreateGEP(arrTy, info.basePtr,
+                {llvm::ConstantInt::get(i64Ty, 0), adjusted}, "arr_elem");
+        } else {
+            gep = ctx.builder->CreateGEP(info.elementType, info.basePtr,
+                adjusted, "arr_elem");
+        }
         return ctx.builder->CreateLoad(info.elementType, gep, "arr_val");
     }
 
@@ -947,10 +971,11 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
 
     // Store in arrays map
     ArrayInfo info;
-    info.alloca = alloca;
+    info.basePtr = alloca;
     info.elementType = elemTy;
     info.lowerBound = lo;
     info.size = size;
+    info.isStackArray = true;
     ctx.arrays[name] = info;
 
     return alloca;
@@ -972,9 +997,15 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
     auto adjusted = ctx.builder->CreateSub(idxVal,
         llvm::ConstantInt::get(i64Ty, info.lowerBound), "adj_idx");
 
-    auto arrTy = llvm::ArrayType::get(info.elementType, info.size);
-    auto gep = ctx.builder->CreateGEP(arrTy, info.alloca,
-        {llvm::ConstantInt::get(i64Ty, 0), adjusted}, "arr_elem");
+    llvm::Value* gep;
+    if (info.isStackArray) {
+        auto arrTy = llvm::ArrayType::get(info.elementType, info.size);
+        gep = ctx.builder->CreateGEP(arrTy, info.basePtr,
+            {llvm::ConstantInt::get(i64Ty, 0), adjusted}, "arr_elem");
+    } else {
+        gep = ctx.builder->CreateGEP(info.elementType, info.basePtr,
+            adjusted, "arr_elem");
+    }
 
     auto val = value->codegen(ctx);
     if (!val) return nullptr;
@@ -1223,12 +1254,12 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
     auto func = ctx.builder->GetInsertBlock()->getParent();
 
     auto startV = start->codegen(ctx);
-    auto it = ctx.locals.find(var);
-    if (it == ctx.locals.end()) {
+    auto [varPtr, varTy] = ctx.getVarPtr(var);
+    if (!varPtr) {
         std::cerr << "Error: FOR variable '" << var << "' not declared\n";
         return nullptr;
     }
-    ctx.builder->CreateStore(startV, it->second);
+    ctx.builder->CreateStore(startV, varPtr);
 
     auto condBB = llvm::BasicBlock::Create(*ctx.llvmContext, "forcond", func);
     auto bodyBB = llvm::BasicBlock::Create(*ctx.llvmContext, "forbody");
@@ -1237,8 +1268,7 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
     ctx.builder->CreateBr(condBB);
     ctx.builder->SetInsertPoint(condBB);
 
-    auto curVal = ctx.builder->CreateLoad(it->second->getAllocatedType(),
-                                           it->second, var);
+    auto curVal = ctx.builder->CreateLoad(varTy, varPtr, var);
     auto limitV = limit->codegen(ctx);
     auto condV = ctx.builder->CreateICmpSLE(curVal, limitV, "forcmp");
     ctx.builder->CreateCondBr(condV, bodyBB, afterBB);
@@ -1247,11 +1277,12 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
     ctx.builder->SetInsertPoint(bodyBB);
     body->codegen(ctx);
 
-    auto curVal2 = ctx.builder->CreateLoad(it->second->getAllocatedType(),
-                                            it->second, var);
+    // Re-get the pointer (class field GEP may have been invalidated)
+    auto [varPtr2, varTy2] = ctx.getVarPtr(var);
+    auto curVal2 = ctx.builder->CreateLoad(varTy2, varPtr2, var);
     auto stepV = step->codegen(ctx);
     auto nextVal = ctx.builder->CreateAdd(curVal2, stepV, "forstep");
-    ctx.builder->CreateStore(nextVal, it->second);
+    ctx.builder->CreateStore(nextVal, varPtr2);
     ctx.builder->CreateBr(condBB);
 
     func->insert(func->end(), afterBB);
@@ -1337,6 +1368,35 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         ctx.returnValueAlloca = nullptr;
     }
 
+    // If this is a method, load array pointers from struct fields into ctx.arrays
+    if (isMethod && ctx.currentThis) {
+        auto& ci = ctx.classes[ctx.currentClassName];
+        auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+        for (auto& fi : ci.fields) {
+            if (fi.structIndex >= 2 && ci.structType->getElementType(fi.structIndex)->isPointerTy()
+                && fi.type != -1) {
+                // Array field — load the pointer and register in ctx.arrays
+                auto gep = ctx.builder->CreateStructGEP(ci.structType, ctx.currentThis,
+                    fi.structIndex, fi.name + "_aptr");
+                auto arrPtr = ctx.builder->CreateLoad(ptrTy, gep, fi.name + "_arr");
+                ArrayInfo ainfo;
+                ainfo.basePtr = arrPtr;
+                ainfo.elementType = ctx.getLLVMType(fi.type);
+                ainfo.isStackArray = false;
+                // Get bounds from class metadata
+                auto mit = ci.arrayMeta.find(fi.name);
+                if (mit != ci.arrayMeta.end()) {
+                    ainfo.lowerBound = mit->second.first;
+                    ainfo.size = mit->second.second;
+                } else {
+                    ainfo.lowerBound = 0;
+                    ainfo.size = 0;
+                }
+                ctx.arrays[fi.name] = ainfo;
+            }
+        }
+    }
+
     // Generate body
     body->codegen(ctx);
 
@@ -1405,6 +1465,46 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         fieldTypes.push_back(ctx.getLLVMType(p.type));
     }
 
+    // Scan body for VarDeclarations and RefDeclarations — add as struct fields
+    for (auto& stmt : bodyStmts) {
+        if (auto* vd = dynamic_cast<VarDeclaration*>(stmt.get())) {
+            ClassInfo::FieldInfo fi;
+            fi.name = vd->name;
+            fi.type = vd->type;
+            fi.structIndex = (int)fieldTypes.size();
+            ci.fields.push_back(fi);
+            fieldTypes.push_back(ctx.getLLVMType(vd->type));
+        } else if (auto* rd = dynamic_cast<RefDeclaration*>(stmt.get())) {
+            ClassInfo::FieldInfo fi;
+            fi.name = rd->varName;
+            fi.type = -1;
+            fi.refClassName = rd->className;
+            fi.structIndex = (int)fieldTypes.size();
+            ci.fields.push_back(fi);
+            fieldTypes.push_back(ctx.getRefType());
+        } else if (auto* ad = dynamic_cast<ArrayDeclaration*>(stmt.get())) {
+            // Arrays in class bodies become pointer fields (allocated at NEW time)
+            ClassInfo::FieldInfo fi;
+            fi.name = ad->name;
+            fi.type = ad->elementType;
+            fi.structIndex = (int)fieldTypes.size();
+            ci.fields.push_back(fi);
+            fieldTypes.push_back(ctx.getRefType()); // pointer to array data
+        } else if (auto* cs = dynamic_cast<CompoundStmt*>(stmt.get())) {
+            // Multi-var declarations like "INTEGER a, b, c"
+            for (auto& inner : cs->statements) {
+                if (auto* vd2 = dynamic_cast<VarDeclaration*>(inner.get())) {
+                    ClassInfo::FieldInfo fi;
+                    fi.name = vd2->name;
+                    fi.type = vd2->type;
+                    fi.structIndex = (int)fieldTypes.size();
+                    ci.fields.push_back(fi);
+                    fieldTypes.push_back(ctx.getLLVMType(vd2->type));
+                }
+            }
+        }
+    }
+
     // Create struct type
     ci.structType = llvm::StructType::create(*ctx.llvmContext, fieldTypes, name);
 
@@ -1458,9 +1558,37 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         }
     }
 
-    // Execute body statements (skip ProcedureDecls already compiled)
+    // Execute body statements
+    // Skip: ProcedureDecls (compiled above), VarDeclarations/RefDeclarations (struct fields),
+    //        CompoundStmt of all VarDecls (multi-var decls as struct fields)
+    // DO execute: ArrayDeclarations (allocate and store pointer in struct field),
+    //             LabelDeclarations, executable statements
     for (auto& stmt : bodyStmts) {
         if (dynamic_cast<ProcedureDecl*>(stmt.get())) continue;
+        if (dynamic_cast<VarDeclaration*>(stmt.get())) continue;
+        if (dynamic_cast<RefDeclaration*>(stmt.get())) continue;
+        if (auto* cs = dynamic_cast<CompoundStmt*>(stmt.get())) {
+            bool allVarDecl = true;
+            for (auto& s : cs->statements) {
+                if (!dynamic_cast<VarDeclaration*>(s.get())) { allVarDecl = false; break; }
+            }
+            if (allVarDecl) continue;
+        }
+        if (auto* ad = dynamic_cast<ArrayDeclaration*>(stmt.get())) {
+            // Execute the array declaration (creates local alloca + ctx.arrays entry)
+            ad->codegen(ctx);
+            // Store the array pointer in the struct field so methods can find it
+            int idx = ctx.getFieldIndex(name, ad->name);
+            if (idx >= 0) {
+                auto& info = ctx.arrays[ad->name];
+                auto gep = ctx.builder->CreateStructGEP(ctx.classes[name].structType,
+                    ctx.currentThis, idx, ad->name + "_fptr");
+                ctx.builder->CreateStore(info.basePtr, gep);
+                // Save array metadata for methods
+                ctx.classes[name].arrayMeta[ad->name] = {info.lowerBound, info.size};
+            }
+            continue;
+        }
         stmt->codegen(ctx);
     }
 
