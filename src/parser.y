@@ -142,7 +142,14 @@ block
 
 end_names
     : /* empty */
-    | end_names T_IDENT  /* silently consume identifiers after END */
+    | end_names T_IDENT  /* silently consume tokens after END */
+    | end_names T_FOR
+    | end_names T_WHILE
+    | end_names T_IF
+    | end_names T_DO
+    | end_names T_INSPECT
+    | end_names T_CLASS
+    | end_names T_PROCEDURE
     ;
 
 stmt_list
@@ -155,6 +162,7 @@ stmt_list
         $1->push_back(StmtPtr($2));
         $$ = $1;
       }
+    | stmt_list T_SEMI { $$ = $1; } /* empty statement (double semicolons) */
     ;
 
 statement
@@ -440,6 +448,7 @@ class_decl
 class_body
     : T_BEGIN stmt_list T_END end_names { $$ = $2; }
     | virtual_spec class_body { $$ = $2; }
+    | /* empty — class with no body */ { $$ = new StmtList(); }
     ;
 
 /* ---- VIRTUAL specification (parsed and ignored) ---- */
@@ -478,6 +487,12 @@ inspect_stmt
     | T_INSPECT expr when_clauses T_OTHERWISE statement {
         $$ = new InspectStatement(ExprPtr($2), std::move(*$3), StmtPtr($5));
         delete $3;
+      }
+    | T_INSPECT expr T_DO statement {
+        /* INSPECT ref DO stmt — execute stmt with ref in scope */
+        auto clauses = new std::vector<InspectStatement::WhenClause>();
+        $$ = new InspectStatement(ExprPtr($2), std::move(*clauses), StmtPtr($4));
+        delete clauses;
       }
     ;
 
@@ -584,9 +599,24 @@ expr_stmt
             $$ = new RefAssignment(ident->name, ExprPtr($3));
             delete $1;
         } else {
-            yyerror("invalid left-hand side of reference assignment");
-            $$ = new ExprStatement(ExprPtr($1));
-            delete $3;
+            ProcedureCall* call = dynamic_cast<ProcedureCall*>($1);
+            if (call) {
+                /* a(i) :- expr  ->  ArrayAssignment (ref-assign to array element) */
+                ExprPtr idx(call->args.empty() ? nullptr : call->args[0].release());
+                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3));
+                delete $1;
+            } else {
+                MemberAccess* ma = dynamic_cast<MemberAccess*>($1);
+                if (ma) {
+                    $$ = new MemberAssignment(ExprPtr(ma->object.release()),
+                                              ma->member, ExprPtr($3));
+                    delete $1;
+                } else {
+                    yyerror("invalid left-hand side of reference assignment");
+                    $$ = new ExprStatement(ExprPtr($1));
+                    delete $3;
+                }
+            }
         }
       }
     ;

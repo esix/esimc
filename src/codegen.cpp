@@ -555,6 +555,35 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         return ctx.builder->CreateCall(ctx.textLengthFunc, {val}, "length");
     }
 
+    // UPPERBOUND(arr, dim) / LOWERBOUND(arr, dim)
+    if (name == "upperbound" || name == "lowerbound") {
+        if (args.empty()) return nullptr;
+        // First arg should be an identifier naming an array
+        if (auto* id = dynamic_cast<Identifier*>(args[0].get())) {
+            auto ait2 = ctx.arrays.find(id->name);
+            if (ait2 != ctx.arrays.end()) {
+                auto& info = ait2->second;
+                if (name == "lowerbound") {
+                    auto loIt = ctx.locals.find(id->name + "__lo");
+                    if (loIt != ctx.locals.end())
+                        return ctx.builder->CreateLoad(i64Ty, loIt->second, "lo");
+                    return llvm::ConstantInt::get(i64Ty, info.lowerBound);
+                } else {
+                    auto loIt = ctx.locals.find(id->name + "__lo");
+                    llvm::Value* lo;
+                    if (loIt != ctx.locals.end())
+                        lo = ctx.builder->CreateLoad(i64Ty, loIt->second, "lo");
+                    else
+                        lo = llvm::ConstantInt::get(i64Ty, info.lowerBound);
+                    return ctx.builder->CreateAdd(lo,
+                        llvm::ConstantInt::get(i64Ty, info.size > 0 ? info.size - 1 : 0), "hi");
+                }
+            }
+        }
+        std::cerr << "Error: cannot determine array bounds\n";
+        return llvm::ConstantInt::get(i64Ty, 0);
+    }
+
     // OUTCHAR(ch) — print a single character
     if (name == "outchar") {
         if (args.empty()) return nullptr;
@@ -1488,6 +1517,14 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         ctx.builder->CreateStore(&*argIt, alloca);
         ctx.locals[p.name] = alloca;
         ++argIt;
+        // For TEXT parameters, create position tracking
+        if (p.type == VarDeclaration::TEXT) {
+            auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+            auto posAlloca = ctx.createEntryBlockAlloca(func, p.name + "__pos", i64Ty);
+            ctx.builder->CreateStore(llvm::ConstantInt::get(i64Ty, 0), posAlloca);
+            ctx.locals[p.name + "__pos"] = posAlloca;
+            ctx.textVars.insert(p.name);
+        }
     }
 
     // Set up return variable for typed procedures
