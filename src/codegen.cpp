@@ -437,8 +437,15 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         }
         auto idxVal = args[0]->codegen(ctx);
         if (!idxVal) return nullptr;
-        auto adjusted = ctx.builder->CreateSub(idxVal,
-            llvm::ConstantInt::get(i64Ty, info.lowerBound), "adj_idx");
+        // Compute adjusted index: index - lowerBound
+        llvm::Value* loBound;
+        auto loIt = ctx.locals.find(name + "__lo");
+        if (loIt != ctx.locals.end()) {
+            loBound = ctx.builder->CreateLoad(i64Ty, loIt->second, "lo");
+        } else {
+            loBound = llvm::ConstantInt::get(i64Ty, info.lowerBound);
+        }
+        auto adjusted = ctx.builder->CreateSub(idxVal, loBound, "adj_idx");
         llvm::Value* gep;
         if (info.isStackArray) {
             auto arrTy = llvm::ArrayType::get(info.elementType, info.size);
@@ -1002,6 +1009,7 @@ llvm::Value* VarDeclaration::codegen(CodeGenContext& ctx) {
 
 llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
     auto elemTy = ctx.getLLVMType(elementType);
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
 
     // Evaluate bounds
     auto loVal = lowerBound->codegen(ctx);
@@ -1009,33 +1017,64 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
     if (!loVal || !hiVal) return nullptr;
 
     long long lo = 0, hi = 0;
-    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(loVal)) {
-        lo = ci->getSExtValue();
+    bool constBounds = false;
+    if (auto* loCI = llvm::dyn_cast<llvm::ConstantInt>(loVal)) {
+        if (auto* hiCI = llvm::dyn_cast<llvm::ConstantInt>(hiVal)) {
+            lo = loCI->getSExtValue();
+            hi = hiCI->getSExtValue();
+            constBounds = true;
+        }
     }
-    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(hiVal)) {
-        hi = ci->getSExtValue();
+
+    if (constBounds) {
+        long long size = hi - lo + 1;
+        if (size <= 0) size = 1;
+
+        auto arrTy = llvm::ArrayType::get(elemTy, size);
+        auto func = ctx.builder->GetInsertBlock()->getParent();
+        auto alloca = ctx.createEntryBlockAlloca(func, name, arrTy);
+        ctx.builder->CreateStore(llvm::Constant::getNullValue(arrTy), alloca);
+
+        ArrayInfo info;
+        info.basePtr = alloca;
+        info.elementType = elemTy;
+        info.lowerBound = lo;
+        info.size = size;
+        info.isStackArray = true;
+        ctx.arrays[name] = info;
+        return alloca;
+    } else {
+        // Dynamic bounds: heap-allocate via simula_alloc
+        auto sizeVal = ctx.builder->CreateAdd(
+            ctx.builder->CreateSub(hiVal, loVal, "range"),
+            llvm::ConstantInt::get(i64Ty, 1), "arrsize");
+        auto elemSize = ctx.module->getDataLayout().getTypeAllocSize(elemTy);
+        auto byteSize = ctx.builder->CreateMul(sizeVal,
+            llvm::ConstantInt::get(i64Ty, elemSize), "bytes");
+        auto ptr = ctx.builder->CreateCall(ctx.allocFunc, {byteSize}, name + "_data");
+
+        // Store pointer in a local alloca
+        auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+        auto func = ctx.builder->GetInsertBlock()->getParent();
+        auto alloca = ctx.createEntryBlockAlloca(func, name, ptrTy);
+        ctx.builder->CreateStore(ptr, alloca);
+
+        // Store lower bound for index adjustment
+        // For dynamic bounds, store loVal in a separate alloca
+        auto loAlloca = ctx.createEntryBlockAlloca(func, name + "__lo", i64Ty);
+        ctx.builder->CreateStore(loVal, loAlloca);
+
+        ArrayInfo info;
+        info.basePtr = ptr;
+        info.elementType = elemTy;
+        info.lowerBound = 0; // will use dynamic adjustment
+        info.size = 0;
+        info.isStackArray = false;
+        ctx.arrays[name] = info;
+        // Store lo alloca name for dynamic index adjustment
+        ctx.locals[name + "__lo"] = loAlloca;
+        return ptr;
     }
-
-    long long size = hi - lo + 1;
-    if (size <= 0) size = 1;
-
-    auto arrTy = llvm::ArrayType::get(elemTy, size);
-    auto func = ctx.builder->GetInsertBlock()->getParent();
-    auto alloca = ctx.createEntryBlockAlloca(func, name, arrTy);
-
-    // Zero-initialize the array
-    ctx.builder->CreateStore(llvm::Constant::getNullValue(arrTy), alloca);
-
-    // Store in arrays map
-    ArrayInfo info;
-    info.basePtr = alloca;
-    info.elementType = elemTy;
-    info.lowerBound = lo;
-    info.size = size;
-    info.isStackArray = true;
-    ctx.arrays[name] = info;
-
-    return alloca;
 }
 
 llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
@@ -1051,8 +1090,14 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
     if (!idxVal) return nullptr;
 
     // Compute adjusted index = index - lowerBound
-    auto adjusted = ctx.builder->CreateSub(idxVal,
-        llvm::ConstantInt::get(i64Ty, info.lowerBound), "adj_idx");
+    llvm::Value* loBound;
+    auto loIt = ctx.locals.find(name + "__lo");
+    if (loIt != ctx.locals.end()) {
+        loBound = ctx.builder->CreateLoad(i64Ty, loIt->second, "lo");
+    } else {
+        loBound = llvm::ConstantInt::get(i64Ty, info.lowerBound);
+    }
+    auto adjusted = ctx.builder->CreateSub(idxVal, loBound, "adj_idx");
 
     llvm::Value* gep;
     if (info.isStackArray) {

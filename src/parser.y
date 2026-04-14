@@ -71,7 +71,7 @@ static std::vector<ParamSpec> mergeParams(
 
 /* Keywords */
 %token T_BEGIN T_END
-%token T_INTEGER T_REAL T_BOOLEAN T_TEXT T_CHARACTER
+%token T_INTEGER T_REAL T_BOOLEAN T_TEXT T_CHARACTER T_SHORT T_LONG
 %token T_IF T_THEN T_ELSE
 %token T_WHILE T_DO
 %token T_FOR T_STEP T_UNTIL
@@ -127,8 +127,10 @@ static std::vector<ParamSpec> mergeParams(
 %%
 
 program
-    : block         { programRoot = new Program(StmtPtr($1)); }
-    | block T_DOT   { programRoot = new Program(StmtPtr($1)); }
+    : block             { programRoot = new Program(StmtPtr($1)); }
+    | block T_DOT       { programRoot = new Program(StmtPtr($1)); }
+    | block T_SEMI      { programRoot = new Program(StmtPtr($1)); }
+    | block T_SEMI T_DOT { programRoot = new Program(StmtPtr($1)); }
     ;
 
 block
@@ -184,11 +186,13 @@ statement
 /* ---- Type names ---- */
 
 type_name
-    : T_INTEGER   { $$ = VarDeclaration::INTEGER; }
-    | T_REAL      { $$ = VarDeclaration::REAL; }
-    | T_BOOLEAN   { $$ = VarDeclaration::BOOLEAN; }
-    | T_TEXT      { $$ = VarDeclaration::TEXT; }
-    | T_CHARACTER { $$ = VarDeclaration::CHARACTER; }
+    : T_INTEGER          { $$ = VarDeclaration::INTEGER; }
+    | T_SHORT T_INTEGER  { $$ = VarDeclaration::INTEGER; }
+    | T_LONG T_REAL      { $$ = VarDeclaration::REAL; }
+    | T_REAL             { $$ = VarDeclaration::REAL; }
+    | T_BOOLEAN          { $$ = VarDeclaration::BOOLEAN; }
+    | T_TEXT             { $$ = VarDeclaration::TEXT; }
+    | T_CHARACTER        { $$ = VarDeclaration::CHARACTER; }
     ;
 
 /* ---- Identifier list ---- */
@@ -224,6 +228,16 @@ declaration
     | type_name T_IDENT T_EQ expr {
         /* Initialized declaration: INTEGER x = 42 */
         $$ = new VarDeclaration((VarDeclaration::Type)$1, $2, ExprPtr($4));
+      }
+    | type_name T_IDENT T_EQ expr T_COMMA ident_list {
+        /* Initialized + more: INTEGER x = 42, y, z */
+        auto stmts = new StmtList();
+        stmts->push_back(StmtPtr(new VarDeclaration((VarDeclaration::Type)$1, $2, ExprPtr($4))));
+        for (auto& name : *$6) {
+            stmts->push_back(StmtPtr(new VarDeclaration((VarDeclaration::Type)$1, name)));
+        }
+        $$ = new CompoundStmt(std::move(*stmts));
+        delete stmts; delete $6;
       }
     | type_name T_IDENT T_ASSIGN expr {
         /* Initialized declaration: INTEGER x := 42 */

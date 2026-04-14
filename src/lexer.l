@@ -24,6 +24,8 @@
 "BOOLEAN"                       return T_BOOLEAN;
 "TEXT"                          return T_TEXT;
 "CHARACTER"                     return T_CHARACTER;
+"SHORT"                         return T_SHORT;
+"LONG"                          return T_LONG;
 "IF"                            return T_IF;
 "THEN"                          return T_THEN;
 "ELSE"                          return T_ELSE;
