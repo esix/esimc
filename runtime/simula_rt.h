@@ -19,6 +19,9 @@ char* simula_blanks(int64_t n);
 char* simula_text_copy(const char* s);
 char* simula_text_concat(const char* a, const char* b);
 int64_t simula_text_length(const char* s);
+char* simula_text_strip(const char* s);
+char* simula_text_sub(const char* s, int64_t start, int64_t len);
+int64_t simula_text_eq(const char* a, const char* b);
 
 /* Coroutine management */
 SimulaCoro* simula_coro_create(void);

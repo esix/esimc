@@ -236,3 +236,33 @@ int64_t simula_text_length(const char* s) {
     if (s == NULL) return 0;
     return (int64_t)strlen(s);
 }
+
+char* simula_text_strip(const char* s) {
+    if (s == NULL) return strdup("");
+    size_t len = strlen(s);
+    while (len > 0 && s[len - 1] == ' ') len--;
+    char* r = (char*)malloc(len + 1);
+    memcpy(r, s, len);
+    r[len] = '\0';
+    return r;
+}
+
+char* simula_text_sub(const char* s, int64_t start, int64_t len) {
+    /* start is 1-based */
+    if (s == NULL) return strdup("");
+    size_t slen = strlen(s);
+    int64_t idx = start - 1;
+    if (idx < 0) idx = 0;
+    if (idx >= (int64_t)slen) return strdup("");
+    if (idx + len > (int64_t)slen) len = (int64_t)slen - idx;
+    char* r = (char*)malloc((size_t)len + 1);
+    memcpy(r, s + idx, (size_t)len);
+    r[len] = '\0';
+    return r;
+}
+
+int64_t simula_text_eq(const char* a, const char* b) {
+    if (a == NULL && b == NULL) return 1;
+    if (a == NULL || b == NULL) return 0;
+    return strcmp(a, b) == 0 ? 1 : 0;
+}

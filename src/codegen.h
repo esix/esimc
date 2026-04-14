@@ -66,6 +66,9 @@ public:
     // REF type info: variable name -> class name
     std::map<std::string, std::string> refTypes;
 
+    // TEXT variables (have an associated __pos alloca)
+    std::set<std::string> textVars;
+
     // Runtime functions (C library)
     llvm::Function* printfFunc = nullptr;
     llvm::Function* putsFunc = nullptr;
@@ -82,6 +85,9 @@ public:
     llvm::Function* textCopyFunc = nullptr;
     llvm::Function* textConcatFunc = nullptr;
     llvm::Function* textLengthFunc = nullptr;
+    llvm::Function* textStripFunc = nullptr;
+    llvm::Function* textSubFunc = nullptr;
+    llvm::Function* textEqFunc = nullptr;
 
     CodeGenContext();
 

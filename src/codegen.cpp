@@ -157,6 +157,21 @@ void CodeGenContext::declareRuntimeFunctions() {
     textLengthFunc = llvm::Function::Create(
         llvm::FunctionType::get(i64Ty, {ptrTy}, false),
         llvm::Function::ExternalLinkage, "simula_text_length", module.get());
+
+    // simula_text_strip(ptr) -> ptr
+    textStripFunc = llvm::Function::Create(
+        llvm::FunctionType::get(ptrTy, {ptrTy}, false),
+        llvm::Function::ExternalLinkage, "simula_text_strip", module.get());
+
+    // simula_text_sub(ptr, i64, i64) -> ptr
+    textSubFunc = llvm::Function::Create(
+        llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty, i64Ty}, false),
+        llvm::Function::ExternalLinkage, "simula_text_sub", module.get());
+
+    // simula_text_eq(ptr, ptr) -> i64
+    textEqFunc = llvm::Function::Create(
+        llvm::FunctionType::get(i64Ty, {ptrTy, ptrTy}, false),
+        llvm::Function::ExternalLinkage, "simula_text_eq", module.get());
 }
 
 llvm::AllocaInst* CodeGenContext::createEntryBlockAlloca(
@@ -310,6 +325,16 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
             case GE:  return ctx.builder->CreateFCmpOGE(L, R, "getmp");
             case AND: case OR: case CONCAT: break;
         }
+    }
+
+    // Pointer (TEXT) comparison: use runtime string comparison
+    bool isPtr = L->getType()->isPointerTy() && R->getType()->isPointerTy();
+    if (isPtr && (op == EQ || op == NE)) {
+        auto eqVal = ctx.builder->CreateCall(ctx.textEqFunc, {L, R}, "texteq");
+        auto cmp = ctx.builder->CreateICmpNE(eqVal,
+            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), 0), "txtcmp");
+        if (op == NE) cmp = ctx.builder->CreateNot(cmp, "txtne");
+        return cmp;
     }
 
     switch (op) {
@@ -539,6 +564,50 @@ llvm::Value* NewExpression::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
+    // Check for TEXT variable member access first
+    if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
+        if (ctx.textVars.count(ident->name)) {
+            auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+            auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+            auto i8Ty = llvm::Type::getInt8Ty(*ctx.llvmContext);
+            auto dataAlloca = ctx.locals[ident->name];
+            auto posAlloca = ctx.locals[ident->name + "__pos"];
+            auto dataPtr = ctx.builder->CreateLoad(ptrTy, dataAlloca, "txtdata");
+
+            if (member == "more") {
+                auto pos = ctx.builder->CreateLoad(i64Ty, posAlloca, "pos");
+                auto len = ctx.builder->CreateCall(ctx.textLengthFunc, {dataPtr}, "len");
+                return ctx.builder->CreateICmpSLT(pos, len, "more");
+            }
+            if (member == "length") {
+                return ctx.builder->CreateCall(ctx.textLengthFunc, {dataPtr}, "len");
+            }
+            if (member == "pos") {
+                auto pos = ctx.builder->CreateLoad(i64Ty, posAlloca, "pos0");
+                return ctx.builder->CreateAdd(pos,
+                    llvm::ConstantInt::get(i64Ty, 1), "pos1"); // 0-based -> 1-based
+            }
+            if (member == "getchar") {
+                // Read char at pos, increment pos
+                auto pos = ctx.builder->CreateLoad(i64Ty, posAlloca, "pos");
+                auto charPtr = ctx.builder->CreateGEP(i8Ty, dataPtr, pos, "chptr");
+                auto ch = ctx.builder->CreateLoad(i8Ty, charPtr, "ch");
+                auto newPos = ctx.builder->CreateAdd(pos,
+                    llvm::ConstantInt::get(i64Ty, 1), "newpos");
+                ctx.builder->CreateStore(newPos, posAlloca);
+                return ch;
+            }
+            if (member == "strip") {
+                return ctx.builder->CreateCall(ctx.textStripFunc, {dataPtr}, "stripped");
+            }
+            if (member == "main") {
+                return dataPtr;
+            }
+            std::cerr << "Error: unknown TEXT member '." << member << "'\n";
+            return nullptr;
+        }
+    }
+
     auto obj = object->codegen(ctx);
     if (!obj) return nullptr;
 
@@ -568,6 +637,56 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
+    // Check for TEXT variable method call first
+    if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
+        if (ctx.textVars.count(ident->name)) {
+            auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+            auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+            auto i8Ty = llvm::Type::getInt8Ty(*ctx.llvmContext);
+            auto dataAlloca = ctx.locals[ident->name];
+            auto posAlloca = ctx.locals[ident->name + "__pos"];
+            auto dataPtr = ctx.builder->CreateLoad(ptrTy, dataAlloca, "txtdata");
+
+            if (method == "setpos") {
+                auto posArg = args[0]->codegen(ctx);
+                // Convert 1-based to 0-based
+                auto pos0 = ctx.builder->CreateSub(posArg,
+                    llvm::ConstantInt::get(i64Ty, 1), "pos0");
+                ctx.builder->CreateStore(pos0, posAlloca);
+                return llvm::ConstantInt::get(i64Ty, 0);
+            }
+            if (method == "getchar") {
+                auto pos = ctx.builder->CreateLoad(i64Ty, posAlloca, "pos");
+                auto charPtr = ctx.builder->CreateGEP(i8Ty, dataPtr, pos, "chptr");
+                auto ch = ctx.builder->CreateLoad(i8Ty, charPtr, "ch");
+                auto newPos = ctx.builder->CreateAdd(pos,
+                    llvm::ConstantInt::get(i64Ty, 1), "newpos");
+                ctx.builder->CreateStore(newPos, posAlloca);
+                return ch;
+            }
+            if (method == "putchar") {
+                auto ch = args[0]->codegen(ctx);
+                auto pos = ctx.builder->CreateLoad(i64Ty, posAlloca, "pos");
+                auto charPtr = ctx.builder->CreateGEP(i8Ty, dataPtr, pos, "chptr");
+                ctx.builder->CreateStore(ch, charPtr);
+                auto newPos = ctx.builder->CreateAdd(pos,
+                    llvm::ConstantInt::get(i64Ty, 1), "newpos");
+                ctx.builder->CreateStore(newPos, posAlloca);
+                return llvm::ConstantInt::get(i64Ty, 0);
+            }
+            if (method == "sub") {
+                auto start = args[0]->codegen(ctx);
+                auto len = args[1]->codegen(ctx);
+                return ctx.builder->CreateCall(ctx.textSubFunc, {dataPtr, start, len}, "sub");
+            }
+            if (method == "strip") {
+                return ctx.builder->CreateCall(ctx.textStripFunc, {dataPtr}, "stripped");
+            }
+            std::cerr << "Error: unknown TEXT method '." << method << "'\n";
+            return nullptr;
+        }
+    }
+
     auto obj = object->codegen(ctx);
     if (!obj) return nullptr;
 
@@ -747,12 +866,14 @@ llvm::Value* InCharExpression::codegen(CodeGenContext& ctx) {
 llvm::Value* Block::codegen(CodeGenContext& ctx) {
     auto saved = ctx.saveScope();
     auto savedRefTypes = ctx.refTypes;
+    auto savedTextVars = ctx.textVars;
     llvm::Value* last = nullptr;
     for (auto& stmt : statements) {
         last = stmt->codegen(ctx);
     }
     ctx.restoreScope(saved);
     ctx.refTypes = savedRefTypes;
+    ctx.textVars = savedTextVars;
     return last;
 }
 
@@ -785,6 +906,15 @@ llvm::Value* VarDeclaration::codegen(CodeGenContext& ctx) {
         }
     } else {
         ctx.builder->CreateStore(llvm::Constant::getNullValue(ty), alloca);
+    }
+
+    // For TEXT variables, create an associated position counter
+    if (type == TEXT) {
+        auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+        auto posAlloca = ctx.createEntryBlockAlloca(func, name + "__pos", i64Ty);
+        ctx.locals[name + "__pos"] = posAlloca;
+        ctx.builder->CreateStore(llvm::ConstantInt::get(i64Ty, 0), posAlloca);
+        ctx.textVars.insert(name);
     }
     return alloca;
 }
