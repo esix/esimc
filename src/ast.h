@@ -80,7 +80,7 @@ public:
 
 class BinaryOp : public Expression {
 public:
-    enum Op { ADD, SUB, MUL, DIV, IDIV, EQ, NE, LT, LE, GT, GE, AND, OR, CONCAT };
+    enum Op { ADD, SUB, MUL, DIV, IDIV, EQ, NE, LT, LE, GT, GE, AND, OR, CONCAT, POWER };
     Op op;
     ExprPtr lhs, rhs;
     BinaryOp(Op o, ExprPtr l, ExprPtr r)

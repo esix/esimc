@@ -324,6 +324,19 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
         return ctx.builder->CreateCall(ctx.textConcatFunc, {L, R}, "concat");
     }
 
+    // POWER: use pow() from libm
+    if (op == POWER) {
+        auto doubleTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
+        auto Lf = L, Rf = R;
+        if (!Lf->getType()->isDoubleTy())
+            Lf = ctx.builder->CreateSIToFP(L, doubleTy, "tofp");
+        if (!Rf->getType()->isDoubleTy())
+            Rf = ctx.builder->CreateSIToFP(R, doubleTy, "tofp");
+        auto powFunc = ctx.module->getOrInsertFunction("pow",
+            llvm::FunctionType::get(doubleTy, {doubleTy, doubleTy}, false));
+        return ctx.builder->CreateCall(powFunc, {Lf, Rf}, "powtmp");
+    }
+
     // Check for character comparisons (both i8)
     bool isChar = L->getType()->isIntegerTy(8) && R->getType()->isIntegerTy(8);
     if (isChar) {
@@ -376,7 +389,7 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
             case LE:  return ctx.builder->CreateFCmpOLE(L, R, "letmp");
             case GT:  return ctx.builder->CreateFCmpOGT(L, R, "gttmp");
             case GE:  return ctx.builder->CreateFCmpOGE(L, R, "getmp");
-            case AND: case OR: case CONCAT: break;
+            case AND: case OR: case CONCAT: case POWER: break;
         }
     }
 
@@ -404,7 +417,7 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
         case GE:  return ctx.builder->CreateICmpSGE(L, R, "getmp");
         case AND: return ctx.builder->CreateAnd(L, R, "andtmp");
         case OR:  return ctx.builder->CreateOr(L, R, "ortmp");
-        case CONCAT: break; // handled above
+        case CONCAT: case POWER: break; // handled above
     }
     return nullptr;
 }
@@ -541,6 +554,23 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         if (!val) return nullptr;
         return ctx.builder->CreateCall(ctx.textLengthFunc, {val}, "length");
     }
+
+    // OUTCHAR(ch) — print a single character
+    if (name == "outchar") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        // putchar expects i32
+        auto i32Val = ctx.builder->CreateZExt(val,
+            llvm::Type::getInt32Ty(*ctx.llvmContext), "chi32");
+        auto putcharFunc = ctx.module->getOrInsertFunction("putchar",
+            llvm::FunctionType::get(llvm::Type::getInt32Ty(*ctx.llvmContext),
+                {llvm::Type::getInt32Ty(*ctx.llvmContext)}, false));
+        return ctx.builder->CreateCall(putcharFunc, {i32Val});
+    }
+
+    // FACTORIAL — not built-in, but let's handle common utility functions
+    // (users define their own; this just avoids confusing error messages)
 
     // Check if it's a method call on THIS (within a class)
     if (ctx.currentThis && !ctx.currentClassName.empty()) {

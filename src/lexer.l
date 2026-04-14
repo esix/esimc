@@ -74,6 +74,7 @@
 ":"                             return T_COLON;
 "+"                             return T_PLUS;
 "-"                             return T_MINUS;
+"**"                            return T_POWER;
 "*"                             return T_STAR;
 "//"                            return T_IDIV;
 "/"                             return T_SLASH;

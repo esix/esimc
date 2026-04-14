@@ -91,7 +91,7 @@ static std::vector<ParamSpec> mergeParams(
 /* Operators and punctuation */
 %token T_ASSIGN T_REFASSIGN T_COLON T_SEMI T_COMMA T_DOT T_AMP
 %token T_LPAREN T_RPAREN
-%token T_PLUS T_MINUS T_STAR T_SLASH T_IDIV
+%token T_PLUS T_MINUS T_STAR T_SLASH T_IDIV T_POWER
 %token T_EQ T_NE T_LT T_LE T_GT T_GE
 
 /* Literals */
@@ -100,7 +100,7 @@ static std::vector<ParamSpec> mergeParams(
 %token <sval> T_IDENT T_TEXTLIT
 
 /* Non-terminal types */
-%type <expr> expr comparison additive multiplicative unary postfix primary
+%type <expr> expr comparison additive multiplicative power unary postfix primary
 %type <stmt> statement block
 %type <stmt> declaration array_decl ref_declaration
 %type <stmt> label_decl labeled_stmt goto_stmt
@@ -109,7 +109,7 @@ static std::vector<ParamSpec> mergeParams(
 %type <stmt> inspect_stmt
 %type <stmt> detach_stmt resume_stmt call_stmt
 %type <stmt> outint_stmt outreal_stmt outfix_stmt outtext_stmt outimage_stmt inimage_stmt
-%type <stmt> expr_stmt
+%type <stmt> expr_stmt virtual_spec
 %type <stmtlist> stmt_list class_body
 %type <exprlist> arg_list arg_list_ne
 %type <namelist> ident_list
@@ -179,6 +179,7 @@ statement
     | outtext_stmt
     | outimage_stmt
     | inimage_stmt
+    | virtual_spec
     | block
     | expr_stmt
     ;
@@ -295,8 +296,26 @@ typed_param_list
         $$ = new std::vector<ParamSpec>();
         $$->push_back({$2, $1});
       }
+    | type_name T_ARRAY T_IDENT {
+        /* Array parameter — passed as pointer */
+        $$ = new std::vector<ParamSpec>();
+        $$->push_back({$3, VarDeclaration::TEXT});
+      }
+    | T_REF T_LPAREN T_IDENT T_RPAREN T_IDENT {
+        /* REF(Class) parameter — passed as pointer */
+        $$ = new std::vector<ParamSpec>();
+        $$->push_back({$5, VarDeclaration::TEXT});
+      }
     | typed_param_list T_COMMA type_name T_IDENT {
         $1->push_back({$4, $3});
+        $$ = $1;
+      }
+    | typed_param_list T_COMMA type_name T_ARRAY T_IDENT {
+        $1->push_back({$5, VarDeclaration::TEXT});
+        $$ = $1;
+      }
+    | typed_param_list T_COMMA T_REF T_LPAREN T_IDENT T_RPAREN T_IDENT {
+        $1->push_back({$7, VarDeclaration::TEXT});
         $$ = $1;
       }
     ;
@@ -312,9 +331,20 @@ param_specs
         delete $3;
         $$ = $1;
       }
+    | param_specs type_name T_ARRAY ident_list T_SEMI {
+        /* Array parameter spec: INTEGER ARRAY a; */
+        $1->push_back({VarDeclaration::TEXT, std::move(*$4)});
+        delete $4;
+        $$ = $1;
+      }
+    | param_specs T_REF T_LPAREN T_IDENT T_RPAREN ident_list T_SEMI {
+        /* REF parameter spec: REF(Class) x; */
+        $1->push_back({VarDeclaration::TEXT, std::move(*$6)});
+        delete $6;
+        $$ = $1;
+      }
     | param_specs T_IDENT ident_list T_SEMI {
-        /* Handles VALUE/NAME specs: identifier "value" or "name" followed by ident_list.
-           These don't change types, so use -1 as marker to skip in mergeParams. */
+        /* VALUE/NAME specs or unknown specs — skip */
         $1->push_back({-1, std::move(*$3)});
         delete $3;
         $$ = $1;
@@ -370,6 +400,18 @@ procedure_decl
                                std::move(params), StmtPtr($9));
         delete $5; delete $8;
       }
+    | T_REF T_LPAREN T_IDENT T_RPAREN T_PROCEDURE T_IDENT opt_typed_params T_SEMI statement {
+        /* REF(Class) PROCEDURE name(...); — returns a pointer */
+        $$ = new ProcedureDecl($6, true, VarDeclaration::TEXT,
+                               std::move(*$7), StmtPtr($9));
+        delete $7;
+      }
+    | T_REF T_LPAREN T_IDENT T_RPAREN T_PROCEDURE T_IDENT T_LPAREN ident_list T_RPAREN T_SEMI param_specs statement {
+        auto params = mergeParams(*$8, *$11);
+        $$ = new ProcedureDecl($6, true, VarDeclaration::TEXT,
+                               std::move(params), StmtPtr($12));
+        delete $8; delete $11;
+      }
     ;
 
 /* ---- Classes ---- */
@@ -397,6 +439,33 @@ class_decl
 
 class_body
     : T_BEGIN stmt_list T_END end_names { $$ = $2; }
+    | virtual_spec class_body { $$ = $2; }
+    ;
+
+/* ---- VIRTUAL specification (parsed and ignored) ---- */
+
+virtual_spec
+    : T_VIRTUAL T_COLON virtual_entries {
+        /* Ignored — all methods are effectively virtual */
+        $$ = new ExprStatement(ExprPtr(new IntegerLiteral(0)));
+      }
+    ;
+
+virtual_entries
+    : virtual_entry
+    | virtual_entries virtual_entry
+    ;
+
+virtual_entry
+    : T_PROCEDURE T_IDENT T_SEMI
+    | type_name T_PROCEDURE T_IDENT T_SEMI
+    | T_REF T_LPAREN T_IDENT T_RPAREN T_PROCEDURE T_IDENT T_SEMI
+    | T_PROCEDURE T_IDENT T_IS T_PROCEDURE T_IDENT T_SEMI T_SEMI
+    | T_PROCEDURE T_IDENT T_IS T_PROCEDURE T_IDENT T_SEMI
+    | type_name T_PROCEDURE T_IDENT T_IS type_name T_PROCEDURE T_IDENT T_SEMI T_SEMI
+    | type_name T_PROCEDURE T_IDENT T_IS type_name T_PROCEDURE T_IDENT T_SEMI
+    | T_PROCEDURE T_IDENT T_IS type_name T_PROCEDURE T_IDENT T_SEMI T_SEMI
+    | T_PROCEDURE T_IDENT T_IS type_name T_PROCEDURE T_IDENT T_SEMI
     ;
 
 /* ---- INSPECT/WHEN ---- */
@@ -576,15 +645,22 @@ additive
     ;
 
 multiplicative
-    : unary
-    | multiplicative T_STAR unary {
+    : power
+    | multiplicative T_STAR power {
         $$ = new BinaryOp(BinaryOp::MUL, ExprPtr($1), ExprPtr($3));
       }
-    | multiplicative T_SLASH unary {
+    | multiplicative T_SLASH power {
         $$ = new BinaryOp(BinaryOp::DIV, ExprPtr($1), ExprPtr($3));
       }
-    | multiplicative T_IDIV unary {
+    | multiplicative T_IDIV power {
         $$ = new BinaryOp(BinaryOp::IDIV, ExprPtr($1), ExprPtr($3));
+      }
+    ;
+
+power
+    : unary
+    | unary T_POWER power {
+        $$ = new BinaryOp(BinaryOp::POWER, ExprPtr($1), ExprPtr($3));
       }
     ;
 
@@ -635,7 +711,7 @@ primary
     | T_ININT     { $$ = new InIntExpression(); }
     | T_INREAL    { $$ = new InRealExpression(); }
     | T_INCHAR    { $$ = new InCharExpression(); }
-    | T_IF expr T_THEN expr T_ELSE primary {
+    | T_IF expr T_THEN expr T_ELSE expr {
         $$ = new ConditionalExpr(ExprPtr($2), ExprPtr($4), ExprPtr($6));
       }
     ;
