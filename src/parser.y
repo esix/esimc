@@ -132,15 +132,15 @@ program
     ;
 
 block
-    : T_BEGIN stmt_list T_END {
+    : T_BEGIN stmt_list T_END end_names {
         $$ = new Block(std::move(*$2));
         delete $2;
       }
-    | T_BEGIN stmt_list T_END T_IDENT {
-        /* END name -- silently consumed */
-        $$ = new Block(std::move(*$2));
-        delete $2;
-      }
+    ;
+
+end_names
+    : /* empty */
+    | end_names T_IDENT  /* silently consume identifiers after END */
     ;
 
 stmt_list
@@ -220,6 +220,14 @@ declaration
             delete stmts;
         }
         delete $2;
+      }
+    | type_name T_IDENT T_EQ expr {
+        /* Initialized declaration: INTEGER x = 42 */
+        $$ = new VarDeclaration((VarDeclaration::Type)$1, $2, ExprPtr($4));
+      }
+    | type_name T_IDENT T_ASSIGN expr {
+        /* Initialized declaration: INTEGER x := 42 */
+        $$ = new VarDeclaration((VarDeclaration::Type)$1, $2, ExprPtr($4));
       }
     ;
 
@@ -374,8 +382,7 @@ class_decl
     ;
 
 class_body
-    : T_BEGIN stmt_list T_END { $$ = $2; }
-    | T_BEGIN stmt_list T_END T_IDENT { $$ = $2; }
+    : T_BEGIN stmt_list T_END end_names { $$ = $2; }
     ;
 
 /* ---- INSPECT/WHEN ---- */

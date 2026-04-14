@@ -60,6 +60,28 @@ std::pair<llvm::Value*, llvm::Type*> CodeGenContext::getVarPtr(const std::string
     return {nullptr, nullptr};
 }
 
+void CodeGenContext::setupTextFieldTracking(llvm::Function* func) {
+    if (currentClassName.empty() || !currentThis) return;
+    auto cit = classes.find(currentClassName);
+    if (cit == classes.end()) return;
+    for (auto& fi : cit->second.fields) {
+        if (fi.type == VarDeclaration::TEXT && fi.structIndex >= 2) {
+            // The __pos companion field is in the struct — find it and create
+            // a local "proxy" alloca that reads/writes through the struct GEP.
+            // But actually, the TEXT dispatch uses locals[name+"__pos"] as an AllocaInst*.
+            // We need to provide that. Use a local alloca that loads from struct on entry
+            // and stores back on... well, every write. That's complex.
+            //
+            // Simpler: just make locals[name+"__pos"] point to the struct field directly
+            // via getVarPtr. But locals expects AllocaInst*, not Value*.
+            //
+            // Simplest: just register in textVars. The TEXT dispatch will use getVarPtr
+            // for the __pos field too.
+            textVars.insert(fi.name);
+        }
+    }
+}
+
 std::map<std::string, llvm::AllocaInst*> CodeGenContext::saveScope() {
     return locals;
 }
@@ -317,6 +339,18 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
     }
 
     bool isReal = L->getType()->isDoubleTy() || R->getType()->isDoubleTy();
+
+    // Promote integer widths: i1/i8 -> i64 when mixed with i64
+    if (!isReal && L->getType() != R->getType()) {
+        auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+        if (L->getType()->isIntegerTy() && R->getType()->isIntegerTy()) {
+            if (L->getType()->getIntegerBitWidth() < R->getType()->getIntegerBitWidth())
+                L = ctx.builder->CreateZExt(L, R->getType(), "zext");
+            else
+                R = ctx.builder->CreateZExt(R, L->getType(), "zext");
+        }
+        (void)i64Ty;
+    }
 
     // Promote to double if mixed
     if (isReal) {
@@ -594,12 +628,23 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
             auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
             auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
             auto i8Ty = llvm::Type::getInt8Ty(*ctx.llvmContext);
-            auto dataAlloca = ctx.locals[ident->name];
-            auto posAlloca = ctx.locals[ident->name + "__pos"];
-            auto dataPtr = ctx.builder->CreateLoad(ptrTy, dataAlloca, "txtdata");
+            auto [varPtr, varTy] = ctx.getVarPtr(ident->name);
+            auto [posPtr, posTy] = ctx.getVarPtr(ident->name + "__pos");
+            if (!varPtr) {
+                std::cerr << "Error: TEXT variable '" << ident->name << "' not accessible\n";
+                return nullptr;
+            }
+            // If no __pos field found, create a temp (for non-class TEXT vars without tracking)
+            llvm::Value* posStorage = posPtr;
+            if (!posStorage) {
+                auto it2 = ctx.locals.find(ident->name + "__pos");
+                if (it2 != ctx.locals.end()) posStorage = it2->second;
+            }
+            auto dataPtr = ctx.builder->CreateLoad(ptrTy, varPtr, "txtdata");
 
             if (member == "more") {
-                auto pos = ctx.builder->CreateLoad(i64Ty, posAlloca, "pos");
+                if (!posStorage) return ctx.builder->getFalse();
+                auto pos = ctx.builder->CreateLoad(i64Ty, posStorage, "pos");
                 auto len = ctx.builder->CreateCall(ctx.textLengthFunc, {dataPtr}, "len");
                 return ctx.builder->CreateICmpSLT(pos, len, "more");
             }
@@ -607,18 +652,19 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
                 return ctx.builder->CreateCall(ctx.textLengthFunc, {dataPtr}, "len");
             }
             if (member == "pos") {
-                auto pos = ctx.builder->CreateLoad(i64Ty, posAlloca, "pos0");
+                if (!posStorage) return llvm::ConstantInt::get(i64Ty, 1);
+                auto pos = ctx.builder->CreateLoad(i64Ty, posStorage, "pos0");
                 return ctx.builder->CreateAdd(pos,
-                    llvm::ConstantInt::get(i64Ty, 1), "pos1"); // 0-based -> 1-based
+                    llvm::ConstantInt::get(i64Ty, 1), "pos1");
             }
             if (member == "getchar") {
-                // Read char at pos, increment pos
-                auto pos = ctx.builder->CreateLoad(i64Ty, posAlloca, "pos");
+                if (!posStorage) return llvm::ConstantInt::get(i8Ty, 0);
+                auto pos = ctx.builder->CreateLoad(i64Ty, posStorage, "pos");
                 auto charPtr = ctx.builder->CreateGEP(i8Ty, dataPtr, pos, "chptr");
                 auto ch = ctx.builder->CreateLoad(i8Ty, charPtr, "ch");
                 auto newPos = ctx.builder->CreateAdd(pos,
                     llvm::ConstantInt::get(i64Ty, 1), "newpos");
-                ctx.builder->CreateStore(newPos, posAlloca);
+                ctx.builder->CreateStore(newPos, posStorage);
                 return ch;
             }
             if (member == "strip") {
@@ -667,35 +713,46 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
             auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
             auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
             auto i8Ty = llvm::Type::getInt8Ty(*ctx.llvmContext);
-            auto dataAlloca = ctx.locals[ident->name];
-            auto posAlloca = ctx.locals[ident->name + "__pos"];
-            auto dataPtr = ctx.builder->CreateLoad(ptrTy, dataAlloca, "txtdata");
+            auto [varPtr, varTy] = ctx.getVarPtr(ident->name);
+            auto [posPtr, posTy] = ctx.getVarPtr(ident->name + "__pos");
+            if (!varPtr) {
+                std::cerr << "Error: TEXT variable '" << ident->name << "' not accessible\n";
+                return nullptr;
+            }
+            llvm::Value* posStorage = posPtr;
+            if (!posStorage) {
+                auto it2 = ctx.locals.find(ident->name + "__pos");
+                if (it2 != ctx.locals.end()) posStorage = it2->second;
+            }
+            auto dataPtr = ctx.builder->CreateLoad(ptrTy, varPtr, "txtdata");
 
             if (method == "setpos") {
+                if (!posStorage) return llvm::ConstantInt::get(i64Ty, 0);
                 auto posArg = args[0]->codegen(ctx);
-                // Convert 1-based to 0-based
                 auto pos0 = ctx.builder->CreateSub(posArg,
                     llvm::ConstantInt::get(i64Ty, 1), "pos0");
-                ctx.builder->CreateStore(pos0, posAlloca);
+                ctx.builder->CreateStore(pos0, posStorage);
                 return llvm::ConstantInt::get(i64Ty, 0);
             }
             if (method == "getchar") {
-                auto pos = ctx.builder->CreateLoad(i64Ty, posAlloca, "pos");
+                if (!posStorage) return llvm::ConstantInt::get(i8Ty, 0);
+                auto pos = ctx.builder->CreateLoad(i64Ty, posStorage, "pos");
                 auto charPtr = ctx.builder->CreateGEP(i8Ty, dataPtr, pos, "chptr");
                 auto ch = ctx.builder->CreateLoad(i8Ty, charPtr, "ch");
                 auto newPos = ctx.builder->CreateAdd(pos,
                     llvm::ConstantInt::get(i64Ty, 1), "newpos");
-                ctx.builder->CreateStore(newPos, posAlloca);
+                ctx.builder->CreateStore(newPos, posStorage);
                 return ch;
             }
             if (method == "putchar") {
+                if (!posStorage) return llvm::ConstantInt::get(i64Ty, 0);
                 auto ch = args[0]->codegen(ctx);
-                auto pos = ctx.builder->CreateLoad(i64Ty, posAlloca, "pos");
+                auto pos = ctx.builder->CreateLoad(i64Ty, posStorage, "pos");
                 auto charPtr = ctx.builder->CreateGEP(i8Ty, dataPtr, pos, "chptr");
                 ctx.builder->CreateStore(ch, charPtr);
                 auto newPos = ctx.builder->CreateAdd(pos,
                     llvm::ConstantInt::get(i64Ty, 1), "newpos");
-                ctx.builder->CreateStore(newPos, posAlloca);
+                ctx.builder->CreateStore(newPos, posStorage);
                 return llvm::ConstantInt::get(i64Ty, 0);
             }
             if (method == "sub") {
@@ -1130,14 +1187,14 @@ llvm::Value* MemberAssignment::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* RefAssignment::codegen(CodeGenContext& ctx) {
-    auto it = ctx.locals.find(name);
-    if (it == ctx.locals.end()) {
+    auto [varPtr, varTy] = ctx.getVarPtr(name);
+    if (!varPtr) {
         std::cerr << "Error: unknown REF variable '" << name << "'\n";
         return nullptr;
     }
     auto val = value->codegen(ctx);
     if (!val) return nullptr;
-    ctx.builder->CreateStore(val, it->second);
+    ctx.builder->CreateStore(val, varPtr);
     return val;
 }
 
@@ -1395,6 +1452,8 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
                 ctx.arrays[fi.name] = ainfo;
             }
         }
+        // Set up TEXT field position tracking for methods
+        ctx.setupTextFieldTracking(func);
     }
 
     // Generate body
@@ -1463,6 +1522,14 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         fi.structIndex = (int)fieldTypes.size();
         ci.fields.push_back(fi);
         fieldTypes.push_back(ctx.getLLVMType(p.type));
+        if (p.type == VarDeclaration::TEXT) {
+            ClassInfo::FieldInfo posfi;
+            posfi.name = p.name + "__pos";
+            posfi.type = VarDeclaration::INTEGER;
+            posfi.structIndex = (int)fieldTypes.size();
+            ci.fields.push_back(posfi);
+            fieldTypes.push_back(llvm::Type::getInt64Ty(*ctx.llvmContext));
+        }
     }
 
     // Scan body for VarDeclarations and RefDeclarations — add as struct fields
@@ -1474,6 +1541,15 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
             fi.structIndex = (int)fieldTypes.size();
             ci.fields.push_back(fi);
             fieldTypes.push_back(ctx.getLLVMType(vd->type));
+            // For TEXT fields, add a companion position field
+            if (vd->type == VarDeclaration::TEXT) {
+                ClassInfo::FieldInfo posfi;
+                posfi.name = vd->name + "__pos";
+                posfi.type = VarDeclaration::INTEGER;
+                posfi.structIndex = (int)fieldTypes.size();
+                ci.fields.push_back(posfi);
+                fieldTypes.push_back(llvm::Type::getInt64Ty(*ctx.llvmContext));
+            }
         } else if (auto* rd = dynamic_cast<RefDeclaration*>(stmt.get())) {
             ClassInfo::FieldInfo fi;
             fi.name = rd->varName;
@@ -1557,6 +1633,9 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
             ctx.refTypes[fi.name] = fi.refClassName;
         }
     }
+
+    // Set up TEXT field position tracking
+    ctx.setupTextFieldTracking(bodyFunc);
 
     // Execute body statements
     // Skip: ProcedureDecls (compiled above), VarDeclarations/RefDeclarations (struct fields),

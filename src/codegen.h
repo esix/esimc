@@ -121,6 +121,9 @@ public:
     // Variable access: returns a pointer to the variable (alloca or GEP for class fields)
     // and the LLVM type of the stored value. Returns {nullptr, nullptr} if not found.
     std::pair<llvm::Value*, llvm::Type*> getVarPtr(const std::string& name);
+
+    // Set up TEXT position tracking for class fields of type TEXT
+    void setupTextFieldTracking(llvm::Function* func);
 };
 
 #endif // ESIMC_CODEGEN_H
