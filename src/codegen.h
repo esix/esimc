@@ -69,6 +69,10 @@ public:
     // REF type info: variable name -> class name
     std::map<std::string, std::string> refTypes;
 
+    // Global variables (from outermost block, accessible by all procedures)
+    std::map<std::string, llvm::GlobalVariable*> globals;
+    bool inMainBlock = false; // true when generating the outermost block
+
     // TEXT variables (have an associated __pos alloca)
     std::set<std::string> textVars;
 

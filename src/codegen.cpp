@@ -57,6 +57,11 @@ std::pair<llvm::Value*, llvm::Type*> CodeGenContext::getVarPtr(const std::string
             return {gep, fieldTy};
         }
     }
+    // Check global variables (from outermost block)
+    auto git = globals.find(name);
+    if (git != globals.end()) {
+        return {git->second, git->second->getValueType()};
+    }
     return {nullptr, nullptr};
 }
 
@@ -234,7 +239,9 @@ void CodeGenContext::generateCode(Program& program) {
     auto entry = llvm::BasicBlock::Create(*llvmContext, "entry", mainFunc);
     builder->SetInsertPoint(entry);
 
+    inMainBlock = true;
     program.codegen(*this);
+    inMainBlock = false;
 
     builder->CreateRet(llvm::ConstantInt::get(
         llvm::Type::getInt32Ty(*llvmContext), 0));
@@ -308,6 +315,12 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
             auto fieldTy = ci.structType->getElementType(idx);
             return ctx.builder->CreateLoad(fieldTy, gep, name);
         }
+    }
+
+    // Check global variables (from outermost block, accessible by procedures)
+    auto git = ctx.globals.find(name);
+    if (git != ctx.globals.end()) {
+        return ctx.builder->CreateLoad(git->second->getValueType(), git->second, name);
     }
 
     // Check if it's a no-arg function/procedure call (Simula allows omitting parens)
@@ -603,6 +616,25 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
     }
 
     // OUTCHAR(ch) — print a single character
+    // RANDINT(low, high, seed) — random integer. Uses C rand() ignoring seed.
+    if (name == "randint") {
+        auto lo = args[0]->codegen(ctx);
+        auto hi = args[1]->codegen(ctx);
+        if (!lo || !hi) return nullptr;
+        auto randFunc = ctx.module->getOrInsertFunction("rand",
+            llvm::FunctionType::get(llvm::Type::getInt32Ty(*ctx.llvmContext), false));
+        auto rval = ctx.builder->CreateCall(randFunc, {}, "rval");
+        auto rval64 = ctx.builder->CreateSExt(rval, i64Ty, "rval64");
+        auto range = ctx.builder->CreateAdd(
+            ctx.builder->CreateSub(hi, lo, "range"), llvm::ConstantInt::get(i64Ty, 1), "range1");
+        auto modval = ctx.builder->CreateSRem(rval64, range, "modval");
+        // Make positive
+        auto absmod = ctx.builder->CreateSelect(
+            ctx.builder->CreateICmpSLT(modval, llvm::ConstantInt::get(i64Ty, 0)),
+            ctx.builder->CreateNeg(modval), modval, "absmod");
+        return ctx.builder->CreateAdd(lo, absmod, "randint");
+    }
+
     if (name == "outchar") {
         if (args.empty()) return nullptr;
         auto val = args[0]->codegen(ctx);
@@ -1046,8 +1078,30 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
     auto saved = ctx.saveScope();
     auto savedRefTypes = ctx.refTypes;
     auto savedTextVars = ctx.textVars;
+
+    // First pass: process all declarations (vars, arrays, refs, labels)
+    // so that procedures declared later in the block can reference them
+    for (auto& stmt : statements) {
+        if (dynamic_cast<VarDeclaration*>(stmt.get()) ||
+            dynamic_cast<CompoundStmt*>(stmt.get()) ||
+            dynamic_cast<ArrayDeclaration*>(stmt.get()) ||
+            dynamic_cast<RefDeclaration*>(stmt.get()) ||
+            dynamic_cast<LabelDeclaration*>(stmt.get())) {
+            stmt->codegen(ctx);
+        }
+    }
+
+    // Second pass: execute all statements (declarations will be no-ops
+    // since the variables already exist)
     llvm::Value* last = nullptr;
     for (auto& stmt : statements) {
+        if (dynamic_cast<VarDeclaration*>(stmt.get()) ||
+            dynamic_cast<CompoundStmt*>(stmt.get()) ||
+            dynamic_cast<ArrayDeclaration*>(stmt.get()) ||
+            dynamic_cast<RefDeclaration*>(stmt.get()) ||
+            dynamic_cast<LabelDeclaration*>(stmt.get())) {
+            continue; // already processed
+        }
         last = stmt->codegen(ctx);
     }
     ctx.restoreScope(saved);
@@ -1065,7 +1119,64 @@ llvm::Value* CompoundStmt::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* VarDeclaration::codegen(CodeGenContext& ctx) {
+    // Skip if already declared (two-pass block processing)
+    if (ctx.locals.count(name) || ctx.globals.count(name)) {
+        // But still process initializer if present
+        if (init) {
+            auto [varPtr, varTy] = ctx.getVarPtr(name);
+            if (varPtr) {
+                auto val = init->codegen(ctx);
+                if (val) {
+                    if (val->getType() != varTy) {
+                        if (varTy->isDoubleTy() && val->getType()->isIntegerTy())
+                            val = ctx.builder->CreateSIToFP(val, varTy);
+                        else if (varTy->isIntegerTy(64) && val->getType()->isDoubleTy())
+                            val = ctx.builder->CreateFPToSI(val, varTy);
+                    }
+                    ctx.builder->CreateStore(val, varPtr);
+                }
+            }
+        }
+        return nullptr;
+    }
     auto ty = ctx.getLLVMType(type);
+
+    // In the main block, create global variables so procedures can access them
+    if (ctx.inMainBlock && !ctx.currentThis) {
+        auto gv = new llvm::GlobalVariable(
+            *ctx.module, ty, false, llvm::GlobalValue::InternalLinkage,
+            llvm::Constant::getNullValue(ty), "g_" + name);
+        ctx.globals[name] = gv;
+        // Also add as a "local" so main() code can access it via the same path
+        // We create a fake alloca that's actually backed by the global
+        // Simpler: just use the global directly. locals stores AllocaInst*,
+        // but globals are GlobalVariable*. Both are pointer-like.
+        // Since locals expects AllocaInst*, let's still create a local alloca
+        // and keep the global in sync... or just skip locals and rely on getVarPtr.
+        // Simplest: don't use locals for globals. Update getVarPtr to check globals.
+        if (init) {
+            auto val = init->codegen(ctx);
+            if (val) {
+                if (val->getType() != ty) {
+                    if (ty->isDoubleTy() && val->getType()->isIntegerTy())
+                        val = ctx.builder->CreateSIToFP(val, ty);
+                    else if (ty->isIntegerTy(64) && val->getType()->isDoubleTy())
+                        val = ctx.builder->CreateFPToSI(val, ty);
+                }
+                ctx.builder->CreateStore(val, gv);
+            }
+        }
+        if (type == TEXT) {
+            auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+            auto posGv = new llvm::GlobalVariable(
+                *ctx.module, i64Ty, false, llvm::GlobalValue::InternalLinkage,
+                llvm::ConstantInt::get(i64Ty, 0), "g_" + name + "__pos");
+            ctx.globals[name + "__pos"] = posGv;
+            ctx.textVars.insert(name);
+        }
+        return gv;
+    }
+
     auto func = ctx.builder->GetInsertBlock()->getParent();
     auto alloca = ctx.createEntryBlockAlloca(func, name, ty);
     ctx.locals[name] = alloca;
@@ -1073,7 +1184,6 @@ llvm::Value* VarDeclaration::codegen(CodeGenContext& ctx) {
     if (init) {
         auto val = init->codegen(ctx);
         if (val) {
-            // Type convert if needed
             auto destTy = alloca->getAllocatedType();
             if (val->getType() != destTy) {
                 if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
@@ -1099,6 +1209,9 @@ llvm::Value* VarDeclaration::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
+    // Skip if already declared (two-pass block processing)
+    if (ctx.arrays.count(name)) return nullptr;
+
     auto elemTy = ctx.getLLVMType(elementType);
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
 
@@ -1120,6 +1233,22 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
     if (constBounds) {
         long long size = hi - lo + 1;
         if (size <= 0) size = 1;
+
+        // In main block, use a global array so procedures can access it
+        if (ctx.inMainBlock && !ctx.currentThis) {
+            auto arrTy = llvm::ArrayType::get(elemTy, size);
+            auto gv = new llvm::GlobalVariable(
+                *ctx.module, arrTy, false, llvm::GlobalValue::InternalLinkage,
+                llvm::Constant::getNullValue(arrTy), "g_" + name);
+            ArrayInfo info;
+            info.basePtr = gv;
+            info.elementType = elemTy;
+            info.lowerBound = lo;
+            info.size = size;
+            info.isStackArray = true; // same layout as stack array
+            ctx.arrays[name] = info;
+            return gv;
+        }
 
         auto arrTy = llvm::ArrayType::get(elemTy, size);
         auto func = ctx.builder->GetInsertBlock()->getParent();
@@ -1245,39 +1374,20 @@ llvm::Value* Assignment::codegen(CodeGenContext& ctx) {
         return val;
     }
 
-    auto it = ctx.locals.find(name);
-    if (it != ctx.locals.end()) {
+    auto [varPtr, varTy] = ctx.getVarPtr(name);
+    if (varPtr) {
         auto val = value->codegen(ctx);
         if (!val) return nullptr;
-        auto destTy = it->second->getAllocatedType();
-        if (val->getType() != destTy) {
-            if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
-                val = ctx.builder->CreateSIToFP(val, destTy);
-            else if (destTy->isIntegerTy(64) && val->getType()->isDoubleTy())
-                val = ctx.builder->CreateFPToSI(val, destTy);
+        if (val->getType() != varTy) {
+            if (varTy->isDoubleTy() && val->getType()->isIntegerTy())
+                val = ctx.builder->CreateSIToFP(val, varTy);
+            else if (varTy->isIntegerTy(64) && val->getType()->isDoubleTy())
+                val = ctx.builder->CreateFPToSI(val, varTy);
+            else if (varTy->isIntegerTy(8) && val->getType()->isIntegerTy())
+                val = ctx.builder->CreateTrunc(val, varTy);
         }
-        ctx.builder->CreateStore(val, it->second);
+        ctx.builder->CreateStore(val, varPtr);
         return val;
-    }
-
-    // Check class field
-    if (ctx.currentThis && !ctx.currentClassName.empty()) {
-        int idx = ctx.getFieldIndex(ctx.currentClassName, name);
-        if (idx >= 0) {
-            auto val = value->codegen(ctx);
-            if (!val) return nullptr;
-            auto& ci = ctx.classes[ctx.currentClassName];
-            auto gep = ctx.builder->CreateStructGEP(ci.structType, ctx.currentThis, idx, name + "_ptr");
-            auto destTy = ci.structType->getElementType(idx);
-            if (val->getType() != destTy) {
-                if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
-                    val = ctx.builder->CreateSIToFP(val, destTy);
-                else if (destTy->isIntegerTy(64) && val->getType()->isDoubleTy())
-                    val = ctx.builder->CreateFPToSI(val, destTy);
-            }
-            ctx.builder->CreateStore(val, gep);
-            return val;
-        }
     }
 
     std::cerr << "Error: unknown variable '" << name << "'\n";
@@ -1545,7 +1655,17 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto entry = llvm::BasicBlock::Create(*ctx.llvmContext, "entry", func);
     ctx.builder->SetInsertPoint(entry);
     ctx.locals.clear();
-    ctx.arrays.clear();
+    // Keep arrays that use global storage (from main block);
+    // clear only local arrays
+    {
+        auto savedArr = ctx.arrays;
+        ctx.arrays.clear();
+        for (auto& [aname, ainfo] : savedArr) {
+            if (llvm::isa<llvm::GlobalVariable>(ainfo.basePtr)) {
+                ctx.arrays[aname] = ainfo;
+            }
+        }
+    }
     ctx.labelBlocks.clear();
 
     // Set up parameters
