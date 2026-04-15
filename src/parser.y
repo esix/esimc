@@ -113,6 +113,7 @@ static std::vector<ParamSpec> mergeParams(
 %type <stmtlist> stmt_list class_body
 %type <exprlist> arg_list arg_list_ne
 %type <namelist> ident_list
+%type <sval> io_keyword
 %type <paramlist> typed_param_list opt_typed_params
 %type <speclist> param_specs
 %type <vartype> type_name
@@ -364,6 +365,30 @@ param_specs
         /* REF parameter spec: REF(Class) x; */
         $1->push_back({VarDeclaration::TEXT, std::move(*$6)});
         delete $6;
+        $$ = $1;
+      }
+    | param_specs T_PROCEDURE T_IDENT T_SEMI {
+        /* Procedure parameter spec: PROCEDURE name; */
+        auto names = new std::vector<std::string>();
+        names->push_back($3);
+        $1->push_back({VarDeclaration::TEXT, std::move(*names)});
+        delete names;
+        $$ = $1;
+      }
+    | param_specs T_PROCEDURE T_IDENT T_IS virtual_is_rhs {
+        /* Procedure parameter spec with IS binding — ignored */
+        auto names = new std::vector<std::string>();
+        names->push_back($3);
+        $1->push_back({VarDeclaration::TEXT, std::move(*names)});
+        delete names;
+        $$ = $1;
+      }
+    | param_specs type_name T_PROCEDURE T_IDENT T_SEMI {
+        /* Typed procedure parameter: INTEGER PROCEDURE name; */
+        auto names = new std::vector<std::string>();
+        names->push_back($4);
+        $1->push_back({VarDeclaration::TEXT, std::move(*names)});
+        delete names;
         $$ = $1;
       }
     | param_specs T_IDENT ident_list T_SEMI {
@@ -803,6 +828,28 @@ postfix
         $$ = new MethodCall(ExprPtr($1), $3, std::move(*$5));
         delete $5;
       }
+    | postfix T_DOT io_keyword T_LPAREN arg_list T_RPAREN {
+        /* Allow I/O keywords as method names: obj.OutFix(...) etc. */
+        $$ = new MethodCall(ExprPtr($1), $3, std::move(*$5));
+        delete $5;
+      }
+    | postfix T_DOT io_keyword {
+        $$ = new MemberAccess(ExprPtr($1), $3);
+      }
+    ;
+
+/* Keywords that can appear as member names after dot */
+io_keyword
+    : T_OUTINT    { $$ = (char*)"outint"; }
+    | T_OUTREAL   { $$ = (char*)"outreal"; }
+    | T_OUTFIX    { $$ = (char*)"outfix"; }
+    | T_OUTTEXT   { $$ = (char*)"outtext"; }
+    | T_OUTIMAGE  { $$ = (char*)"outimage"; }
+    | T_ININT     { $$ = (char*)"inint"; }
+    | T_INREAL    { $$ = (char*)"inreal"; }
+    | T_INCHAR    { $$ = (char*)"inchar"; }
+    | T_INIMAGE   { $$ = (char*)"inimage"; }
+    | T_LASTITEM  { $$ = (char*)"lastitem"; }
     ;
 
 primary
