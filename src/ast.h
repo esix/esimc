@@ -171,6 +171,16 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
+// QUA type qualification: expr QUA ClassName
+class QuaExpression : public Expression {
+public:
+    ExprPtr object;
+    std::string className;
+    QuaExpression(ExprPtr o, std::string c)
+        : object(std::move(o)), className(std::move(c)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
 // Built-in input expressions
 class InIntExpression : public Expression {
 public:

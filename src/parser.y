@@ -868,8 +868,8 @@ postfix
         $$ = new MemberAccess(ExprPtr($1), $3);
       }
     | postfix T_QUA T_IDENT {
-        /* QUA type qualification — ignored, just return the object */
-        $$ = $1;
+        /* QUA type qualification — changes class resolution for member access */
+        $$ = new QuaExpression(ExprPtr($1), $3);
       }
     ;
 

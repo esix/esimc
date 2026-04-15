@@ -841,7 +841,9 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
     if (!obj) return nullptr;
 
     std::string clsName;
-    if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
+    if (auto* qua = dynamic_cast<QuaExpression*>(object.get())) {
+        clsName = qua->className;
+    } else if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
         clsName = ctx.resolveRefType(ident->name);
     }
     if (clsName.empty() && dynamic_cast<ThisExpression*>(object.get())) {
@@ -949,7 +951,9 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
     if (!obj) return nullptr;
 
     std::string clsName;
-    if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
+    if (auto* qua = dynamic_cast<QuaExpression*>(object.get())) {
+        clsName = qua->className;
+    } else if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
         clsName = ctx.resolveRefType(ident->name);
     }
     if (clsName.empty() && dynamic_cast<ThisExpression*>(object.get())) {
@@ -1048,6 +1052,10 @@ llvm::Value* InExpression::codegen(CodeGenContext& ctx) {
 }
 
 // ---- Conditional expression ----
+
+llvm::Value* QuaExpression::codegen(CodeGenContext& ctx) {
+    return object->codegen(ctx);
+}
 
 llvm::Value* ConditionalExpr::codegen(CodeGenContext& ctx) {
     auto condV = condition->codegen(ctx);
@@ -1461,7 +1469,9 @@ llvm::Value* MemberAssignment::codegen(CodeGenContext& ctx) {
     if (!obj) return nullptr;
 
     std::string clsName;
-    if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
+    if (auto* qua = dynamic_cast<QuaExpression*>(object.get())) {
+        clsName = qua->className;
+    } else if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
         clsName = ctx.resolveRefType(ident->name);
     }
     if (clsName.empty() && dynamic_cast<ThisExpression*>(object.get())) {
