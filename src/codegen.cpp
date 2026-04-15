@@ -310,6 +310,24 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // Check if it's a no-arg function/procedure call (Simula allows omitting parens)
+    auto func = ctx.module->getFunction(name);
+    if (func && func->arg_size() == 0) {
+        if (func->getReturnType()->isVoidTy())
+            return ctx.builder->CreateCall(func, {});
+        return ctx.builder->CreateCall(func, {}, name + "_ret");
+    }
+    // Check for no-arg class method
+    if (ctx.currentThis && !ctx.currentClassName.empty()) {
+        auto& ci = ctx.classes[ctx.currentClassName];
+        auto mit = ci.methods.find(name);
+        if (mit != ci.methods.end() && mit->second->arg_size() == 1) {
+            if (mit->second->getReturnType()->isVoidTy())
+                return ctx.builder->CreateCall(mit->second, {ctx.currentThis});
+            return ctx.builder->CreateCall(mit->second, {ctx.currentThis}, name + "_ret");
+        }
+    }
+
     std::cerr << "Error: unknown variable '" << name << "'\n";
     return nullptr;
 }
@@ -761,15 +779,29 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
     }
 
     int idx = ctx.getFieldIndex(clsName, member);
-    if (idx < 0) {
-        std::cerr << "Error: class '" << clsName << "' has no field '" << member << "'\n";
-        return nullptr;
+    if (idx >= 0) {
+        auto& ci = ctx.classes[clsName];
+        auto gep = ctx.builder->CreateStructGEP(ci.structType, obj, idx, member + "_ptr");
+        auto fieldTy = ci.structType->getElementType(idx);
+        return ctx.builder->CreateLoad(fieldTy, gep, member);
     }
 
-    auto& ci = ctx.classes[clsName];
-    auto gep = ctx.builder->CreateStructGEP(ci.structType, obj, idx, member + "_ptr");
-    auto fieldTy = ci.structType->getElementType(idx);
-    return ctx.builder->CreateLoad(fieldTy, gep, member);
+    // No field — try as a no-arg method call (Simula allows omitting parens)
+    std::string searchClass = clsName;
+    while (!searchClass.empty()) {
+        auto cit = ctx.classes.find(searchClass);
+        if (cit == ctx.classes.end()) break;
+        auto mit = cit->second.methods.find(member);
+        if (mit != cit->second.methods.end()) {
+            if (mit->second->getReturnType()->isVoidTy())
+                return ctx.builder->CreateCall(mit->second, {obj});
+            return ctx.builder->CreateCall(mit->second, {obj}, member + "_ret");
+        }
+        searchClass = cit->second.parentName;
+    }
+
+    std::cerr << "Error: class '" << clsName << "' has no field or method '" << member << "'\n";
+    return nullptr;
 }
 
 llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {

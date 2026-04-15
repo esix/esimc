@@ -38,6 +38,8 @@
 "FALSE"                         return T_FALSE;
 "NOT"                           return T_NOT;
 "AND"                           return T_AND;
+"OR"[ \t]+"ELSE"                return T_OR;
+"AND"[ \t]+"THEN"               return T_AND;
 "OR"                            return T_OR;
 "EQV"                           return T_EQV;
 "IMP"                           return T_IMP;
