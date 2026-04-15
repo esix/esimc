@@ -39,6 +39,8 @@
 "NOT"                           return T_NOT;
 "AND"                           return T_AND;
 "OR"                            return T_OR;
+"EQV"                           return T_EQV;
+"IMP"                           return T_IMP;
 "PROCEDURE"                     return T_PROCEDURE;
 "CLASS"                         return T_CLASS;
 "NEW"                           return T_NEW;
@@ -78,6 +80,8 @@
 "*"                             return T_STAR;
 "//"                            return T_IDIV;
 "/"                             return T_SLASH;
+"=="                            return T_REFEQ;
+"=/="                           return T_REFNE;
 "="                             return T_EQ;
 "<>"                            return T_NE;
 "<="                            return T_LE;

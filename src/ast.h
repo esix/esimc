@@ -348,6 +348,17 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
+// FOR var := expr, expr, expr DO body (value list form)
+class ForListStatement : public Statement {
+public:
+    std::string var;
+    ExprList values;
+    StmtPtr body;
+    ForListStatement(std::string v, ExprList vals, StmtPtr b)
+        : var(std::move(v)), values(std::move(vals)), body(std::move(b)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
 // PROCEDURE name(params); body
 class ProcedureDecl : public Statement {
 public:

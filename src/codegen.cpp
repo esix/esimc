@@ -1451,6 +1451,22 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
     return nullptr;
 }
 
+llvm::Value* ForListStatement::codegen(CodeGenContext& ctx) {
+    auto [varPtr, varTy] = ctx.getVarPtr(var);
+    if (!varPtr) {
+        std::cerr << "Error: FOR variable '" << var << "' not declared\n";
+        return nullptr;
+    }
+    // Simply iterate: for each value, assign to var and execute body
+    for (auto& valExpr : values) {
+        auto val = valExpr->codegen(ctx);
+        if (!val) continue;
+        ctx.builder->CreateStore(val, varPtr);
+        body->codegen(ctx);
+    }
+    return nullptr;
+}
+
 // ---- Procedure declaration ----
 
 llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
