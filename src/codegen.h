@@ -126,6 +126,12 @@ public:
     // and the LLVM type of the stored value. Returns {nullptr, nullptr} if not found.
     std::pair<llvm::Value*, llvm::Type*> getVarPtr(const std::string& name);
 
+    // Closure support: captured variables from outer scope
+    // Maps function name -> list of captured variable names
+    std::map<std::string, std::vector<std::string>> capturedVars;
+    // Maps function name -> list of captured variable LLVM types
+    std::map<std::string, std::vector<llvm::Type*>> capturedTypes;
+
     // Set up TEXT position tracking for class fields of type TEXT
     void setupTextFieldTracking(llvm::Function* func);
 };

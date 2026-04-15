@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <set>
 
 class CodeGenContext;
 namespace llvm { class Value; }
@@ -12,6 +13,8 @@ class ASTNode {
 public:
     virtual ~ASTNode() = default;
     virtual llvm::Value* codegen(CodeGenContext& context) = 0;
+    // Collect all identifier names referenced in this subtree
+    virtual void collectRefs(std::set<std::string>& refs) const {}
 };
 
 class Expression : public ASTNode {};

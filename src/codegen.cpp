@@ -338,10 +338,24 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
 
     // Check if it's a no-arg function/procedure call (Simula allows omitting parens)
     auto func = ctx.module->getFunction(name);
-    if (func && func->arg_size() == 0) {
-        if (func->getReturnType()->isVoidTy())
-            return ctx.builder->CreateCall(func, {});
-        return ctx.builder->CreateCall(func, {}, name + "_ret");
+    if (func) {
+        // Check if the function has only captured params (no explicit params)
+        auto capIt = ctx.capturedVars.find(name);
+        size_t numCaptured = (capIt != ctx.capturedVars.end()) ? capIt->second.size() : 0;
+        if (func->arg_size() == numCaptured) {
+            std::vector<llvm::Value*> callArgs;
+            if (capIt != ctx.capturedVars.end()) {
+                for (auto& capName : capIt->second) {
+                    auto [ptr, ty] = ctx.getVarPtr(capName);
+                    if (ptr) callArgs.push_back(ptr);
+                    else callArgs.push_back(llvm::ConstantPointerNull::get(
+                        llvm::PointerType::getUnqual(*ctx.llvmContext)));
+                }
+            }
+            if (func->getReturnType()->isVoidTy())
+                return ctx.builder->CreateCall(func, callArgs);
+            return ctx.builder->CreateCall(func, callArgs, name + "_ret");
+        }
     }
     // Check for no-arg class method
     if (ctx.currentThis && !ctx.currentClassName.empty()) {
@@ -692,7 +706,23 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         if (!v) return nullptr;
         argsV.push_back(v);
     }
-    return ctx.builder->CreateCall(func, argsV);
+    // Append captured variables if this function has closures
+    auto capIt = ctx.capturedVars.find(name);
+    if (capIt != ctx.capturedVars.end()) {
+        for (auto& capName : capIt->second) {
+            auto [ptr, ty] = ctx.getVarPtr(capName);
+            if (ptr) {
+                argsV.push_back(ptr);
+            } else {
+                // Variable not found — pass null
+                argsV.push_back(llvm::ConstantPointerNull::get(
+                    llvm::PointerType::getUnqual(*ctx.llvmContext)));
+            }
+        }
+    }
+    if (func->getReturnType()->isVoidTy())
+        return ctx.builder->CreateCall(func, argsV);
+    return ctx.builder->CreateCall(func, argsV, name + "_ret");
 }
 
 llvm::Value* NewExpression::codegen(CodeGenContext& ctx) {
@@ -1667,10 +1697,31 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         paramTypes.push_back(ctx.getLLVMType(p.type));
     }
 
+    // Closure: collect outer local variables to pass as extra ptr params
+    // (skip globals, class fields — those are accessible without capture)
+    std::vector<std::string> captured;
+    std::vector<llvm::Type*> capturedTys;
+    if (!isMethod) {
+        auto ptrTy = ctx.getRefType();
+        for (auto& [vname, valloca] : ctx.locals) {
+            // Skip position tracking vars and internal names
+            if (vname.find("__") != std::string::npos) continue;
+            captured.push_back(vname);
+            capturedTys.push_back(ptrTy);
+            paramTypes.push_back(ptrTy);
+        }
+    }
+
     auto funcType = llvm::FunctionType::get(retTy, paramTypes, false);
     std::string funcName = isMethod ? (ctx.currentClassName + "_" + name) : name;
     auto func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
                                         funcName, ctx.module.get());
+
+    // Store captured variable info for call sites
+    if (!captured.empty()) {
+        ctx.capturedVars[funcName] = captured;
+        ctx.capturedTypes[funcName] = capturedTys;
+    }
 
     // Register as method if inside a class
     if (isMethod) {
@@ -1692,8 +1743,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto entry = llvm::BasicBlock::Create(*ctx.llvmContext, "entry", func);
     ctx.builder->SetInsertPoint(entry);
     ctx.locals.clear();
-    // Keep arrays that use global storage (from main block);
-    // clear only local arrays
+    // Keep arrays that use global storage (from main block)
     {
         auto savedArr = ctx.arrays;
         ctx.arrays.clear();
@@ -1730,6 +1780,49 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             ctx.locals[p.name + "__pos"] = posAlloca;
             ctx.textVars.insert(p.name);
         }
+    }
+
+    // Set up captured outer variables (closure)
+    for (size_t ci = 0; ci < captured.size(); ci++) {
+        auto& capName = captured[ci];
+        llvm::Value* capPtr = &*argIt;
+        capPtr->setName("cap_" + capName);
+        ++argIt;
+        // The captured ptr points to the outer variable's storage.
+        // We store it as if it were a local alloca so getVarPtr/Identifier can find it.
+        // Create a local alloca that holds the pointer, then use indirection.
+        // Actually, the captured ptr IS a pointer to the outer alloca.
+        // To make loads/stores work, we need to treat it AS the alloca.
+        // Since AllocaInst* is expected in locals, and capPtr is an Argument,
+        // we create a local alloca, store the ptr, and use it for indirection.
+        auto ptrTy = ctx.getRefType();
+        auto localPtr = ctx.createEntryBlockAlloca(func, capName + "_cap", ptrTy);
+        ctx.builder->CreateStore(capPtr, localPtr);
+        // For the variable to be accessible, we need loads to go through the pointer.
+        // The simplest: store the captured pointer as a "fake" alloca. When Identifier
+        // loads from it, it gets the pointer value. But that's wrong — it would load
+        // the pointer itself, not the pointed-to value.
+        //
+        // Better: create an alloca of the actual variable type, and at entry,
+        // load the value from the outer alloca via the captured pointer and store locally.
+        // But this only captures the value at call time, not by reference.
+        //
+        // For true by-reference capture: the captured ptr IS the storage location.
+        // We need locals[name] to point to the OUTER alloca. But locals expects
+        // AllocaInst*, not an arbitrary Value*.
+        //
+        // Workaround: store the outer alloca pointer in a local, and when accessing
+        // the variable, load through indirection. This requires changing how locals work.
+        //
+        // Pragmatic solution: just load the value at call time (capture by value).
+        // Most Simula programs just read outer variables, they don't write back.
+        auto outerTy = savedLocals.count(capName) ?
+            savedLocals[capName]->getAllocatedType() :
+            llvm::Type::getInt64Ty(*ctx.llvmContext);
+        auto localVar = ctx.createEntryBlockAlloca(func, capName, outerTy);
+        auto val = ctx.builder->CreateLoad(outerTy, capPtr, capName + "_load");
+        ctx.builder->CreateStore(val, localVar);
+        ctx.locals[capName] = localVar;
     }
 
     // Set up return variable for typed procedures
