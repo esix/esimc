@@ -323,6 +323,12 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
         return ctx.builder->CreateLoad(git->second->getValueType(), git->second, name);
     }
 
+    // Check if it's an array name (return pointer to array data)
+    auto ait = ctx.arrays.find(name);
+    if (ait != ctx.arrays.end()) {
+        return ait->second.basePtr;
+    }
+
     // Check if it's a no-arg function/procedure call (Simula allows omitting parens)
     auto func = ctx.module->getFunction(name);
     if (func && func->arg_size() == 0) {
