@@ -1772,8 +1772,12 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         ctx.builder->CreateStore(&*argIt, alloca);
         ctx.locals[p.name] = alloca;
         ++argIt;
+        // Register REF class name for member access resolution
+        if (!p.refClassName.empty()) {
+            ctx.refTypes[p.name] = p.refClassName;
+        }
         // For TEXT parameters, create position tracking
-        if (p.type == VarDeclaration::TEXT) {
+        if (p.type == VarDeclaration::TEXT && p.refClassName.empty()) {
             auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
             auto posAlloca = ctx.createEntryBlockAlloca(func, p.name + "__pos", i64Ty);
             ctx.builder->CreateStore(llvm::ConstantInt::get(i64Ty, 0), posAlloca);

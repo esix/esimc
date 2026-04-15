@@ -26,27 +26,46 @@ static std::vector<ParamSpec> mergeParams(
     std::vector<ParamSpec> result;
     for (auto& n : names) {
         int type = VarDeclaration::INTEGER; // default
+        std::string refClass;
         /* Find this name in the specs */
         for (auto& sp : specs) {
-            for (auto& sn : sp.second) {
-                /* Case-insensitive comparison */
-                if (sn.size() == n.size()) {
-                    bool match = true;
-                    for (size_t i = 0; i < n.size(); i++) {
-                        if (tolower((unsigned char)sn[i]) != tolower((unsigned char)n[i])) {
-                            match = false;
-                            break;
+            if (sp.first == -10) {
+                /* REF spec: first element is class name, rest are param names */
+                for (size_t si = 1; si < sp.second.size(); si++) {
+                    auto& sn = sp.second[si];
+                    if (sn.size() == n.size()) {
+                        bool match = true;
+                        for (size_t i = 0; i < n.size(); i++) {
+                            if (tolower((unsigned char)sn[i]) != tolower((unsigned char)n[i])) {
+                                match = false; break;
+                            }
+                        }
+                        if (match) {
+                            type = VarDeclaration::TEXT;
+                            refClass = sp.second[0]; // class name
+                            goto found;
                         }
                     }
-                    if (match) {
-                        type = sp.first;
-                        goto found;
+                }
+            } else {
+                for (auto& sn : sp.second) {
+                    if (sn.size() == n.size()) {
+                        bool match = true;
+                        for (size_t i = 0; i < n.size(); i++) {
+                            if (tolower((unsigned char)sn[i]) != tolower((unsigned char)n[i])) {
+                                match = false; break;
+                            }
+                        }
+                        if (match) {
+                            type = sp.first;
+                            goto found;
+                        }
                     }
                 }
             }
         }
         found:
-        result.push_back({n, type});
+        result.push_back({n, type, refClass});
     }
     return result;
 }
@@ -76,7 +95,7 @@ static std::vector<ParamSpec> mergeParams(
 %token T_WHILE T_DO
 %token T_FOR T_STEP T_UNTIL
 %token T_TRUE T_FALSE
-%token T_NOT T_AND T_OR T_EQV T_IMP
+%token T_NOT T_AND T_OR T_EQV T_IMP T_QUA
 %token T_PROCEDURE T_CLASS T_NEW T_THIS
 %token T_REF T_NONE T_IS T_IN
 %token T_VIRTUAL
@@ -260,8 +279,17 @@ array_decl
         $$ = new ArrayDeclaration((VarDeclaration::Type)$1, $3,
                                   ExprPtr($5), ExprPtr($7));
       }
+    | type_name T_ARRAY T_IDENT T_LPAREN expr T_COLON expr T_RPAREN T_COMMA T_IDENT T_LPAREN expr T_COLON expr T_RPAREN {
+        /* Two arrays on one line: TYPE ARRAY a(lo:hi), b(lo:hi) */
+        auto stmts = new StmtList();
+        stmts->push_back(StmtPtr(new ArrayDeclaration((VarDeclaration::Type)$1, $3,
+                                  ExprPtr($5), ExprPtr($7))));
+        stmts->push_back(StmtPtr(new ArrayDeclaration((VarDeclaration::Type)$1, $10,
+                                  ExprPtr($12), ExprPtr($14))));
+        $$ = new CompoundStmt(std::move(*stmts));
+        delete stmts;
+      }
     | T_REF T_LPAREN T_IDENT T_RPAREN T_ARRAY T_IDENT T_LPAREN expr T_COLON expr T_RPAREN {
-        /* REF(Class) ARRAY name(lo:hi) — array of references */
         $$ = new ArrayDeclaration(VarDeclaration::TEXT, $6,
                                   ExprPtr($8), ExprPtr($10), $3);
       }
@@ -328,7 +356,7 @@ typed_param_list
     | T_REF T_LPAREN T_IDENT T_RPAREN T_IDENT {
         /* REF(Class) parameter — passed as pointer */
         $$ = new std::vector<ParamSpec>();
-        $$->push_back({$5, VarDeclaration::TEXT});
+        $$->push_back({$5, VarDeclaration::TEXT, $3});
       }
     | typed_param_list T_COMMA type_name T_IDENT {
         $1->push_back({$4, $3});
@@ -339,7 +367,7 @@ typed_param_list
         $$ = $1;
       }
     | typed_param_list T_COMMA T_REF T_LPAREN T_IDENT T_RPAREN T_IDENT {
-        $1->push_back({$7, VarDeclaration::TEXT});
+        $1->push_back({$7, VarDeclaration::TEXT, $5});
         $$ = $1;
       }
     ;
@@ -362,8 +390,11 @@ param_specs
         $$ = $1;
       }
     | param_specs T_REF T_LPAREN T_IDENT T_RPAREN ident_list T_SEMI {
-        /* REF parameter spec: REF(Class) x; */
-        $1->push_back({VarDeclaration::TEXT, std::move(*$6)});
+        /* REF parameter spec: REF(Class) x; — use type -10, first name = class */
+        std::vector<std::string> names;
+        names.push_back(std::string($4)); // class name as first element
+        for (auto& s : *$6) names.push_back(s); // param names
+        $1->push_back({-10, std::move(names)});
         delete $6;
         $$ = $1;
       }
@@ -836,6 +867,10 @@ postfix
     | postfix T_DOT io_keyword {
         $$ = new MemberAccess(ExprPtr($1), $3);
       }
+    | postfix T_QUA T_IDENT {
+        /* QUA type qualification — ignored, just return the object */
+        $$ = $1;
+      }
     ;
 
 /* Keywords that can appear as member names after dot */
@@ -862,6 +897,7 @@ primary
     | T_NONE      { $$ = new NoneLiteral(); }
     | T_NOTEXT    { $$ = new NoneLiteral(); }
     | T_THIS      { $$ = new ThisExpression(); }
+    | T_THIS T_IDENT { $$ = new ThisExpression(); } /* THIS ClassName — type qual ignored */
     | T_IDENT     { $$ = new Identifier($1); }
     | T_NEW T_IDENT T_LPAREN arg_list T_RPAREN {
         $$ = new NewExpression($2, std::move(*$4));

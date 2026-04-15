@@ -43,6 +43,7 @@
 "OR"                            return T_OR;
 "EQV"                           return T_EQV;
 "IMP"                           return T_IMP;
+"QUA"                           return T_QUA;
 "PROCEDURE"                     return T_PROCEDURE;
 "CLASS"                         return T_CLASS;
 "NEW"                           return T_NEW;

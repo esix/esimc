@@ -28,6 +28,7 @@ using ExprList = std::vector<ExprPtr>;
 struct ParamSpec {
     std::string name;
     int type; // VarDeclaration::Type value
+    std::string refClassName; // for REF parameters: the class name
 };
 
 // ============================================================
