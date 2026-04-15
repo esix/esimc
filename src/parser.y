@@ -86,7 +86,7 @@ static std::vector<ParamSpec> mergeParams(
 %token T_NOTEXT
 /* T_VALUE and T_NAME removed — handled as identifiers contextually */
 %token T_OUTINT T_OUTREAL T_OUTFIX T_OUTTEXT T_OUTIMAGE
-%token T_ININT T_INREAL T_INCHAR T_INIMAGE
+%token T_ININT T_INREAL T_INCHAR T_INIMAGE T_LASTITEM
 
 /* Operators and punctuation */
 %token T_ASSIGN T_REFASSIGN T_COLON T_SEMI T_COMMA T_DOT T_AMP
@@ -262,7 +262,7 @@ array_decl
     | T_REF T_LPAREN T_IDENT T_RPAREN T_ARRAY T_IDENT T_LPAREN expr T_COLON expr T_RPAREN {
         /* REF(Class) ARRAY name(lo:hi) — array of references */
         $$ = new ArrayDeclaration(VarDeclaration::TEXT, $6,
-                                  ExprPtr($8), ExprPtr($10));
+                                  ExprPtr($8), ExprPtr($10), $3);
       }
     ;
 
@@ -827,6 +827,7 @@ primary
     | T_ININT     { $$ = new InIntExpression(); }
     | T_INREAL    { $$ = new InRealExpression(); }
     | T_INCHAR    { $$ = new InCharExpression(); }
+    | T_LASTITEM  { $$ = new Identifier("__lastitem"); }
     | T_IF expr T_THEN expr T_ELSE expr {
         $$ = new ConditionalExpr(ExprPtr($2), ExprPtr($4), ExprPtr($6));
       }

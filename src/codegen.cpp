@@ -239,6 +239,13 @@ void CodeGenContext::generateCode(Program& program) {
     auto entry = llvm::BasicBlock::Create(*llvmContext, "entry", mainFunc);
     builder->SetInsertPoint(entry);
 
+    // Create global LASTITEM flag (i1, initially false)
+    auto lastitemGv = new llvm::GlobalVariable(
+        *module, llvm::Type::getInt1Ty(*llvmContext), false,
+        llvm::GlobalValue::InternalLinkage,
+        llvm::ConstantInt::getFalse(*llvmContext), "g___lastitem");
+    globals["__lastitem"] = lastitemGv;
+
     inMainBlock = true;
     program.codegen(*this);
     inMainBlock = false;
@@ -810,6 +817,10 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
     if (clsName.empty() && dynamic_cast<ThisExpression*>(object.get())) {
         clsName = ctx.currentClassName;
     }
+    if (clsName.empty()) {
+        if (auto* call = dynamic_cast<ProcedureCall*>(object.get()))
+            clsName = ctx.resolveRefType(call->name);
+    }
 
     if (clsName.empty()) {
         std::cerr << "Error: cannot determine class type for member access '." << member << "'\n";
@@ -913,6 +924,10 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
     }
     if (clsName.empty() && dynamic_cast<ThisExpression*>(object.get())) {
         clsName = ctx.currentClassName;
+    }
+    if (clsName.empty()) {
+        if (auto* call = dynamic_cast<ProcedureCall*>(object.get()))
+            clsName = ctx.resolveRefType(call->name);
     }
 
     if (clsName.empty()) {
@@ -1052,11 +1067,19 @@ llvm::Value* ConditionalExpr::codegen(CodeGenContext& ctx) {
 
 llvm::Value* InIntExpression::codegen(CodeGenContext& ctx) {
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    auto i32Ty = llvm::Type::getInt32Ty(*ctx.llvmContext);
     auto func = ctx.builder->GetInsertBlock()->getParent();
     auto alloca = ctx.createEntryBlockAlloca(func, "inint_tmp", i64Ty);
     ctx.builder->CreateStore(llvm::ConstantInt::get(i64Ty, 0), alloca);
     auto fmt = ctx.builder->CreateGlobalString("%lld", "intinfmt");
-    ctx.builder->CreateCall(ctx.scanfFunc, {fmt, alloca});
+    auto ret = ctx.builder->CreateCall(ctx.scanfFunc, {fmt, alloca}, "scanf_ret");
+    // Set LASTITEM if scanf returned <= 0 (EOF or error)
+    auto lastitemGv = ctx.globals.find("__lastitem");
+    if (lastitemGv != ctx.globals.end()) {
+        auto isEof = ctx.builder->CreateICmpSLE(ret,
+            llvm::ConstantInt::get(i32Ty, 0), "iseof");
+        ctx.builder->CreateStore(isEof, lastitemGv->second);
+    }
     return ctx.builder->CreateLoad(i64Ty, alloca, "inint");
 }
 
@@ -1253,6 +1276,7 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
             info.size = size;
             info.isStackArray = true; // same layout as stack array
             ctx.arrays[name] = info;
+            if (!refClassName.empty()) ctx.refTypes[name] = refClassName;
             return gv;
         }
 
@@ -1268,6 +1292,7 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
         info.size = size;
         info.isStackArray = true;
         ctx.arrays[name] = info;
+        if (!refClassName.empty()) ctx.refTypes[name] = refClassName;
         return alloca;
     } else {
         // Dynamic bounds: heap-allocate via simula_alloc
@@ -1297,6 +1322,7 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
         info.size = 0;
         info.isStackArray = false;
         ctx.arrays[name] = info;
+        if (!refClassName.empty()) ctx.refTypes[name] = refClassName;
         // Store lo alloca name for dynamic index adjustment
         ctx.locals[name + "__lo"] = loAlloca;
         return ptr;
@@ -1410,6 +1436,11 @@ llvm::Value* MemberAssignment::codegen(CodeGenContext& ctx) {
     }
     if (clsName.empty() && dynamic_cast<ThisExpression*>(object.get())) {
         clsName = ctx.currentClassName;
+    }
+    if (clsName.empty()) {
+        if (auto* call = dynamic_cast<ProcedureCall*>(object.get())) {
+            clsName = ctx.resolveRefType(call->name);
+        }
     }
     if (clsName.empty()) {
         std::cerr << "Error: cannot determine class for member assignment '." << member << "'\n";
@@ -1982,11 +2013,36 @@ llvm::Value* InspectStatement::codegen(CodeGenContext& ctx) {
     auto obj = object->codegen(ctx);
     if (!obj) return nullptr;
 
+    // Determine the class of the inspected object from its REF type
+    std::string inspectClass;
+    if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
+        inspectClass = ctx.resolveRefType(ident->name);
+    } else if (auto* call = dynamic_cast<ProcedureCall*>(object.get())) {
+        // Array element access like BLOCKS(I) — get the array's ref class
+        inspectClass = ctx.resolveRefType(call->name);
+    }
+
     auto func = ctx.builder->GetInsertBlock()->getParent();
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
     auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
 
-    // Load class ID
+    // Save current THIS context
+    auto savedThis = ctx.currentThis;
+    auto savedClassName = ctx.currentClassName;
+
+    // INSPECT ref DO stmt (no WHEN clauses) — make fields accessible
+    if (whenClauses.empty() && otherwiseBody) {
+        if (!inspectClass.empty()) {
+            ctx.currentThis = obj;
+            ctx.currentClassName = inspectClass;
+        }
+        otherwiseBody->codegen(ctx);
+        ctx.currentThis = savedThis;
+        ctx.currentClassName = savedClassName;
+        return nullptr;
+    }
+
+    // Load class ID for WHEN dispatch
     auto baseTy = llvm::StructType::get(*ctx.llvmContext, {i64Ty, ptrTy});
     auto idPtr = ctx.builder->CreateStructGEP(baseTy, obj, 0, "classid_ptr");
     auto classId = ctx.builder->CreateLoad(i64Ty, idPtr, "classid");
@@ -2010,7 +2066,12 @@ llvm::Value* InspectStatement::codegen(CodeGenContext& ctx) {
         ctx.builder->CreateCondBr(cmpV, whenBB, nextBB);
 
         ctx.builder->SetInsertPoint(whenBB);
+        // Set THIS context for the WHEN body
+        ctx.currentThis = obj;
+        ctx.currentClassName = wc.className;
         wc.body->codegen(ctx);
+        ctx.currentThis = savedThis;
+        ctx.currentClassName = savedClassName;
         if (!ctx.builder->GetInsertBlock()->getTerminator())
             ctx.builder->CreateBr(mergeBB);
 
@@ -2020,7 +2081,13 @@ llvm::Value* InspectStatement::codegen(CodeGenContext& ctx) {
 
     // OTHERWISE
     if (otherwiseBody) {
+        if (!inspectClass.empty()) {
+            ctx.currentThis = obj;
+            ctx.currentClassName = inspectClass;
+        }
         otherwiseBody->codegen(ctx);
+        ctx.currentThis = savedThis;
+        ctx.currentClassName = savedClassName;
     }
     if (!ctx.builder->GetInsertBlock()->getTerminator())
         ctx.builder->CreateBr(mergeBB);

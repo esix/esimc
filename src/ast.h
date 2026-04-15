@@ -221,9 +221,12 @@ public:
     VarDeclaration::Type elementType;
     std::string name;
     ExprPtr lowerBound, upperBound;
-    ArrayDeclaration(VarDeclaration::Type t, std::string n, ExprPtr lo, ExprPtr hi)
+    std::string refClassName; // for REF arrays: the element class name
+    ArrayDeclaration(VarDeclaration::Type t, std::string n, ExprPtr lo, ExprPtr hi,
+                     std::string rc = "")
         : elementType(t), name(std::move(n)),
-          lowerBound(std::move(lo)), upperBound(std::move(hi)) {}
+          lowerBound(std::move(lo)), upperBound(std::move(hi)),
+          refClassName(std::move(rc)) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 

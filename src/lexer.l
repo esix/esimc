@@ -72,6 +72,7 @@
 "INREAL"                        return T_INREAL;
 "INCHAR"                        return T_INCHAR;
 "INIMAGE"                       return T_INIMAGE;
+"LASTITEM"                      return T_LASTITEM;
 
 ":-"                            return T_REFASSIGN;
 ":="                            return T_ASSIGN;
