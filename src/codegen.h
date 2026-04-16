@@ -64,6 +64,7 @@ public:
     llvm::Value* currentThis = nullptr;
     std::string currentClassName;
     std::string currentProcName;
+    bool insideMethod = false; // true when compiling a method body (nested procs aren't methods)
     llvm::AllocaInst* returnValueAlloca = nullptr;
 
     // REF type info: variable name -> class name

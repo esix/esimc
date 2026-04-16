@@ -643,6 +643,40 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
     }
 
     // OUTCHAR(ch) — print a single character
+    // ERROR(msg) — print error and abort
+    if (name == "error") {
+        auto exitFunc = ctx.module->getOrInsertFunction("exit",
+            llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx.llvmContext),
+                {llvm::Type::getInt32Ty(*ctx.llvmContext)}, false));
+        if (!args.empty()) {
+            auto msg = args[0]->codegen(ctx);
+            if (msg) {
+                auto fmt = ctx.builder->CreateGlobalString("Error: %s\n", "errfmt");
+                ctx.builder->CreateCall(ctx.printfFunc, {fmt, msg});
+            }
+        }
+        ctx.builder->CreateCall(exitFunc, {llvm::ConstantInt::get(
+            llvm::Type::getInt32Ty(*ctx.llvmContext), 1)});
+        return llvm::ConstantInt::get(i64Ty, 0);
+    }
+
+    // UNIFORM(lo, hi, seed) — random real. Uses C rand().
+    if (name == "uniform") {
+        auto lo = args.size() > 0 ? args[0]->codegen(ctx) : nullptr;
+        auto hi = args.size() > 1 ? args[1]->codegen(ctx) : nullptr;
+        if (!lo || !hi) return llvm::ConstantFP::get(doubleTy, 0.0);
+        auto randFunc = ctx.module->getOrInsertFunction("rand",
+            llvm::FunctionType::get(llvm::Type::getInt32Ty(*ctx.llvmContext), false));
+        auto rval = ctx.builder->CreateCall(randFunc, {}, "rval");
+        auto rvalD = ctx.builder->CreateSIToFP(rval, doubleTy, "rvald");
+        auto maxD = llvm::ConstantFP::get(doubleTy, 2147483647.0);
+        auto norm = ctx.builder->CreateFDiv(rvalD, maxD, "norm");
+        auto loD = lo->getType()->isDoubleTy() ? lo : ctx.builder->CreateSIToFP(lo, doubleTy);
+        auto hiD = hi->getType()->isDoubleTy() ? hi : ctx.builder->CreateSIToFP(hi, doubleTy);
+        auto range = ctx.builder->CreateFSub(hiD, loD, "range");
+        return ctx.builder->CreateFAdd(loD, ctx.builder->CreateFMul(norm, range), "uniform");
+    }
+
     // RANDINT(low, high, seed) — random integer. Uses C rand() ignoring seed.
     if (name == "randint") {
         auto lo = args[0]->codegen(ctx);
@@ -710,13 +744,28 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
     auto capIt = ctx.capturedVars.find(name);
     if (capIt != ctx.capturedVars.end()) {
         for (auto& capName : capIt->second) {
-            auto [ptr, ty] = ctx.getVarPtr(capName);
-            if (ptr) {
-                argsV.push_back(ptr);
+            if (capName == "__this") {
+                if (ctx.currentThis)
+                    argsV.push_back(ctx.currentThis);
+                else
+                    argsV.push_back(llvm::ConstantPointerNull::get(
+                        llvm::PointerType::getUnqual(*ctx.llvmContext)));
+            } else if (capName.substr(0, 6) == "__arr_") {
+                std::string arrName = capName.substr(6);
+                auto ait2 = ctx.arrays.find(arrName);
+                if (ait2 != ctx.arrays.end())
+                    argsV.push_back(ait2->second.basePtr);
+                else
+                    argsV.push_back(llvm::ConstantPointerNull::get(
+                        llvm::PointerType::getUnqual(*ctx.llvmContext)));
             } else {
-                // Variable not found — pass null
-                argsV.push_back(llvm::ConstantPointerNull::get(
-                    llvm::PointerType::getUnqual(*ctx.llvmContext)));
+                auto [ptr, ty] = ctx.getVarPtr(capName);
+                if (ptr) {
+                    argsV.push_back(ptr);
+                } else {
+                    argsV.push_back(llvm::ConstantPointerNull::get(
+                        llvm::PointerType::getUnqual(*ctx.llvmContext)));
+                }
             }
         }
     }
@@ -1699,7 +1748,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
 
     // Build parameter types
     std::vector<llvm::Type*> paramTypes;
-    bool isMethod = !ctx.currentClassName.empty();
+    bool isMethod = !ctx.currentClassName.empty() && !ctx.insideMethod;
     if (isMethod) {
         paramTypes.push_back(ctx.getRefType());
     }
@@ -1708,24 +1757,40 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     }
 
     // Closure: collect outer local variables to pass as extra ptr params
-    // (skip globals, class fields — those are accessible without capture)
     std::vector<std::string> captured;
     std::vector<llvm::Type*> capturedTys;
     if (!isMethod) {
         auto ptrTy = ctx.getRefType();
         for (auto& [vname, valloca] : ctx.locals) {
-            // Skip position tracking vars and internal names
             if (vname.find("__") != std::string::npos) continue;
             captured.push_back(vname);
             capturedTys.push_back(ptrTy);
             paramTypes.push_back(ptrTy);
         }
+        // Capture outer arrays (pass base pointer)
+        for (auto& [aname, ainfo] : ctx.arrays) {
+            if (llvm::isa<llvm::GlobalVariable>(ainfo.basePtr)) continue;
+            captured.push_back("__arr_" + aname);
+            capturedTys.push_back(ptrTy);
+            paramTypes.push_back(ptrTy);
+        }
+        // If inside a method, also capture 'this' pointer
+        if (ctx.insideMethod && ctx.currentThis) {
+            captured.push_back("__this");
+            capturedTys.push_back(ptrTy);
+            paramTypes.push_back(ptrTy);
+        }
     }
 
-    auto funcType = llvm::FunctionType::get(retTy, paramTypes, false);
     std::string funcName = isMethod ? (ctx.currentClassName + "_" + name) : name;
-    auto func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
-                                        funcName, ctx.module.get());
+
+    // Reuse existing function declaration if already created (e.g. by class pre-pass)
+    auto func = ctx.module->getFunction(funcName);
+    if (!func) {
+        auto funcType = llvm::FunctionType::get(retTy, paramTypes, false);
+        func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
+                                      funcName, ctx.module.get());
+    }
 
     // Store captured variable info for call sites
     if (!captured.empty()) {
@@ -1746,6 +1811,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto savedRetAlloca = ctx.returnValueAlloca;
     auto savedThis = ctx.currentThis;
     auto savedClassName = ctx.currentClassName;
+    auto savedInsideMethod = ctx.insideMethod;
     auto savedArrays = ctx.arrays;
     auto savedLabelBlocks = ctx.labelBlocks;
 
@@ -1771,9 +1837,13 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         ctx.currentThis = &*argIt;
         ctx.currentThis->setName("this");
         ++argIt;
-    } else {
+        ctx.insideMethod = true;
+    } else if (!ctx.insideMethod) {
+        // Only clear class context if not inside a method
+        // (nested procedures inside methods should still see class fields)
         ctx.currentThis = nullptr;
         ctx.currentClassName = "";
+        ctx.insideMethod = false;
     }
 
     for (auto& p : params) {
@@ -1828,8 +1898,25 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         // Workaround: store the outer alloca pointer in a local, and when accessing
         // the variable, load through indirection. This requires changing how locals work.
         //
+        // Handle __this capture: restore class context
+        if (capName == "__this") {
+            ctx.currentThis = capPtr;
+            continue;
+        }
+        // Handle array captures
+        if (capName.substr(0, 6) == "__arr_") {
+            std::string arrName = capName.substr(6);
+            // Look up the outer array info to get metadata
+            auto outerIt = savedArrays.find(arrName);
+            if (outerIt != savedArrays.end()) {
+                ArrayInfo ainfo = outerIt->second;
+                ainfo.basePtr = capPtr;
+                ainfo.isStackArray = false; // accessed through pointer
+                ctx.arrays[arrName] = ainfo;
+            }
+            continue;
+        }
         // Pragmatic solution: just load the value at call time (capture by value).
-        // Most Simula programs just read outer variables, they don't write back.
         auto outerTy = savedLocals.count(capName) ?
             savedLocals[capName]->getAllocatedType() :
             llvm::Type::getInt64Ty(*ctx.llvmContext);
@@ -1903,6 +1990,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     ctx.returnValueAlloca = savedRetAlloca;
     ctx.currentThis = savedThis;
     ctx.currentClassName = savedClassName;
+    ctx.insideMethod = savedInsideMethod;
     ctx.arrays = savedArrays;
     ctx.labelBlocks = savedLabelBlocks;
 
@@ -2026,7 +2114,27 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
     ctx.currentProcName = "";
     ctx.returnValueAlloca = nullptr;
 
-    // First pass: compile procedure declarations as methods
+    // Pre-pass: create LLVM function declarations for all methods
+    // (so methods can reference each other regardless of declaration order)
+    for (auto& stmt : bodyStmts) {
+        if (auto* pd = dynamic_cast<ProcedureDecl*>(stmt.get())) {
+            llvm::Type* retTy = pd->hasReturnType ?
+                ctx.getLLVMType(pd->returnType) :
+                llvm::Type::getVoidTy(*ctx.llvmContext);
+            std::vector<llvm::Type*> paramTypes;
+            paramTypes.push_back(ctx.getRefType()); // this
+            for (auto& p : pd->params) {
+                paramTypes.push_back(ctx.getLLVMType(p.type));
+            }
+            auto funcType = llvm::FunctionType::get(retTy, paramTypes, false);
+            auto methodFunc = llvm::Function::Create(funcType,
+                llvm::Function::ExternalLinkage,
+                name + "_" + pd->name, ctx.module.get());
+            ctx.classes[name].methods[pd->name] = methodFunc;
+        }
+    }
+
+    // First pass: compile procedure bodies
     for (auto& stmt : bodyStmts) {
         if (dynamic_cast<ProcedureDecl*>(stmt.get())) {
             stmt->codegen(ctx);
