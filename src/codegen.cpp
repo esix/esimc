@@ -728,6 +728,25 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // Try finding the method by searching all known classes (for INSPECT context changes)
+    if (ctx.currentThis) {
+        for (auto& [clsN, clsI] : ctx.classes) {
+            auto mit = clsI.methods.find(name);
+            if (mit != clsI.methods.end()) {
+                std::vector<llvm::Value*> argsV;
+                argsV.push_back(ctx.currentThis);
+                for (auto& arg : args) {
+                    auto v = arg->codegen(ctx);
+                    if (!v) return nullptr;
+                    argsV.push_back(v);
+                }
+                if (mit->second->getReturnType()->isVoidTy())
+                    return ctx.builder->CreateCall(mit->second, argsV);
+                return ctx.builder->CreateCall(mit->second, argsV, name + "_ret");
+            }
+        }
+    }
+
     // Look up in module functions
     auto func = ctx.module->getFunction(name);
     if (!func) {
@@ -1559,6 +1578,13 @@ llvm::Value* MemberAssignment::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* RefAssignment::codegen(CodeGenContext& ctx) {
+    // Check if assigning to procedure return variable (return-by-name with :-)
+    if (name == ctx.currentProcName && ctx.returnValueAlloca) {
+        auto val = value->codegen(ctx);
+        if (!val) return nullptr;
+        ctx.builder->CreateStore(val, ctx.returnValueAlloca);
+        return val;
+    }
     auto [varPtr, varTy] = ctx.getVarPtr(name);
     if (!varPtr) {
         std::cerr << "Error: unknown REF variable '" << name << "'\n";
@@ -1963,7 +1989,12 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
                 ctx.arrays[fi.name] = ainfo;
             }
         }
-        // Set up TEXT field position tracking for methods
+        // Set up REF field type info and TEXT tracking for methods
+        for (auto& fi : ci.fields) {
+            if (!fi.refClassName.empty()) {
+                ctx.refTypes[fi.name] = fi.refClassName;
+            }
+        }
         ctx.setupTextFieldTracking(func);
     }
 
@@ -2031,10 +2062,11 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         ClassInfo::FieldInfo fi;
         fi.name = p.name;
         fi.type = p.type;
+        fi.refClassName = p.refClassName; // store class name even if type stays TEXT
         fi.structIndex = (int)fieldTypes.size();
         ci.fields.push_back(fi);
         fieldTypes.push_back(ctx.getLLVMType(p.type));
-        if (p.type == VarDeclaration::TEXT) {
+        if (p.type == VarDeclaration::TEXT && p.refClassName.empty()) {
             ClassInfo::FieldInfo posfi;
             posfi.name = p.name + "__pos";
             posfi.type = VarDeclaration::INTEGER;
