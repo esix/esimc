@@ -41,6 +41,135 @@ llvm::BasicBlock* CodeGenContext::getOrCreateLabel(const std::string& name) {
     return bb;
 }
 
+void CodeGenContext::buildAllVtables() {
+    auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
+    auto ptrTy = getRefType();
+
+    // First: collect ALL method names across each class hierarchy
+    // For each class, gather methods from itself AND all descendants
+    for (auto& [cname, ci] : classes) {
+        // Start with inherited vtable
+        if (!ci.parentName.empty()) {
+            auto pit = classes.find(ci.parentName);
+            if (pit != classes.end()) {
+                ci.vtableMethodOrder = pit->second.vtableMethodOrder;
+                ci.vtableIndex = pit->second.vtableIndex;
+            }
+        }
+        // Add own methods
+        for (auto& [mname, mfunc] : ci.methods) {
+            if (ci.vtableIndex.find(mname) == ci.vtableIndex.end()) {
+                int idx = (int)ci.vtableMethodOrder.size() + 1;
+                ci.vtableIndex[mname] = idx;
+                ci.vtableMethodOrder.push_back(mname);
+            }
+        }
+    }
+
+    // Second pass: propagate child methods UP to parents
+    // (for virtual methods declared in parent but only implemented in children)
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto& [cname, ci] : classes) {
+            if (ci.parentName.empty()) continue;
+            auto pit = classes.find(ci.parentName);
+            if (pit == classes.end()) continue;
+            for (auto& [mname, idx] : ci.vtableIndex) {
+                if (pit->second.vtableIndex.find(mname) == pit->second.vtableIndex.end()) {
+                    int newIdx = (int)pit->second.vtableMethodOrder.size() + 1;
+                    pit->second.vtableIndex[mname] = newIdx;
+                    pit->second.vtableMethodOrder.push_back(mname);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    // Ensure child vtable indices match parent indices
+    for (auto& [cname, ci] : classes) {
+        if (ci.parentName.empty()) continue;
+        auto pit = classes.find(ci.parentName);
+        if (pit == classes.end()) continue;
+        // Adopt parent's indices
+        for (auto& [mname, idx] : pit->second.vtableIndex) {
+            ci.vtableIndex[mname] = idx;
+        }
+        ci.vtableMethodOrder = pit->second.vtableMethodOrder;
+        // Add own new methods after parent's
+        for (auto& [mname, mfunc] : ci.methods) {
+            if (ci.vtableIndex.find(mname) == ci.vtableIndex.end()) {
+                int newIdx = (int)ci.vtableMethodOrder.size() + 1;
+                ci.vtableIndex[mname] = newIdx;
+                ci.vtableMethodOrder.push_back(mname);
+            }
+        }
+    }
+
+    // Build vtable types and globals for each class
+    for (auto& [cname, ci] : classes) {
+        std::vector<llvm::Type*> vtFields;
+        vtFields.push_back(i64Ty); // classId at index 0
+        for (size_t i = 0; i < ci.vtableMethodOrder.size(); i++) {
+            vtFields.push_back(ptrTy);
+        }
+        ci.vtableType = llvm::StructType::create(*llvmContext, vtFields,
+                                                  cname + "_vtable_t");
+
+        std::vector<llvm::Constant*> vtValues;
+        vtValues.push_back(llvm::ConstantInt::get(i64Ty, ci.classId));
+        for (auto& mname : ci.vtableMethodOrder) {
+            auto mit = ci.methods.find(mname);
+            if (mit != ci.methods.end()) {
+                vtValues.push_back(mit->second);
+            } else {
+                // Check parent chain for inherited implementation
+                llvm::Function* inherited = nullptr;
+                std::string search = ci.parentName;
+                while (!search.empty()) {
+                    auto sc = classes.find(search);
+                    if (sc == classes.end()) break;
+                    auto sm = sc->second.methods.find(mname);
+                    if (sm != sc->second.methods.end()) {
+                        inherited = sm->second;
+                        break;
+                    }
+                    search = sc->second.parentName;
+                }
+                if (inherited)
+                    vtValues.push_back(inherited);
+                else
+                    vtValues.push_back(llvm::ConstantPointerNull::get(
+                        llvm::PointerType::getUnqual(*llvmContext)));
+            }
+        }
+        auto vtInit = llvm::ConstantStruct::get(ci.vtableType, vtValues);
+        auto newVtGlobal = new llvm::GlobalVariable(
+            *module, ci.vtableType, true, llvm::GlobalValue::InternalLinkage,
+            vtInit, cname + "_vtable_real");
+
+        // Replace placeholder with real vtable
+        if (ci.vtableGlobal) {
+            ci.vtableGlobal->replaceAllUsesWith(newVtGlobal);
+            ci.vtableGlobal->eraseFromParent();
+        }
+        ci.vtableGlobal = newVtGlobal;
+    }
+}
+
+llvm::Value* CodeGenContext::loadClassId(llvm::Value* obj) {
+    auto ptrTy = llvm::PointerType::getUnqual(*llvmContext);
+    auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
+    // Object index 0 is vtable pointer. Vtable index 0 is classId.
+    auto baseTy = llvm::StructType::get(*llvmContext, {ptrTy, ptrTy});
+    auto vtSlot = builder->CreateStructGEP(baseTy, obj, 0, "vt_slot");
+    auto vtPtr = builder->CreateLoad(ptrTy, vtSlot, "vtptr");
+    // vtable layout: {i64 classId, ptr method1, ...} — load classId at offset 0
+    auto cidSlot = builder->CreateGEP(i64Ty, vtPtr,
+        llvm::ConstantInt::get(llvm::Type::getInt32Ty(*llvmContext), 0), "cid_slot");
+    return builder->CreateLoad(i64Ty, cidSlot, "classid");
+}
+
 std::pair<llvm::Value*, llvm::Type*> CodeGenContext::getVarPtr(const std::string& name) {
     // Check local variables first
     auto it = locals.find(name);
@@ -70,7 +199,7 @@ void CodeGenContext::setupTextFieldTracking(llvm::Function* func) {
     auto cit = classes.find(currentClassName);
     if (cit == classes.end()) return;
     for (auto& fi : cit->second.fields) {
-        if (fi.type == VarDeclaration::TEXT && fi.structIndex >= 2) {
+        if (fi.type == VarDeclaration::TEXT && fi.structIndex >= 2 && fi.refClassName.empty()) {
             // The __pos companion field is in the struct — find it and create
             // a local "proxy" alloca that reads/writes through the struct GEP.
             // But actually, the TEXT dispatch uses locals[name+"__pos"] as an AllocaInst*.
@@ -249,6 +378,9 @@ void CodeGenContext::generateCode(Program& program) {
     inMainBlock = true;
     program.codegen(*this);
     inMainBlock = false;
+
+    // Build vtables after all classes are declared
+    buildAllVtables();
 
     builder->CreateRet(llvm::ConstantInt::get(
         llvm::Type::getInt32Ty(*llvmContext), 0));
@@ -806,11 +938,9 @@ llvm::Value* NewExpression::codegen(CodeGenContext& ctx) {
     auto obj = ctx.builder->CreateCall(ctx.allocFunc,
         {llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), sizeofStruct)});
 
-    // Store class ID at index 0
-    auto classIdPtr = ctx.builder->CreateStructGEP(ci.structType, obj, 0, "classid_ptr");
-    ctx.builder->CreateStore(
-        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), ci.classId),
-        classIdPtr);
+    // Store vtable pointer at index 0
+    auto vtableSlot = ctx.builder->CreateStructGEP(ci.structType, obj, 0, "vtable_ptr");
+    ctx.builder->CreateStore(ci.vtableGlobal, vtableSlot);
 
     // Create coroutine context and store at index 1
     auto coro = ctx.builder->CreateCall(ctx.coroCreateFunc);
@@ -935,18 +1065,46 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
         return ctx.builder->CreateLoad(fieldTy, gep, member);
     }
 
-    // No field — try as a no-arg method call (Simula allows omitting parens)
+    // No field — try as a no-arg method call via vtable (virtual dispatch)
+    {
+        auto cit2 = ctx.classes.find(clsName);
+        if (cit2 != ctx.classes.end()) {
+            auto vtIt = cit2->second.vtableIndex.find(member);
+            if (vtIt != cit2->second.vtableIndex.end() && cit2->second.vtableType) {
+                int vtIdx = vtIt->second;
+                auto ptrTy2 = ctx.getRefType();
+                auto baseObjTy = llvm::StructType::get(*ctx.llvmContext, {ptrTy2, ptrTy2});
+                auto vtSlot = ctx.builder->CreateStructGEP(baseObjTy, obj, 0, "vt_slot");
+                auto vtPtr = ctx.builder->CreateLoad(ptrTy2, vtSlot, "vtptr");
+                auto fpSlot = ctx.builder->CreateStructGEP(cit2->second.vtableType, vtPtr,
+                                                            vtIdx, "fp_slot");
+                auto fp = ctx.builder->CreateLoad(ptrTy2, fpSlot, "method_fp");
+                // Find function type
+                llvm::FunctionType* funcTy = nullptr;
+                for (auto& [cn, ci2] : ctx.classes) {
+                    auto mm = ci2.methods.find(member);
+                    if (mm != ci2.methods.end()) { funcTy = mm->second->getFunctionType(); break; }
+                }
+                if (funcTy) {
+                    if (funcTy->getReturnType()->isVoidTy())
+                        return ctx.builder->CreateCall(funcTy, fp, {obj});
+                    return ctx.builder->CreateCall(funcTy, fp, {obj}, member + "_vret");
+                }
+            }
+        }
+    }
+    // Static dispatch fallback
     std::string searchClass = clsName;
     while (!searchClass.empty()) {
-        auto cit = ctx.classes.find(searchClass);
-        if (cit == ctx.classes.end()) break;
-        auto mit = cit->second.methods.find(member);
-        if (mit != cit->second.methods.end()) {
+        auto cit3 = ctx.classes.find(searchClass);
+        if (cit3 == ctx.classes.end()) break;
+        auto mit = cit3->second.methods.find(member);
+        if (mit != cit3->second.methods.end()) {
             if (mit->second->getReturnType()->isVoidTy())
                 return ctx.builder->CreateCall(mit->second, {obj});
             return ctx.builder->CreateCall(mit->second, {obj}, member + "_ret");
         }
-        searchClass = cit->second.parentName;
+        searchClass = cit3->second.parentName;
     }
 
     std::cerr << "Error: class '" << clsName << "' has no field or method '" << member << "'\n";
@@ -1037,18 +1195,72 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
         return nullptr;
     }
 
-    // Look up the method in the class hierarchy
-    std::string searchClass = clsName;
+    // Look up the method — try vtable dispatch first
+    auto cit = ctx.classes.find(clsName);
+    if (cit != ctx.classes.end()) {
+        auto vtIt = cit->second.vtableIndex.find(method);
+        if (vtIt != cit->second.vtableIndex.end() && cit->second.vtableType) {
+            // Virtual dispatch through vtable
+            int vtIdx = vtIt->second;
+            auto ptrTy2 = ctx.getRefType();
+            auto baseObjTy = llvm::StructType::get(*ctx.llvmContext, {ptrTy2, ptrTy2});
+            auto vtSlot = ctx.builder->CreateStructGEP(baseObjTy, obj, 0, "vt_slot");
+            auto vtPtr = ctx.builder->CreateLoad(ptrTy2, vtSlot, "vtptr");
+            auto fpSlot = ctx.builder->CreateStructGEP(cit->second.vtableType, vtPtr,
+                                                        vtIdx, "fp_slot");
+            auto fp = ctx.builder->CreateLoad(ptrTy2, fpSlot, "method_fp");
+
+            // Build the function type from the method we know about
+            // Find ANY implementation to get the function type
+            llvm::FunctionType* funcTy = nullptr;
+            std::string searchCls = clsName;
+            while (!searchCls.empty()) {
+                auto sc = ctx.classes.find(searchCls);
+                if (sc == ctx.classes.end()) break;
+                auto mm = sc->second.methods.find(method);
+                if (mm != sc->second.methods.end()) {
+                    funcTy = mm->second->getFunctionType();
+                    break;
+                }
+                searchCls = sc->second.parentName;
+            }
+            // Also check child classes if not found in parent chain
+            if (!funcTy) {
+                for (auto& [cn, ci2] : ctx.classes) {
+                    auto mm = ci2.methods.find(method);
+                    if (mm != ci2.methods.end()) {
+                        funcTy = mm->second->getFunctionType();
+                        break;
+                    }
+                }
+            }
+            if (funcTy) {
+                std::vector<llvm::Value*> argsV;
+                argsV.push_back(obj);
+                for (auto& arg : args) {
+                    auto v = arg->codegen(ctx);
+                    if (!v) return nullptr;
+                    argsV.push_back(v);
+                }
+                if (funcTy->getReturnType()->isVoidTy())
+                    return ctx.builder->CreateCall(funcTy, fp, argsV);
+                return ctx.builder->CreateCall(funcTy, fp, argsV, method + "_vret");
+            }
+        }
+    }
+
+    // Fallback: direct call (static dispatch)
     llvm::Function* methodFunc = nullptr;
+    std::string searchClass = clsName;
     while (!searchClass.empty()) {
-        auto cit = ctx.classes.find(searchClass);
-        if (cit == ctx.classes.end()) break;
-        auto mit = cit->second.methods.find(method);
-        if (mit != cit->second.methods.end()) {
+        auto sc = ctx.classes.find(searchClass);
+        if (sc == ctx.classes.end()) break;
+        auto mit = sc->second.methods.find(method);
+        if (mit != sc->second.methods.end()) {
             methodFunc = mit->second;
             break;
         }
-        searchClass = cit->second.parentName;
+        searchClass = sc->second.parentName;
     }
 
     if (!methodFunc) {
@@ -1085,11 +1297,7 @@ llvm::Value* IsExpression::codegen(CodeGenContext& ctx) {
     }
 
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
-    auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
-    auto baseTy = llvm::StructType::get(*ctx.llvmContext, {i64Ty, ptrTy});
-    auto idPtr = ctx.builder->CreateStructGEP(baseTy, obj, 0, "classid_ptr");
-    auto classId = ctx.builder->CreateLoad(i64Ty, idPtr, "classid");
-
+    auto classId = ctx.loadClassId(obj);
     return ctx.builder->CreateICmpEQ(classId,
         llvm::ConstantInt::get(i64Ty, cit->second.classId), "is_check");
 }
@@ -1105,10 +1313,7 @@ llvm::Value* InExpression::codegen(CodeGenContext& ctx) {
     }
 
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
-    auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
-    auto baseTy = llvm::StructType::get(*ctx.llvmContext, {i64Ty, ptrTy});
-    auto idPtr = ctx.builder->CreateStructGEP(baseTy, obj, 0, "classid_ptr");
-    auto classId = ctx.builder->CreateLoad(i64Ty, idPtr, "classid");
+    auto classId = ctx.loadClassId(obj);
 
     llvm::Value* result = ctx.builder->getFalse();
     for (int id : ids) {
@@ -2037,10 +2242,10 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
     ci.classId = ctx.nextClassId++;
     ci.coroFieldIndex = 1;
 
-    // Build struct fields: [classId (i64), coroPtr (ptr), inherited fields..., own fields...]
+    // Build struct fields: [vtablePtr (ptr), coroPtr (ptr), inherited fields..., own fields...]
     std::vector<llvm::Type*> fieldTypes;
-    fieldTypes.push_back(llvm::Type::getInt64Ty(*ctx.llvmContext)); // classId
-    fieldTypes.push_back(ctx.getRefType()); // coro context ptr
+    fieldTypes.push_back(ctx.getRefType()); // vtable pointer (index 0)
+    fieldTypes.push_back(ctx.getRefType()); // coro context ptr (index 1)
 
     // Inherit parent fields
     if (!parentName.empty()) {
@@ -2173,6 +2378,76 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // Build vtable metadata (indices) now so method dispatch works during codegen.
+    // The actual vtable global with function pointers is built later by buildAllVtables().
+    {
+        auto& ciRef = ctx.classes[name];
+        auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+        auto ptrTy = ctx.getRefType();
+
+        // Inherit parent vtable order
+        if (!parentName.empty()) {
+            auto pit = ctx.classes.find(parentName);
+            if (pit != ctx.classes.end()) {
+                ciRef.vtableMethodOrder = pit->second.vtableMethodOrder;
+                ciRef.vtableIndex = pit->second.vtableIndex;
+            }
+        }
+
+        // Add own methods
+        for (auto& [mname, mfunc] : ciRef.methods) {
+            if (ciRef.vtableIndex.find(mname) == ciRef.vtableIndex.end()) {
+                int idx = (int)ciRef.vtableMethodOrder.size() + 1;
+                ciRef.vtableIndex[mname] = idx;
+                ciRef.vtableMethodOrder.push_back(mname);
+            }
+        }
+
+        // Propagate new methods UP to parent vtable metadata
+        if (!parentName.empty()) {
+            auto pit = ctx.classes.find(parentName);
+            if (pit != ctx.classes.end()) {
+                for (auto& [mname, idx] : ciRef.vtableIndex) {
+                    if (pit->second.vtableIndex.find(mname) == pit->second.vtableIndex.end()) {
+                        int newIdx = (int)pit->second.vtableMethodOrder.size() + 1;
+                        pit->second.vtableIndex[mname] = newIdx;
+                        pit->second.vtableMethodOrder.push_back(mname);
+                    }
+                }
+                // Rebuild parent vtable type to match new size
+                std::vector<llvm::Type*> pvtFields = {i64Ty};
+                for (size_t i = 0; i < pit->second.vtableMethodOrder.size(); i++)
+                    pvtFields.push_back(ptrTy);
+                pit->second.vtableType->setBody(pvtFields);
+
+                // Re-sync own indices with parent
+                ciRef.vtableMethodOrder = pit->second.vtableMethodOrder;
+                ciRef.vtableIndex = pit->second.vtableIndex;
+                // Add back own-only methods
+                for (auto& [mname, mfunc] : ciRef.methods) {
+                    if (ciRef.vtableIndex.find(mname) == ciRef.vtableIndex.end()) {
+                        int newIdx = (int)ciRef.vtableMethodOrder.size() + 1;
+                        ciRef.vtableIndex[mname] = newIdx;
+                        ciRef.vtableMethodOrder.push_back(mname);
+                    }
+                }
+            }
+        }
+
+        // Build vtable type
+        std::vector<llvm::Type*> vtFields = {i64Ty};
+        for (size_t i = 0; i < ciRef.vtableMethodOrder.size(); i++)
+            vtFields.push_back(ptrTy);
+        ciRef.vtableType = llvm::StructType::create(*ctx.llvmContext, vtFields,
+                                                     name + "_vtable_t");
+
+        // Create placeholder global (buildAllVtables will replace initializer)
+        auto tmpInit = llvm::ConstantAggregateZero::get(ciRef.vtableType);
+        ciRef.vtableGlobal = new llvm::GlobalVariable(
+            *ctx.module, ciRef.vtableType, false, llvm::GlobalValue::InternalLinkage,
+            tmpInit, name + "_vtable");
+    }
+
     // Create class body function: void @ClassName_body(ptr %this)
     auto bodyFuncType = llvm::FunctionType::get(
         llvm::Type::getVoidTy(*ctx.llvmContext), {ctx.getRefType()}, false);
@@ -2290,9 +2565,7 @@ llvm::Value* InspectStatement::codegen(CodeGenContext& ctx) {
     }
 
     // Load class ID for WHEN dispatch
-    auto baseTy = llvm::StructType::get(*ctx.llvmContext, {i64Ty, ptrTy});
-    auto idPtr = ctx.builder->CreateStructGEP(baseTy, obj, 0, "classid_ptr");
-    auto classId = ctx.builder->CreateLoad(i64Ty, idPtr, "classid");
+    auto classId = ctx.loadClassId(obj);
 
     auto mergeBB = llvm::BasicBlock::Create(*ctx.llvmContext, "inspect_end");
 
@@ -2346,6 +2619,10 @@ llvm::Value* InspectStatement::codegen(CodeGenContext& ctx) {
 
 // ---- Coroutines ----
 
+llvm::Value* VirtualDecl::codegen(CodeGenContext& ctx) {
+    return nullptr; // vtables are built by buildAllVtables()
+}
+
 llvm::Value* DetachStatement::codegen(CodeGenContext& ctx) {
     if (!ctx.currentThis) {
         std::cerr << "Error: DETACH used outside of a class body\n";
@@ -2354,7 +2631,7 @@ llvm::Value* DetachStatement::codegen(CodeGenContext& ctx) {
 
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
     auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
-    auto baseTy = llvm::StructType::get(*ctx.llvmContext, {i64Ty, ptrTy});
+    auto baseTy = llvm::StructType::get(*ctx.llvmContext, {ptrTy, ptrTy});
 
     auto coroSlot = ctx.builder->CreateStructGEP(baseTy, ctx.currentThis, 1, "coro_slot");
     auto coro = ctx.builder->CreateLoad(ptrTy, coroSlot, "coro");
@@ -2368,7 +2645,7 @@ llvm::Value* ResumeStatement::codegen(CodeGenContext& ctx) {
 
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
     auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
-    auto baseTy = llvm::StructType::get(*ctx.llvmContext, {i64Ty, ptrTy});
+    auto baseTy = llvm::StructType::get(*ctx.llvmContext, {ptrTy, ptrTy});
 
     auto coroSlot = ctx.builder->CreateStructGEP(baseTy, obj, 1, "coro_slot");
     auto coro = ctx.builder->CreateLoad(ptrTy, coroSlot, "coro");
@@ -2382,7 +2659,7 @@ llvm::Value* CallStatement::codegen(CodeGenContext& ctx) {
 
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
     auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
-    auto baseTy = llvm::StructType::get(*ctx.llvmContext, {i64Ty, ptrTy});
+    auto baseTy = llvm::StructType::get(*ctx.llvmContext, {ptrTy, ptrTy});
 
     auto coroSlot = ctx.builder->CreateStructGEP(baseTy, obj, 1, "coro_slot");
     auto coro = ctx.builder->CreateLoad(ptrTy, coroSlot, "coro");

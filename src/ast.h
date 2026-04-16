@@ -421,6 +421,15 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
+// VIRTUAL: method declarations (records method names for vtable)
+class VirtualDecl : public Statement {
+public:
+    std::vector<std::string> methodNames;
+    explicit VirtualDecl(std::vector<std::string> names)
+        : methodNames(std::move(names)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
 class DetachStatement : public Statement {
 public:
     llvm::Value* codegen(CodeGenContext& context) override;

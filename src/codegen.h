@@ -29,8 +29,13 @@ struct ClassInfo {
     std::map<std::string, llvm::Function*> methods;
     llvm::Function* bodyFunc;
     int coroFieldIndex;
-    // Array metadata: name -> {lowerBound, size}
     std::map<std::string, std::pair<long long, long long>> arrayMeta;
+
+    // Virtual dispatch
+    llvm::StructType* vtableType = nullptr;
+    llvm::GlobalVariable* vtableGlobal = nullptr;
+    std::vector<std::string> vtableMethodOrder; // method names in vtable order
+    std::map<std::string, int> vtableIndex; // method name -> index in vtable (0=classId)
 };
 
 struct ArrayInfo {
@@ -122,6 +127,11 @@ public:
 
     // Label helpers
     llvm::BasicBlock* getOrCreateLabel(const std::string& name);
+
+    llvm::Value* loadClassId(llvm::Value* obj);
+
+    // Build/rebuild vtables for all classes (called after all ClassDecls)
+    void buildAllVtables();
 
     // Variable access: returns a pointer to the variable (alloca or GEP for class fields)
     // and the LLVM type of the stored value. Returns {nullptr, nullptr} if not found.
