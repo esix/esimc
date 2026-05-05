@@ -2411,6 +2411,24 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // Pre-pass: compile nested class declarations (so they're available)
+    {
+        auto savedThis = ctx.currentThis;
+        auto savedClassName = ctx.currentClassName;
+        auto savedInsideMethod = ctx.insideMethod;
+        ctx.currentThis = nullptr;
+        ctx.currentClassName = "";
+        ctx.insideMethod = false;
+        for (auto& stmt : bodyStmts) {
+            if (dynamic_cast<ClassDecl*>(stmt.get())) {
+                stmt->codegen(ctx);
+            }
+        }
+        ctx.currentThis = savedThis;
+        ctx.currentClassName = savedClassName;
+        ctx.insideMethod = savedInsideMethod;
+    }
+
     // First pass: compile procedure bodies
     for (auto& stmt : bodyStmts) {
         if (dynamic_cast<ProcedureDecl*>(stmt.get())) {
@@ -2523,6 +2541,7 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
     //             LabelDeclarations, executable statements
     for (auto& stmt : bodyStmts) {
         if (dynamic_cast<ProcedureDecl*>(stmt.get())) continue;
+        if (dynamic_cast<ClassDecl*>(stmt.get())) continue;
         if (dynamic_cast<VarDeclaration*>(stmt.get())) continue;
         if (dynamic_cast<RefDeclaration*>(stmt.get())) continue;
         if (auto* cs = dynamic_cast<CompoundStmt*>(stmt.get())) {
