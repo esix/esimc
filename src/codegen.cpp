@@ -1249,6 +1249,38 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // Try as member array access: obj.field(index)
+    auto cit3 = ctx.classes.find(clsName);
+    if (cit3 != ctx.classes.end()) {
+        auto mit3 = cit3->second.arrayMeta.find(method);
+        if (mit3 != cit3->second.arrayMeta.end() && !args.empty()) {
+            // Member array access — get the field (pointer to data) and index
+            int fldIdx = ctx.getFieldIndex(clsName, method);
+            if (fldIdx >= 0) {
+                auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                auto ptrTy2 = ctx.getRefType();
+                auto& ci = cit3->second;
+                auto gep = ctx.builder->CreateStructGEP(ci.structType, obj, fldIdx, method + "_aptr");
+                auto arrPtr = ctx.builder->CreateLoad(ptrTy2, gep, method + "_arr");
+                auto idxVal = args[0]->codegen(ctx);
+                if (!idxVal) return nullptr;
+                long long lo = mit3->second.first;
+                auto adjusted = ctx.builder->CreateSub(idxVal,
+                    llvm::ConstantInt::get(i64Ty, lo), "adj_idx");
+                // Element type — check refClassName for REF arrays
+                llvm::Type* elemTy = ptrTy2;
+                for (auto& f : ci.fields) {
+                    if (f.name == method) {
+                        if (f.refClassName.empty()) elemTy = ctx.getLLVMType(f.type);
+                        break;
+                    }
+                }
+                auto elemGep = ctx.builder->CreateGEP(elemTy, arrPtr, adjusted, "marr_elem");
+                return ctx.builder->CreateLoad(elemTy, elemGep, method + "_val");
+            }
+        }
+    }
+
     // Fallback: direct call (static dispatch)
     llvm::Function* methodFunc = nullptr;
     std::string searchClass = clsName;
