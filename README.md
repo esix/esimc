@@ -200,13 +200,31 @@ Source (.sim) → Flex (tokens) → Bison (AST) → Codegen (LLVM IR) → LLC (o
 
 The compiler is single-pass: declarations are processed in order. The runtime library provides memory allocation (`simula_alloc`) and coroutine primitives (`simula_coro_*`) using POSIX `ucontext`.
 
+## What's Implemented
+
+- **Types**: INTEGER, REAL, BOOLEAN, TEXT, CHARACTER, REF(Class), ARRAY (1D, dynamic bounds)
+- **Procedures**: C-style and Simula-style parameter declarations, recursion, return-by-name
+- **Classes**: inheritance, virtual dispatch via vtables, INSPECT/WHEN, IS/IN, QUA
+- **Coroutines**: DETACH/RESUME using POSIX ucontext (Windows Fibers on Win32)
+- **Closures**: nested procedures capture outer variables, this pointer, and arrays
+- **Control flow**: IF/THEN/ELSE (statement and expression), WHILE, FOR (range and value-list), GOTO/LABEL
+- **TEXT operations**: .Length, .More, .GetChar, .PutChar, .SetPos, .Pos, .Strip, .Sub, .Main
+- **I/O**: OutText, OutInt, OutReal, OutFix, OutChar, OutImage, ININT, INREAL, INCHAR, LASTITEM
+- **Built-ins**: ABS, MOD, ENTIER, SIGN, CHAR, RANK, BLANKS, COPY, LENGTH, RANDINT, UNIFORM, ERROR, UPPERBOUND, LOWERBOUND
+- **Operators**: arithmetic (+ - * / // **), comparison (= <> < <= > >= == =/=), logical (AND/OR/NOT/EQV/IMP/AND THEN/OR ELSE), text concatenation (&)
+
 ## Limitations / Not Yet Implemented
 
-- **Virtual dispatch**: method calls are statically dispatched based on the declared REF type, not the runtime type
-- **VALUE/NAME parameter modes**: all parameters are passed by value
-- **ARRAY type**: not implemented
-- **Text operations**: TEXT is a simple char pointer, no Simula text operations (Sub, Length, etc.)
-- **Garbage collection**: objects are allocated but never freed
-- **Standard environment**: only basic I/O (OutText, OutInt, OutReal, OutImage)
-- **Separate compilation**: everything must be in one source file
+- **2D+ arrays**: only 1-dimensional arrays supported
+- **LABEL parameters**: pass-by-name labels for non-local GOTO
+- **EXTERNAL CLASS**: no module/separate compilation system
+- **File I/O**: no INFILE/OUTFILE classes (only stdin/stdout)
+- **Garbage collection**: objects allocated but never freed
+- **FOR multi-range**: `FOR i := a STEP 1 UNTIL b, c STEP 1 UNTIL d DO`
 - **Error recovery**: parser stops at first error
+
+## Test Coverage
+
+The `examples/` directory includes 7 tutorial programs (all passing) plus 19 Rosetta Code Simula programs.
+**Currently 16 of 26 examples compile and run** — most remaining failures need EXTERNAL modules,
+2D arrays, or LABEL parameters.
