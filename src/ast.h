@@ -29,6 +29,8 @@ struct ParamSpec {
     std::string name;
     int type; // VarDeclaration::Type value
     std::string refClassName; // for REF parameters: the class name
+    bool isArray = false; // for ARRAY parameters
+    int arrayElemType = 0; // VarDeclaration::Type for array elements
 };
 
 // ============================================================

@@ -500,6 +500,11 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // If the name refers to a function, return its pointer (procedure-as-value)
+    if (func) {
+        return func;
+    }
+
     std::cerr << "Error: unknown variable '" << name << "'\n";
     return nullptr;
 }
@@ -876,6 +881,33 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                     return ctx.builder->CreateCall(mit->second, argsV);
                 return ctx.builder->CreateCall(mit->second, argsV, name + "_ret");
             }
+        }
+    }
+
+    // Check if name is a local variable holding a function pointer (procedure parameter)
+    {
+        auto lit = ctx.locals.find(name);
+        if (lit != ctx.locals.end()) {
+            // It's a local — load the function pointer and call it indirectly
+            auto ptrTy2 = ctx.getRefType();
+            auto fnPtr = ctx.builder->CreateLoad(ptrTy2, lit->second, name + "_fn");
+            // Build a function type based on argument types
+            std::vector<llvm::Value*> argsV;
+            std::vector<llvm::Type*> argTys;
+            for (auto& arg : args) {
+                auto v = arg->codegen(ctx);
+                if (!v) return nullptr;
+                argsV.push_back(v);
+                argTys.push_back(v->getType());
+            }
+            // Assume return type matches the first arg (simplification)
+            llvm::Type* retTy = args.empty() ?
+                llvm::Type::getVoidTy(*ctx.llvmContext) :
+                argsV[0]->getType();
+            auto fnTy = llvm::FunctionType::get(retTy, argTys, false);
+            if (retTy->isVoidTy())
+                return ctx.builder->CreateCall(fnTy, fnPtr, argsV);
+            return ctx.builder->CreateCall(fnTy, fnPtr, argsV, name + "_iret");
         }
     }
 
@@ -2159,8 +2191,18 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         if (!p.refClassName.empty()) {
             ctx.refTypes[p.name] = p.refClassName;
         }
+        // Register array parameters in ctx.arrays
+        if (p.isArray) {
+            ArrayInfo info;
+            info.basePtr = ctx.builder->CreateLoad(ctx.getRefType(), alloca, p.name + "_arrptr");
+            info.elementType = ctx.getLLVMType(p.arrayElemType);
+            info.lowerBound = 1; // assume 1-based
+            info.size = 0; // unknown
+            info.isStackArray = false;
+            ctx.arrays[p.name] = info;
+        }
         // For TEXT parameters, create position tracking
-        if (p.type == VarDeclaration::TEXT && p.refClassName.empty()) {
+        if (p.type == VarDeclaration::TEXT && p.refClassName.empty() && !p.isArray) {
             auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
             auto posAlloca = ctx.createEntryBlockAlloca(func, p.name + "__pos", i64Ty);
             ctx.builder->CreateStore(llvm::ConstantInt::get(i64Ty, 0), posAlloca);

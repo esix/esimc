@@ -27,6 +27,8 @@ static std::vector<ParamSpec> mergeParams(
     for (auto& n : names) {
         int type = VarDeclaration::INTEGER; // default
         std::string refClass;
+        bool isArray = false;
+        int arrayElem = 0;
         /* Find this name in the specs */
         for (auto& sp : specs) {
             if (sp.first == -10) {
@@ -43,6 +45,25 @@ static std::vector<ParamSpec> mergeParams(
                         if (match) {
                             type = VarDeclaration::TEXT;
                             refClass = sp.second[0]; // class name
+                            goto found;
+                        }
+                    }
+                }
+            } else if (sp.first <= -20) {
+                /* Array spec: encode (-20 - elem*1000) */
+                int elemTy = (-(sp.first + 20)) / 1000;
+                for (auto& sn : sp.second) {
+                    if (sn.size() == n.size()) {
+                        bool match = true;
+                        for (size_t i = 0; i < n.size(); i++) {
+                            if (tolower((unsigned char)sn[i]) != tolower((unsigned char)n[i])) {
+                                match = false; break;
+                            }
+                        }
+                        if (match) {
+                            type = VarDeclaration::TEXT;
+                            isArray = true;
+                            arrayElem = elemTy;
                             goto found;
                         }
                     }
@@ -65,7 +86,10 @@ static std::vector<ParamSpec> mergeParams(
             }
         }
         found:
-        result.push_back({n, type, refClass});
+        ParamSpec ps;
+        ps.name = n; ps.type = type; ps.refClassName = refClass;
+        ps.isArray = isArray; ps.arrayElemType = arrayElem;
+        result.push_back(ps);
     }
     return result;
 }
@@ -398,7 +422,9 @@ typed_param_list
     | type_name T_ARRAY T_IDENT {
         /* Array parameter — passed as pointer */
         $$ = new std::vector<ParamSpec>();
-        $$->push_back({$3, VarDeclaration::TEXT});
+        ParamSpec ps;
+        ps.name = $3; ps.type = VarDeclaration::TEXT; ps.isArray = true; ps.arrayElemType = $1;
+        $$->push_back(ps);
       }
     | T_REF T_LPAREN T_IDENT T_RPAREN T_IDENT {
         /* REF(Class) parameter — passed as pointer */
@@ -410,7 +436,9 @@ typed_param_list
         $$ = $1;
       }
     | typed_param_list T_COMMA type_name T_ARRAY T_IDENT {
-        $1->push_back({$5, VarDeclaration::TEXT});
+        ParamSpec ps;
+        ps.name = $5; ps.type = VarDeclaration::TEXT; ps.isArray = true; ps.arrayElemType = $3;
+        $1->push_back(ps);
         $$ = $1;
       }
     | typed_param_list T_COMMA T_REF T_LPAREN T_IDENT T_RPAREN T_IDENT {
@@ -431,8 +459,8 @@ param_specs
         $$ = $1;
       }
     | param_specs type_name T_ARRAY ident_list T_SEMI {
-        /* Array parameter spec: INTEGER ARRAY a; */
-        $1->push_back({VarDeclaration::TEXT, std::move(*$4)});
+        /* Array parameter spec: INTEGER ARRAY a; — use code -20 + (elem type * -1000) */
+        $1->push_back({-20 - $2 * 1000, std::move(*$4)});
         delete $4;
         $$ = $1;
       }
