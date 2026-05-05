@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <algorithm>
+#include <functional>
 
 // ============================================================
 // CodeGenContext implementation
@@ -375,6 +376,15 @@ void CodeGenContext::generateCode(Program& program) {
         llvm::ConstantInt::getFalse(*llvmContext), "g___lastitem");
     globals["__lastitem"] = lastitemGv;
 
+    // Stub globals for Simula standard files (SYSIN, SYSOUT, etc.)
+    auto ptrTy = llvm::PointerType::getUnqual(*llvmContext);
+    for (auto stdName : {"sysin", "sysout"}) {
+        auto gv = new llvm::GlobalVariable(
+            *module, ptrTy, false, llvm::GlobalValue::InternalLinkage,
+            llvm::ConstantPointerNull::get(ptrTy), std::string("g_") + stdName);
+        globals[stdName] = gv;
+    }
+
     inMainBlock = true;
     program.codegen(*this);
     inMainBlock = false;
@@ -503,6 +513,11 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
     // If the name refers to a function, return its pointer (procedure-as-value)
     if (func) {
         return func;
+    }
+
+    // If the name is a known label, return its index (LABEL parameter passing)
+    if (ctx.labelBlocks.count(name)) {
+        return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), 0);
     }
 
     std::cerr << "Error: unknown variable '" << name << "'\n";
@@ -2315,6 +2330,36 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             }
         }
         ctx.setupTextFieldTracking(func);
+    }
+
+    // Pre-scan body for labels so they're available for forward references
+    {
+        std::function<void(Statement*)> scan = [&](Statement* s) {
+            if (auto* ld = dynamic_cast<LabelDeclaration*>(s)) {
+                for (auto& n : ld->labels) ctx.getOrCreateLabel(n);
+            }
+            if (auto* ls = dynamic_cast<LabeledStatement*>(s)) {
+                ctx.getOrCreateLabel(ls->label);
+                if (ls->statement) scan(ls->statement.get());
+            }
+            if (auto* b = dynamic_cast<Block*>(s)) {
+                for (auto& st : b->statements) scan(st.get());
+            }
+            if (auto* cs = dynamic_cast<CompoundStmt*>(s)) {
+                for (auto& st : cs->statements) scan(st.get());
+            }
+            if (auto* ifs = dynamic_cast<IfStatement*>(s)) {
+                if (ifs->thenBranch) scan(ifs->thenBranch.get());
+                if (ifs->elseBranch) scan(ifs->elseBranch.get());
+            }
+            if (auto* w = dynamic_cast<WhileStatement*>(s)) {
+                if (w->body) scan(w->body.get());
+            }
+            if (auto* fs = dynamic_cast<ForStatement*>(s)) {
+                if (fs->body) scan(fs->body.get());
+            }
+        };
+        if (body) scan(body.get());
     }
 
     // Generate body

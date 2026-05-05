@@ -464,6 +464,12 @@ param_specs
         delete $4;
         $$ = $1;
       }
+    | param_specs T_LABEL ident_list T_SEMI {
+        /* LABEL parameter spec — treated as TEXT (ptr) */
+        $1->push_back({VarDeclaration::TEXT, std::move(*$3)});
+        delete $3;
+        $$ = $1;
+      }
     | param_specs T_REF T_LPAREN T_IDENT T_RPAREN ident_list T_SEMI {
         /* REF parameter spec: REF(Class) x; — use type -10, first name = class */
         std::vector<std::string> names;
