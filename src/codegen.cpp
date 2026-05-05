@@ -2465,6 +2465,30 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
     ctx.currentProcName = "";
     ctx.returnValueAlloca = nullptr;
 
+    // Pre-create the class body function declaration AND vtable placeholder
+    // (so NEW ClassName inside methods can reference them)
+    {
+        auto bodyFuncType = llvm::FunctionType::get(
+            llvm::Type::getVoidTy(*ctx.llvmContext), {ctx.getRefType()}, false);
+        auto bodyFunc = llvm::Function::Create(
+            bodyFuncType, llvm::Function::ExternalLinkage,
+            name + "_body", ctx.module.get());
+        ctx.classes[name].bodyFunc = bodyFunc;
+
+        // Pre-create vtable placeholder (size will be fixed up later)
+        auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+        auto ptrTy = ctx.getRefType();
+        std::vector<llvm::Type*> vtFields = {i64Ty};
+        // Reserve room — will be expanded later
+        for (int i = 0; i < 16; i++) vtFields.push_back(ptrTy);
+        auto tmpVtTy = llvm::StructType::create(*ctx.llvmContext, vtFields, name + "_vtable_t");
+        ctx.classes[name].vtableType = tmpVtTy;
+        auto tmpInit = llvm::ConstantAggregateZero::get(tmpVtTy);
+        ctx.classes[name].vtableGlobal = new llvm::GlobalVariable(
+            *ctx.module, tmpVtTy, false, llvm::GlobalValue::InternalLinkage,
+            tmpInit, name + "_vtable");
+    }
+
     // Pre-pass: create LLVM function declarations for all methods
     // (so methods can reference each other regardless of declaration order)
     for (auto& stmt : bodyStmts) {
@@ -2566,27 +2590,12 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
             }
         }
 
-        // Build vtable type
-        std::vector<llvm::Type*> vtFields = {i64Ty};
-        for (size_t i = 0; i < ciRef.vtableMethodOrder.size(); i++)
-            vtFields.push_back(ptrTy);
-        ciRef.vtableType = llvm::StructType::create(*ctx.llvmContext, vtFields,
-                                                     name + "_vtable_t");
-
-        // Create placeholder global (buildAllVtables will replace initializer)
-        auto tmpInit = llvm::ConstantAggregateZero::get(ciRef.vtableType);
-        ciRef.vtableGlobal = new llvm::GlobalVariable(
-            *ctx.module, ciRef.vtableType, false, llvm::GlobalValue::InternalLinkage,
-            tmpInit, name + "_vtable");
+        // vtable type and global already created above
+        // (buildAllVtables will set the proper body and initializer)
     }
 
-    // Create class body function: void @ClassName_body(ptr %this)
-    auto bodyFuncType = llvm::FunctionType::get(
-        llvm::Type::getVoidTy(*ctx.llvmContext), {ctx.getRefType()}, false);
-    auto bodyFunc = llvm::Function::Create(
-        bodyFuncType, llvm::Function::ExternalLinkage,
-        name + "_body", ctx.module.get());
-    ctx.classes[name].bodyFunc = bodyFunc;
+    // Use the pre-declared class body function: void @ClassName_body(ptr %this)
+    auto bodyFunc = ctx.classes[name].bodyFunc;
 
     // Generate body function
     auto bodyEntry = llvm::BasicBlock::Create(*ctx.llvmContext, "entry", bodyFunc);
