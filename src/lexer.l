@@ -62,6 +62,7 @@
 "ARRAY"                         return T_ARRAY;
 "LABEL"                         return T_LABEL;
 "NOTEXT"                        return T_NOTEXT;
+"EXTERNAL"                      return T_EXTERNAL;
 "GO"[ \t]+"TO"                  return T_GOTO;
 "GOTO"                          return T_GOTO;
 "OUTINT"                        return T_OUTINT;

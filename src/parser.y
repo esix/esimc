@@ -102,7 +102,7 @@ static std::vector<ParamSpec> mergeParams(
 %token T_INSPECT T_WHEN T_OTHERWISE
 %token T_DETACH T_RESUME T_CALL
 %token T_ARRAY T_LABEL T_GOTO
-%token T_NOTEXT
+%token T_NOTEXT T_EXTERNAL
 /* T_VALUE and T_NAME removed — handled as identifiers contextually */
 %token T_OUTINT T_OUTREAL T_OUTFIX T_OUTTEXT T_OUTIMAGE
 %token T_ININT T_INREAL T_INCHAR T_INIMAGE T_LASTITEM
@@ -128,7 +128,8 @@ static std::vector<ParamSpec> mergeParams(
 %type <stmt> inspect_stmt
 %type <stmt> detach_stmt resume_stmt call_stmt
 %type <stmt> outint_stmt outreal_stmt outfix_stmt outtext_stmt outimage_stmt inimage_stmt
-%type <stmt> expr_stmt virtual_spec
+%type <stmt> expr_stmt virtual_spec top_level_decl external_decl
+%type <stmtlist> top_level_decls
 %type <stmtlist> stmt_list class_body
 %type <exprlist> arg_list arg_list_ne
 %type <namelist> ident_list
@@ -151,6 +152,43 @@ program
     | block T_DOT       { programRoot = new Program(StmtPtr($1)); }
     | block T_SEMI      { programRoot = new Program(StmtPtr($1)); }
     | block T_SEMI T_DOT { programRoot = new Program(StmtPtr($1)); }
+    | top_level_decls {
+        /* Top-level class/external declarations — wrap in an empty block */
+        programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
+        delete $1;
+      }
+    | top_level_decls T_DOT {
+        programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
+        delete $1;
+      }
+    ;
+
+top_level_decls
+    : top_level_decl { $$ = new StmtList(); $$->push_back(StmtPtr($1)); }
+    | top_level_decls top_level_decl { $1->push_back(StmtPtr($2)); $$ = $1; }
+    | top_level_decls T_SEMI { $$ = $1; }
+    ;
+
+top_level_decl
+    : class_decl
+    | external_decl
+    ;
+
+external_decl
+    : T_EXTERNAL T_CLASS T_IDENT {
+        /* EXTERNAL CLASS Name — forward declaration, ignored */
+        $$ = new ExprStatement(ExprPtr(new IntegerLiteral(0)));
+      }
+    | T_EXTERNAL T_CLASS T_IDENT T_EQ T_TEXTLIT {
+        /* EXTERNAL CLASS Name = "filename" */
+        $$ = new ExprStatement(ExprPtr(new IntegerLiteral(0)));
+      }
+    | T_EXTERNAL type_name T_PROCEDURE T_IDENT {
+        $$ = new ExprStatement(ExprPtr(new IntegerLiteral(0)));
+      }
+    | T_EXTERNAL T_PROCEDURE T_IDENT {
+        $$ = new ExprStatement(ExprPtr(new IntegerLiteral(0)));
+      }
     ;
 
 block
