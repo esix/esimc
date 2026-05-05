@@ -376,6 +376,21 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
+// FOR var := <range1>, <range2>, ... DO body (multi-range form)
+// Each range is (start, step, limit)
+class ForMultiRangeStatement : public Statement {
+public:
+    struct Range {
+        ExprPtr start, step, limit;
+    };
+    std::string var;
+    std::vector<Range> ranges;
+    StmtPtr body;
+    ForMultiRangeStatement(std::string v, std::vector<Range> r, StmtPtr b)
+        : var(std::move(v)), ranges(std::move(r)), body(std::move(b)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
 // PROCEDURE name(params); body
 class ProcedureDecl : public Statement {
 public:

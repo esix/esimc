@@ -1966,6 +1966,46 @@ llvm::Value* ForListStatement::codegen(CodeGenContext& ctx) {
     return nullptr;
 }
 
+llvm::Value* ForMultiRangeStatement::codegen(CodeGenContext& ctx) {
+    // Generate a separate loop for each range, all using the same body
+    for (auto& range : ranges) {
+        auto func = ctx.builder->GetInsertBlock()->getParent();
+        auto [varPtr, varTy] = ctx.getVarPtr(var);
+        if (!varPtr) {
+            std::cerr << "Error: FOR variable '" << var << "' not declared\n";
+            return nullptr;
+        }
+        auto startV = range.start->codegen(ctx);
+        ctx.builder->CreateStore(startV, varPtr);
+
+        auto condBB = llvm::BasicBlock::Create(*ctx.llvmContext, "fmr_cond", func);
+        auto bodyBB = llvm::BasicBlock::Create(*ctx.llvmContext, "fmr_body");
+        auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "fmr_end");
+
+        ctx.builder->CreateBr(condBB);
+        ctx.builder->SetInsertPoint(condBB);
+
+        auto cur = ctx.builder->CreateLoad(varTy, varPtr, var);
+        auto limitV = range.limit->codegen(ctx);
+        auto cond = ctx.builder->CreateICmpSLE(cur, limitV, "fmr_cmp");
+        ctx.builder->CreateCondBr(cond, bodyBB, afterBB);
+
+        func->insert(func->end(), bodyBB);
+        ctx.builder->SetInsertPoint(bodyBB);
+        body->codegen(ctx);
+
+        auto cur2 = ctx.builder->CreateLoad(varTy, varPtr, var);
+        auto stepV = range.step->codegen(ctx);
+        auto next = ctx.builder->CreateAdd(cur2, stepV, "fmr_step");
+        ctx.builder->CreateStore(next, varPtr);
+        ctx.builder->CreateBr(condBB);
+
+        func->insert(func->end(), afterBB);
+        ctx.builder->SetInsertPoint(afterBB);
+    }
+    return nullptr;
+}
+
 // ---- Procedure declaration ----
 
 llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {

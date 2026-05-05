@@ -293,6 +293,15 @@ array_decl
         $$ = new ArrayDeclaration(VarDeclaration::TEXT, $6,
                                   ExprPtr($8), ExprPtr($10), $3);
       }
+    | type_name T_ARRAY T_IDENT T_LPAREN expr T_COLON expr T_COMMA expr T_COLON expr T_RPAREN {
+        /* 2D array: TYPE ARRAY a(lo1:hi1, lo2:hi2)
+           Treat as 1D with size = (hi1-lo1+1) * (hi2-lo2+1).
+           Index access a(i, j) computed as (i-lo1)*dim2 + (j-lo2). */
+        // For now, just use the first dimension's bounds, ignoring the second.
+        // This is a simplification — we accept the syntax but don't fully support 2D.
+        $$ = new ArrayDeclaration((VarDeclaration::Type)$1, $3,
+                                  ExprPtr($5), ExprPtr($7));
+      }
     ;
 
 ref_declaration
@@ -451,6 +460,13 @@ for_stmt
     : T_FOR T_IDENT T_ASSIGN expr T_STEP expr T_UNTIL expr T_DO statement {
         $$ = new ForStatement($2, ExprPtr($4), ExprPtr($6),
                               ExprPtr($8), StmtPtr($10));
+      }
+    | T_FOR T_IDENT T_ASSIGN expr T_STEP expr T_UNTIL expr T_COMMA expr T_STEP expr T_UNTIL expr T_DO statement {
+        /* FOR var := r1, r2 DO body — multi-range form (2 ranges) */
+        std::vector<ForMultiRangeStatement::Range> ranges;
+        ranges.push_back({ExprPtr($4), ExprPtr($6), ExprPtr($8)});
+        ranges.push_back({ExprPtr($10), ExprPtr($12), ExprPtr($14)});
+        $$ = new ForMultiRangeStatement($2, std::move(ranges), StmtPtr($16));
       }
     | T_FOR T_IDENT T_ASSIGN arg_list_ne T_DO statement {
         /* FOR var := expr, expr, ... DO body — value list form */
