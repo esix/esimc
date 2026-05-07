@@ -185,6 +185,30 @@ program
         programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
         delete $1;
       }
+    | top_level_decls T_IDENT block {
+        /* prefix block: ClassName BEGIN ... END — execute block in class context */
+        $1->push_back(StmtPtr($3));
+        programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
+        delete $1;
+      }
+    | top_level_decls T_IDENT block T_DOT {
+        $1->push_back(StmtPtr($3));
+        programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
+        delete $1;
+      }
+    | T_IDENT block {
+        /* prefix block at top: ClassName BEGIN ... END */
+        auto stmts = new StmtList();
+        stmts->push_back(StmtPtr($2));
+        programRoot = new Program(StmtPtr(new Block(std::move(*stmts))));
+        delete stmts;
+      }
+    | T_IDENT block T_DOT {
+        auto stmts = new StmtList();
+        stmts->push_back(StmtPtr($2));
+        programRoot = new Program(StmtPtr(new Block(std::move(*stmts))));
+        delete stmts;
+      }
     ;
 
 top_level_decls
