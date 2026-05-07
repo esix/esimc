@@ -114,8 +114,18 @@ void CodeGenContext::buildAllVtables() {
         for (size_t i = 0; i < ci.vtableMethodOrder.size(); i++) {
             vtFields.push_back(ptrTy);
         }
-        ci.vtableType = llvm::StructType::create(*llvmContext, vtFields,
-                                                  cname + "_vtable_t");
+        // Update the existing placeholder vtable type's body
+        // (preserves all existing references to this type)
+        if (ci.vtableType && ci.vtableType->isOpaque()) {
+            ci.vtableType->setBody(vtFields);
+        } else if (ci.vtableType) {
+            // Already has a body — set it to the new fields
+            // setBody on a non-opaque type may fail; recreate if so
+            ci.vtableType->setBody(vtFields);
+        } else {
+            ci.vtableType = llvm::StructType::create(*llvmContext, vtFields,
+                                                      cname + "_vtable_t");
+        }
 
         std::vector<llvm::Constant*> vtValues;
         vtValues.push_back(llvm::ConstantInt::get(i64Ty, ci.classId));
