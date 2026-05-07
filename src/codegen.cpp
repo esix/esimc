@@ -906,7 +906,29 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         }
     }
 
-    // Try finding the method by searching all known classes (for INSPECT context changes)
+    // Try finding the method on the current method's owning class (handles INSPECT)
+    if (ctx.methodThis && !ctx.methodThisClassName.empty()) {
+        std::string searchCls = ctx.methodThisClassName;
+        while (!searchCls.empty()) {
+            auto cit = ctx.classes.find(searchCls);
+            if (cit == ctx.classes.end()) break;
+            auto mit = cit->second.methods.find(name);
+            if (mit != cit->second.methods.end()) {
+                std::vector<llvm::Value*> argsV;
+                argsV.push_back(ctx.methodThis);
+                for (auto& arg : args) {
+                    auto v = arg->codegen(ctx);
+                    if (!v) return nullptr;
+                    argsV.push_back(v);
+                }
+                if (mit->second->getReturnType()->isVoidTy())
+                    return ctx.builder->CreateCall(mit->second, argsV);
+                return ctx.builder->CreateCall(mit->second, argsV, name + "_ret");
+            }
+            searchCls = cit->second.parentName;
+        }
+    }
+    // Last resort: any class (less safe)
     if (ctx.currentThis) {
         for (auto& [clsN, clsI] : ctx.classes) {
             auto mit = clsI.methods.find(name);
@@ -2188,6 +2210,8 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto savedThis = ctx.currentThis;
     auto savedClassName = ctx.currentClassName;
     auto savedInsideMethod = ctx.insideMethod;
+    auto savedMethodThis = ctx.methodThis;
+    auto savedMethodThisClassName = ctx.methodThisClassName;
     auto savedArrays = ctx.arrays;
     auto savedLabelBlocks = ctx.labelBlocks;
 
@@ -2214,12 +2238,17 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         ctx.currentThis->setName("this");
         ++argIt;
         ctx.insideMethod = true;
+        // Track the "outer" this and class name for INSPECT-aware cross-method calls
+        ctx.methodThis = ctx.currentThis;
+        ctx.methodThisClassName = ctx.currentClassName;
     } else if (!ctx.insideMethod) {
         // Only clear class context if not inside a method
         // (nested procedures inside methods should still see class fields)
         ctx.currentThis = nullptr;
         ctx.currentClassName = "";
         ctx.insideMethod = false;
+        ctx.methodThis = nullptr;
+        ctx.methodThisClassName = "";
     }
 
     for (auto& p : params) {
@@ -2412,6 +2441,8 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     ctx.currentThis = savedThis;
     ctx.currentClassName = savedClassName;
     ctx.insideMethod = savedInsideMethod;
+    ctx.methodThis = savedMethodThis;
+    ctx.methodThisClassName = savedMethodThisClassName;
     ctx.arrays = savedArrays;
     ctx.labelBlocks = savedLabelBlocks;
 

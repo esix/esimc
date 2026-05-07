@@ -70,6 +70,10 @@ public:
     std::string currentClassName;
     std::string currentProcName;
     bool insideMethod = false; // true when compiling a method body (nested procs aren't methods)
+
+    // The outermost "this" of the current method (preserved through INSPECT)
+    llvm::Value* methodThis = nullptr;
+    std::string methodThisClassName;
     llvm::AllocaInst* returnValueAlloca = nullptr;
 
     // REF type info: variable name -> class name
