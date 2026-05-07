@@ -498,10 +498,26 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
             std::vector<llvm::Value*> callArgs;
             if (capIt != ctx.capturedVars.end()) {
                 for (auto& capName : capIt->second) {
-                    auto [ptr, ty] = ctx.getVarPtr(capName);
-                    if (ptr) callArgs.push_back(ptr);
-                    else callArgs.push_back(llvm::ConstantPointerNull::get(
-                        llvm::PointerType::getUnqual(*ctx.llvmContext)));
+                    if (capName == "__this") {
+                        if (ctx.currentThis)
+                            callArgs.push_back(ctx.currentThis);
+                        else
+                            callArgs.push_back(llvm::ConstantPointerNull::get(
+                                llvm::PointerType::getUnqual(*ctx.llvmContext)));
+                    } else if (capName.substr(0, 6) == "__arr_") {
+                        std::string arrName = capName.substr(6);
+                        auto ait2 = ctx.arrays.find(arrName);
+                        if (ait2 != ctx.arrays.end())
+                            callArgs.push_back(ait2->second.basePtr);
+                        else
+                            callArgs.push_back(llvm::ConstantPointerNull::get(
+                                llvm::PointerType::getUnqual(*ctx.llvmContext)));
+                    } else {
+                        auto [ptr, ty] = ctx.getVarPtr(capName);
+                        if (ptr) callArgs.push_back(ptr);
+                        else callArgs.push_back(llvm::ConstantPointerNull::get(
+                            llvm::PointerType::getUnqual(*ctx.llvmContext)));
+                    }
                 }
             }
             if (func->getReturnType()->isVoidTy())
