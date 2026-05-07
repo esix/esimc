@@ -23,14 +23,36 @@ static std::vector<ParamSpec> mergeParams(
     const std::vector<std::string>& names,
     const std::vector<std::pair<int, std::vector<std::string>>>& specs)
 {
+    auto matchName = [](const std::string& a, const std::string& b) -> bool {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); i++)
+            if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i])) return false;
+        return true;
+    };
     std::vector<ParamSpec> result;
     for (auto& n : names) {
         int type = VarDeclaration::INTEGER; // default
         std::string refClass;
         bool isArray = false;
         int arrayElem = 0;
+        bool isName = false;
+        /* First pass: check NAME/VALUE markers */
+        for (auto& sp : specs) {
+            if (sp.first == -30 || sp.first == -31) {
+                for (auto& sn : sp.second) {
+                    if (matchName(sn, n)) {
+                        if (sp.first == -30) isName = true;
+                        break;
+                    }
+                }
+            }
+        }
         /* Find this name in the specs */
         for (auto& sp : specs) {
+            if (sp.first == -30 || sp.first == -31 || sp.first == -1) {
+                /* NAME/VALUE/unknown markers — skip in type scan */
+                continue;
+            }
             if (sp.first == -10) {
                 /* REF spec: first element is class name, rest are param names */
                 for (size_t si = 1; si < sp.second.size(); si++) {
@@ -89,6 +111,7 @@ static std::vector<ParamSpec> mergeParams(
         ParamSpec ps;
         ps.name = n; ps.type = type; ps.refClassName = refClass;
         ps.isArray = isArray; ps.arrayElemType = arrayElem;
+        ps.isName = isName;
         result.push_back(ps);
     }
     return result;
@@ -528,8 +551,13 @@ param_specs
         $$ = $1;
       }
     | param_specs T_IDENT ident_list T_SEMI {
-        /* VALUE/NAME specs or unknown specs — skip */
-        $1->push_back({-1, std::move(*$3)});
+        /* VALUE/NAME specs — encode as type -30 (NAME) or -31 (VALUE) for downstream */
+        std::string spec($2);
+        for (auto& c : spec) c = tolower(c);
+        int code = -1; // unknown
+        if (spec == "name") code = -30;
+        else if (spec == "value") code = -31;
+        $1->push_back({code, std::move(*$3)});
         delete $3;
         $$ = $1;
       }

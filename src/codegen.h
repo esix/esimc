@@ -74,6 +74,9 @@ public:
     // The outermost "this" of the current method (preserved through INSPECT)
     llvm::Value* methodThis = nullptr;
     std::string methodThisClassName;
+
+    // NAME parameters: name -> (pointer, value type) for pass-by-reference
+    std::map<std::string, std::pair<llvm::Value*, llvm::Type*>> nameParams;
     llvm::AllocaInst* returnValueAlloca = nullptr;
 
     // REF type info: variable name -> class name

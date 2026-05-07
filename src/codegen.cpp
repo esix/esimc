@@ -182,6 +182,11 @@ llvm::Value* CodeGenContext::loadClassId(llvm::Value* obj) {
 }
 
 std::pair<llvm::Value*, llvm::Type*> CodeGenContext::getVarPtr(const std::string& name) {
+    // Check NAME parameters first (pass-by-reference)
+    auto npit = nameParams.find(name);
+    if (npit != nameParams.end()) {
+        return {npit->second.first, npit->second.second};
+    }
     // Check local variables first
     auto it = locals.find(name);
     if (it != locals.end()) {
@@ -457,6 +462,12 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
     if (name == ctx.currentProcName && ctx.returnValueAlloca) {
         return ctx.builder->CreateLoad(ctx.returnValueAlloca->getAllocatedType(),
                                         ctx.returnValueAlloca, name);
+    }
+
+    // Check NAME parameters (load through pointer)
+    auto npit = ctx.nameParams.find(name);
+    if (npit != ctx.nameParams.end()) {
+        return ctx.builder->CreateLoad(npit->second.second, npit->second.first, name);
     }
 
     auto it = ctx.locals.find(name);
@@ -897,8 +908,23 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         if (mit != ci.methods.end()) {
             std::vector<llvm::Value*> argsV;
             argsV.push_back(ctx.currentThis);
-            for (auto& arg : args) {
-                auto v = arg->codegen(ctx);
+            auto fnTy = mit->second->getFunctionType();
+            // arg index in callee: 0 is 'this', so user args start at 1
+            for (size_t ai = 0; ai < args.size(); ai++) {
+                size_t paramIdx = ai + 1;
+                // If callee expects ptr at this position and arg is an Identifier value,
+                // pass the variable's address (NAME parameter)
+                if (paramIdx < fnTy->getNumParams() &&
+                    fnTy->getParamType(paramIdx)->isPointerTy()) {
+                    if (auto* id = dynamic_cast<Identifier*>(args[ai].get())) {
+                        auto [ptr, ty] = ctx.getVarPtr(id->name);
+                        if (ptr && !ty->isPointerTy()) {
+                            argsV.push_back(ptr);
+                            continue;
+                        }
+                    }
+                }
+                auto v = args[ai]->codegen(ctx);
                 if (!v) return nullptr;
                 argsV.push_back(v);
             }
@@ -981,10 +1007,26 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         return nullptr;
     }
     std::vector<llvm::Value*> argsV;
+    auto fnTy = func->getFunctionType();
+    size_t paramIdx = 0;
     for (auto& arg : args) {
+        // Check if the callee expects a pointer at this position (NAME param)
+        // and the arg is an Identifier — pass the variable's address instead
+        if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isPointerTy()) {
+            if (auto* id = dynamic_cast<Identifier*>(arg.get())) {
+                auto [ptr, ty] = ctx.getVarPtr(id->name);
+                if (ptr && !ty->isPointerTy()) {
+                    // Variable is a value (not already a pointer) — pass its address
+                    argsV.push_back(ptr);
+                    paramIdx++;
+                    continue;
+                }
+            }
+        }
         auto v = arg->codegen(ctx);
         if (!v) return nullptr;
         argsV.push_back(v);
+        paramIdx++;
     }
     // Append captured variables if this function has closures
     auto capIt = ctx.capturedVars.find(name);
@@ -2180,7 +2222,11 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         paramTypes.push_back(ctx.getRefType());
     }
     for (auto& p : params) {
-        paramTypes.push_back(ctx.getLLVMType(p.type));
+        if (p.isName) {
+            paramTypes.push_back(ctx.getRefType()); // NAME = pointer
+        } else {
+            paramTypes.push_back(ctx.getLLVMType(p.type));
+        }
     }
 
     // Closure: collect outer local variables to pass as extra ptr params
@@ -2241,6 +2287,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto savedInsideMethod = ctx.insideMethod;
     auto savedMethodThis = ctx.methodThis;
     auto savedMethodThisClassName = ctx.methodThisClassName;
+    auto savedNameParams = ctx.nameParams;
     auto savedArrays = ctx.arrays;
     auto savedLabelBlocks = ctx.labelBlocks;
 
@@ -2248,6 +2295,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto entry = llvm::BasicBlock::Create(*ctx.llvmContext, "entry", func);
     ctx.builder->SetInsertPoint(entry);
     ctx.locals.clear();
+    ctx.nameParams.clear();
     // Keep arrays that use global storage (from main block)
     {
         auto savedArr = ctx.arrays;
@@ -2282,6 +2330,13 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
 
     for (auto& p : params) {
         auto ty = ctx.getLLVMType(p.type);
+        if (p.isName) {
+            // NAME param: arg is a pointer to the caller's storage.
+            ctx.nameParams[p.name] = {&*argIt, ty};
+            (&*argIt)->setName(p.name);
+            ++argIt;
+            continue;
+        }
         auto alloca = ctx.createEntryBlockAlloca(func, p.name, ty);
         ctx.builder->CreateStore(&*argIt, alloca);
         ctx.locals[p.name] = alloca;
@@ -2472,6 +2527,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     ctx.insideMethod = savedInsideMethod;
     ctx.methodThis = savedMethodThis;
     ctx.methodThisClassName = savedMethodThisClassName;
+    ctx.nameParams = savedNameParams;
     ctx.arrays = savedArrays;
     ctx.labelBlocks = savedLabelBlocks;
 
@@ -2630,7 +2686,10 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
             std::vector<llvm::Type*> paramTypes;
             paramTypes.push_back(ctx.getRefType()); // this
             for (auto& p : pd->params) {
-                paramTypes.push_back(ctx.getLLVMType(p.type));
+                if (p.isName)
+                    paramTypes.push_back(ctx.getRefType()); // NAME = ptr
+                else
+                    paramTypes.push_back(ctx.getLLVMType(p.type));
             }
             auto funcType = llvm::FunctionType::get(retTy, paramTypes, false);
             auto methodFunc = llvm::Function::Create(funcType,
