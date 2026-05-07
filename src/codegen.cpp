@@ -1074,6 +1074,25 @@ llvm::Value* NewExpression::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
+    // Special case: sysin.image — read a line from stdin
+    if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
+        if (ident->name == "sysin" && member == "image") {
+            // Allocate a 1024-byte buffer, call fgets(buf, 1024, stdin)
+            auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+            auto i32Ty = llvm::Type::getInt32Ty(*ctx.llvmContext);
+            auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+            auto bufSize = llvm::ConstantInt::get(i64Ty, 1024);
+            auto buf = ctx.builder->CreateCall(ctx.allocFunc, {bufSize}, "sysin_buf");
+            auto fgetsFunc = ctx.module->getOrInsertFunction("fgets",
+                llvm::FunctionType::get(ptrTy, {ptrTy, i32Ty, ptrTy}, false));
+            auto stdinGv = ctx.module->getOrInsertGlobal("__stdinp", ptrTy);
+            auto stdinPtr = ctx.builder->CreateLoad(ptrTy, stdinGv, "stdin");
+            ctx.builder->CreateCall(fgetsFunc,
+                {buf, llvm::ConstantInt::get(i32Ty, 1024), stdinPtr});
+            return buf;
+        }
+    }
+
     // Check for TEXT variable member access first
     if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
         if (ctx.textVars.count(ident->name)) {
@@ -1132,6 +1151,16 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
 
     auto obj = object->codegen(ctx);
     if (!obj) return nullptr;
+
+    // If the result is a pointer and member is a known TEXT operation, dispatch to it
+    if (obj->getType()->isPointerTy()) {
+        if (member == "strip") {
+            return ctx.builder->CreateCall(ctx.textStripFunc, {obj}, "stripped");
+        }
+        if (member == "length") {
+            return ctx.builder->CreateCall(ctx.textLengthFunc, {obj}, "len");
+        }
+    }
 
     std::string clsName;
     if (auto* qua = dynamic_cast<QuaExpression*>(object.get())) {
