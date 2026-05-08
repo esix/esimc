@@ -629,13 +629,13 @@ procedure_decl
     | T_REF T_LPAREN T_IDENT T_RPAREN T_PROCEDURE T_IDENT opt_typed_params T_SEMI statement {
         /* REF(Class) PROCEDURE name(...); — returns a pointer */
         $$ = new ProcedureDecl($6, true, VarDeclaration::TEXT,
-                               std::move(*$7), StmtPtr($9));
+                               std::move(*$7), StmtPtr($9), $3);
         delete $7;
       }
     | T_REF T_LPAREN T_IDENT T_RPAREN T_PROCEDURE T_IDENT T_LPAREN ident_list T_RPAREN T_SEMI param_specs statement {
         auto params = mergeParams(*$8, *$11);
         $$ = new ProcedureDecl($6, true, VarDeclaration::TEXT,
-                               std::move(params), StmtPtr($12));
+                               std::move(params), StmtPtr($12), $3);
         delete $8; delete $11;
       }
     ;

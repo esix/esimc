@@ -1233,6 +1233,10 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
         if (auto* call = dynamic_cast<ProcedureCall*>(object.get()))
             clsName = ctx.resolveRefType(call->name);
     }
+    if (clsName.empty()) {
+        if (auto* ne = dynamic_cast<NewExpression*>(object.get()))
+            clsName = ne->className;
+    }
 
     if (clsName.empty()) {
         std::cerr << "Error: cannot determine class type for member access '." << member << "'\n";
@@ -1370,6 +1374,10 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
     if (clsName.empty()) {
         if (auto* call = dynamic_cast<ProcedureCall*>(object.get()))
             clsName = ctx.resolveRefType(call->name);
+    }
+    if (clsName.empty()) {
+        if (auto* ne = dynamic_cast<NewExpression*>(object.get()))
+            clsName = ne->className;
     }
     if (clsName.empty()) {
         // Inner MemberAccess like obj.field returning REF — get the field's refClass
@@ -2304,6 +2312,11 @@ llvm::Value* ForMultiRangeStatement::codegen(CodeGenContext& ctx) {
 // ---- Procedure declaration ----
 
 llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
+    // Register return REF class so callers can resolve method calls on the result
+    if (!returnRefClass.empty()) {
+        ctx.refTypes[name] = returnRefClass;
+    }
+
     // Determine return type
     llvm::Type* retTy;
     if (hasReturnType) {

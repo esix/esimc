@@ -400,11 +400,13 @@ public:
     std::string name;
     bool hasReturnType;
     VarDeclaration::Type returnType;
+    std::string returnRefClass; // for REF(Class) procedures
     std::vector<ParamSpec> params;
     StmtPtr body;
     ProcedureDecl(std::string n, bool hasRet, VarDeclaration::Type ret,
-                  std::vector<ParamSpec> p, StmtPtr b)
+                  std::vector<ParamSpec> p, StmtPtr b, std::string retRefClass = "")
         : name(std::move(n)), hasReturnType(hasRet), returnType(ret),
+          returnRefClass(std::move(retRefClass)),
           params(std::move(p)), body(std::move(b)) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
