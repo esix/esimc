@@ -1025,6 +1025,22 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         }
         auto v = arg->codegen(ctx);
         if (!v) return nullptr;
+        // Type-coerce arg to match expected param type
+        if (paramIdx < fnTy->getNumParams()) {
+            auto expectedTy = fnTy->getParamType(paramIdx);
+            if (v->getType() != expectedTy) {
+                if (expectedTy->isDoubleTy() && v->getType()->isIntegerTy())
+                    v = ctx.builder->CreateSIToFP(v, expectedTy, "tofp");
+                else if (expectedTy->isIntegerTy(64) && v->getType()->isDoubleTy())
+                    v = ctx.builder->CreateFPToSI(v, expectedTy, "toint");
+                else if (expectedTy->isIntegerTy() && v->getType()->isIntegerTy()) {
+                    if (expectedTy->getIntegerBitWidth() > v->getType()->getIntegerBitWidth())
+                        v = ctx.builder->CreateZExt(v, expectedTy, "zext");
+                    else
+                        v = ctx.builder->CreateTrunc(v, expectedTy, "trunc");
+                }
+            }
+        }
         argsV.push_back(v);
         paramIdx++;
     }
