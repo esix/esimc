@@ -176,6 +176,8 @@ static std::vector<ParamSpec> mergeParams(
 %type <stmt> detach_stmt resume_stmt call_stmt
 %type <stmt> outint_stmt outreal_stmt outfix_stmt outtext_stmt outimage_stmt inimage_stmt
 %type <stmt> expr_stmt virtual_spec top_level_decl external_decl
+%type <sval> virtual_entry
+%type <namelist> virtual_entries
 %type <stmtlist> top_level_decls
 %type <stmtlist> stmt_list class_body
 %type <exprlist> arg_list arg_list_ne
@@ -663,7 +665,12 @@ class_decl
 
 class_body
     : T_BEGIN stmt_list T_END end_names { $$ = $2; }
-    | virtual_spec class_body { $$ = $2; }
+    | virtual_spec class_body {
+        /* Prepend virtual_spec so ClassDecl can see it */
+        auto stmts = $2;
+        stmts->insert(stmts->begin(), StmtPtr($1));
+        $$ = stmts;
+      }
     | /* empty — class with no body */ { $$ = new StmtList(); }
     ;
 
@@ -671,23 +678,26 @@ class_body
 
 virtual_spec
     : T_VIRTUAL T_COLON virtual_entries {
-        /* Ignored — all methods are effectively virtual */
-        $$ = new ExprStatement(ExprPtr(new IntegerLiteral(0)));
+        $$ = new VirtualDecl(std::move(*$3));
+        delete $3;
       }
     ;
 
 virtual_entries
-    : virtual_entry
-    | virtual_entries virtual_entry
+    : virtual_entry { $$ = new std::vector<std::string>(); if ($1) { $$->push_back($1); free($1); } }
+    | virtual_entries virtual_entry {
+        if ($2) { $1->push_back($2); free($2); }
+        $$ = $1;
+      }
     ;
 
 virtual_entry
-    : T_PROCEDURE T_IDENT T_SEMI
-    | type_name T_PROCEDURE T_IDENT T_SEMI
-    | T_REF T_LPAREN T_IDENT T_RPAREN T_PROCEDURE T_IDENT T_SEMI
+    : T_PROCEDURE T_IDENT T_SEMI { $$ = $2; }
+    | type_name T_PROCEDURE T_IDENT T_SEMI { $$ = $3; }
+    | T_REF T_LPAREN T_IDENT T_RPAREN T_PROCEDURE T_IDENT T_SEMI { $$ = $6; }
     /* IS bindings — consume the full prototype including optional params */
-    | T_PROCEDURE T_IDENT T_IS virtual_is_rhs
-    | type_name T_PROCEDURE T_IDENT T_IS virtual_is_rhs
+    | T_PROCEDURE T_IDENT T_IS virtual_is_rhs { $$ = $2; }
+    | type_name T_PROCEDURE T_IDENT T_IS virtual_is_rhs { $$ = $3; }
     ;
 
 /* The RHS of a VIRTUAL IS binding: a procedure prototype possibly with params.

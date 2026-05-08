@@ -1355,6 +1355,68 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
         if (auto* call = dynamic_cast<ProcedureCall*>(object.get()))
             clsName = ctx.resolveRefType(call->name);
     }
+    if (clsName.empty()) {
+        // Inner MemberAccess like obj.field returning REF — get the field's refClass
+        if (auto* ma = dynamic_cast<MemberAccess*>(object.get())) {
+            std::string innerCls;
+            if (auto* id = dynamic_cast<Identifier*>(ma->object.get())) {
+                innerCls = ctx.resolveRefType(id->name);
+            }
+            if (innerCls.empty() && dynamic_cast<ThisExpression*>(ma->object.get())) {
+                innerCls = ctx.currentClassName;
+            }
+            if (!innerCls.empty()) {
+                auto cit2 = ctx.classes.find(innerCls);
+                if (cit2 != ctx.classes.end()) {
+                    for (auto& f : cit2->second.fields) {
+                        if (f.name == ma->member && !f.refClassName.empty()) {
+                            clsName = f.refClassName;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (clsName.empty()) {
+        // Inner MethodCall like obj.field(i) returning REF — find the field's refClass
+        if (auto* mc = dynamic_cast<MethodCall*>(object.get())) {
+            // Resolve the inner method's owning class, then check if its field's
+            // arrayMeta indicates a REF array
+            std::string innerCls;
+            if (auto* id = dynamic_cast<Identifier*>(mc->object.get())) {
+                innerCls = ctx.resolveRefType(id->name);
+            } else if (auto* mc2 = dynamic_cast<MethodCall*>(mc->object.get())) {
+                // Recursive: get type from another nested call
+                // (try same logic — for one level of nesting)
+                if (auto* id2 = dynamic_cast<Identifier*>(mc2->object.get())) {
+                    auto innerCls2 = ctx.resolveRefType(id2->name);
+                    if (!innerCls2.empty()) {
+                        auto cit2 = ctx.classes.find(innerCls2);
+                        if (cit2 != ctx.classes.end()) {
+                            for (auto& f : cit2->second.fields) {
+                                if (f.name == mc2->method && !f.refClassName.empty()) {
+                                    innerCls = f.refClassName;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (!innerCls.empty()) {
+                auto cit2 = ctx.classes.find(innerCls);
+                if (cit2 != ctx.classes.end()) {
+                    for (auto& f : cit2->second.fields) {
+                        if (f.name == mc->method && !f.refClassName.empty()) {
+                            clsName = f.refClassName;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if (clsName.empty()) {
         std::cerr << "Error: cannot determine class type for method call '." << method << "'\n";
@@ -1399,6 +1461,26 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
                         break;
                     }
                 }
+            }
+            // Fallback: if no implementation exists yet, infer from call args
+            if (!funcTy) {
+                std::vector<llvm::Type*> paramTypes;
+                paramTypes.push_back(ptrTy2); // this
+                std::vector<llvm::Value*> argVals;
+                for (auto& arg : args) {
+                    auto v = arg->codegen(ctx);
+                    if (!v) return nullptr;
+                    argVals.push_back(v);
+                    paramTypes.push_back(v->getType());
+                }
+                // Assume void return for VIRTUAL-only methods (best guess)
+                funcTy = llvm::FunctionType::get(
+                    llvm::Type::getVoidTy(*ctx.llvmContext), paramTypes, false);
+                std::vector<llvm::Value*> argsV;
+                argsV.push_back(obj);
+                for (auto& v : argVals) argsV.push_back(v);
+                ctx.builder->CreateCall(funcTy, fp, argsV);
+                return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), 0);
             }
             if (funcTy) {
                 std::vector<llvm::Value*> argsV;
@@ -2746,6 +2828,21 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
                 int idx = (int)ciRef.vtableMethodOrder.size() + 1;
                 ciRef.vtableIndex[mname] = idx;
                 ciRef.vtableMethodOrder.push_back(mname);
+            }
+        }
+
+        // Add VIRTUAL declarations (methods declared but not implemented in this class)
+        for (auto& stmt : bodyStmts) {
+            if (auto* vd = dynamic_cast<VirtualDecl*>(stmt.get())) {
+                for (auto& mname : vd->methodNames) {
+                    std::string lname = mname;
+                    for (auto& c : lname) c = tolower((unsigned char)c);
+                    if (ciRef.vtableIndex.find(lname) == ciRef.vtableIndex.end()) {
+                        int idx = (int)ciRef.vtableMethodOrder.size() + 1;
+                        ciRef.vtableIndex[lname] = idx;
+                        ciRef.vtableMethodOrder.push_back(lname);
+                    }
+                }
             }
         }
 
