@@ -1074,6 +1074,11 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                         v = ctx.builder->CreateZExt(v, expectedTy, "zext");
                     else
                         v = ctx.builder->CreateTrunc(v, expectedTy, "trunc");
+                } else if (expectedTy->isPointerTy() && v->getType()->isIntegerTy()) {
+                    // Caller provided an integer where a pointer is expected (e.g. a
+                    // LABEL parameter we can't resolve). Pass null pointer instead.
+                    v = llvm::ConstantPointerNull::get(
+                        llvm::cast<llvm::PointerType>(expectedTy));
                 }
             }
         }
