@@ -1136,11 +1136,15 @@ llvm::Value* NewExpression::codegen(CodeGenContext& ctx) {
     auto coroPtr = ctx.builder->CreateStructGEP(ci.structType, obj, 1, "coro_ptr");
     ctx.builder->CreateStore(coro, coroPtr);
 
-    // Store constructor arguments into fields
-    // Constructor params start at field index 2
+    // Store constructor arguments into fields.
+    // Constructor params start at field index 2. Skip companion fields like
+    // "FIELD__pos" that aren't real constructor parameters — those are paired
+    // bookkeeping fields the compiler adds and shouldn't consume an argument.
     size_t argIdx = 0;
     for (auto& param : ci.fields) {
         if (param.structIndex < 2) continue;
+        if (param.name.size() >= 5 &&
+            param.name.compare(param.name.size() - 5, 5, "__pos") == 0) continue;
         if (argIdx < args.size()) {
             auto val = args[argIdx]->codegen(ctx);
             if (val) {
@@ -2345,12 +2349,30 @@ llvm::Value* LabeledStatement::codegen(CodeGenContext& ctx) {
 
 llvm::Value* GotoStatement::codegen(CodeGenContext& ctx) {
     auto func = ctx.builder->GetInsertBlock()->getParent();
-    auto targetBB = ctx.getOrCreateLabel(label);
 
-    // Create unconditional branch to the target
+    // Detect cross-function GOTO: if the label isn't in the current scope's
+    // labelBlocks (cleared on each function entry), it must refer to a label
+    // declared in an enclosing function — typically passed via a LABEL parameter.
+    // We don't support setjmp/longjmp semantics, so emit `unreachable` to keep
+    // the module valid rather than emit an invalid cross-function branch.
+    auto it = ctx.labelBlocks.find(label);
+    if (it == ctx.labelBlocks.end()) {
+        ctx.builder->CreateUnreachable();
+        auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_goto", func);
+        ctx.builder->SetInsertPoint(afterBB);
+        return nullptr;
+    }
+
+    auto targetBB = it->second;
+    if (targetBB->getParent() && targetBB->getParent() != func) {
+        ctx.builder->CreateUnreachable();
+        auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_goto", func);
+        ctx.builder->SetInsertPoint(afterBB);
+        return nullptr;
+    }
+
     ctx.builder->CreateBr(targetBB);
 
-    // Create a new basic block for any dead code that follows
     auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_goto", func);
     ctx.builder->SetInsertPoint(afterBB);
 
@@ -2607,6 +2629,8 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto savedNameParams = ctx.nameParams;
     auto savedArrays = ctx.arrays;
     auto savedLabelBlocks = ctx.labelBlocks;
+    auto savedInMainBlock = ctx.inMainBlock;
+    ctx.inMainBlock = false;
 
     // Create entry block
     auto entry = llvm::BasicBlock::Create(*ctx.llvmContext, "entry", func);
@@ -2750,14 +2774,13 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             }
             continue;
         }
-        // Pragmatic solution: just load the value at call time (capture by value).
+        // True by-reference capture: register the captured pointer in nameParams
+        // so reads/writes go through the outer storage. Determine the value type
+        // from the saved outer alloca (or fall back to i64).
         auto outerTy = savedLocals.count(capName) ?
             savedLocals[capName]->getAllocatedType() :
             llvm::Type::getInt64Ty(*ctx.llvmContext);
-        auto localVar = ctx.createEntryBlockAlloca(func, capName, outerTy);
-        auto val = ctx.builder->CreateLoad(outerTy, capPtr, capName + "_load");
-        ctx.builder->CreateStore(val, localVar);
-        ctx.locals[capName] = localVar;
+        ctx.nameParams[capName] = {capPtr, outerTy};
     }
 
     // Set up return variable for typed procedures
@@ -2865,6 +2888,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     ctx.nameParams = savedNameParams;
     ctx.arrays = savedArrays;
     ctx.labelBlocks = savedLabelBlocks;
+    ctx.inMainBlock = savedInMainBlock;
 
     return func;
 }
