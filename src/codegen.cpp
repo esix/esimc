@@ -1010,10 +1010,16 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
     auto fnTy = func->getFunctionType();
     size_t paramIdx = 0;
     for (auto& arg : args) {
-        // Check if the callee expects a pointer at this position (NAME param)
-        // and the arg is an Identifier — pass the variable's address instead
+        // Check if the callee expects a pointer at this position (NAME or ARRAY param)
         if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isPointerTy()) {
             if (auto* id = dynamic_cast<Identifier*>(arg.get())) {
+                // If it's an array, pass the array's base pointer
+                auto ait2 = ctx.arrays.find(id->name);
+                if (ait2 != ctx.arrays.end()) {
+                    argsV.push_back(ait2->second.basePtr);
+                    paramIdx++;
+                    continue;
+                }
                 auto [ptr, ty] = ctx.getVarPtr(id->name);
                 if (ptr && !ty->isPointerTy()) {
                     // Variable is a value (not already a pointer) — pass its address
@@ -1132,6 +1138,15 @@ llvm::Value* NewExpression::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
+    // Special case: printfile/sysout no-arg I/O methods (e.g., obj.outimage)
+    if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
+        std::string clsN = ctx.resolveRefType(ident->name);
+        if (clsN == "printfile" || ident->name == "sysout") {
+            if (member == "outimage") {
+                return OutImageStatement().codegen(ctx);
+            }
+        }
+    }
     // Special case: sysin.image — read a line from stdin
     if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
         if (ident->name == "sysin" && member == "image") {
@@ -1298,6 +1313,31 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
+    // Special case: I/O method calls on printfile/sysout — dispatch to global procs
+    if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
+        std::string clsN = ctx.resolveRefType(ident->name);
+        if (clsN == "printfile" || ident->name == "sysout") {
+            // Dispatch obj.OUTFIX(args) to global OutFix, etc.
+            if (method == "outfix" && args.size() == 3) {
+                return OutFixStatement(
+                    ExprPtr(args[0].release()),
+                    ExprPtr(args[1].release()),
+                    ExprPtr(args[2].release())).codegen(ctx);
+            }
+            if (method == "outint" && args.size() == 2) {
+                return OutIntStatement(
+                    ExprPtr(args[0].release()),
+                    ExprPtr(args[1].release())).codegen(ctx);
+            }
+            if (method == "outtext" && args.size() == 1) {
+                return OutTextStatement(ExprPtr(args[0].release())).codegen(ctx);
+            }
+            if (method == "outimage" && args.empty()) {
+                return OutImageStatement().codegen(ctx);
+            }
+        }
+    }
+
     // Check for TEXT variable method call first
     if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
         if (ctx.textVars.count(ident->name)) {
@@ -1372,8 +1412,9 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
         clsName = ctx.currentClassName;
     }
     if (clsName.empty()) {
-        if (auto* call = dynamic_cast<ProcedureCall*>(object.get()))
+        if (auto* call = dynamic_cast<ProcedureCall*>(object.get())) {
             clsName = ctx.resolveRefType(call->name);
+        }
     }
     if (clsName.empty()) {
         if (auto* ne = dynamic_cast<NewExpression*>(object.get()))
@@ -1438,6 +1479,11 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
                         }
                     }
                 }
+            }
+            // Fallback: use ctx.refTypes for method name (registered when method's ProcedureDecl
+            // was compiled — works when method names are unique in the program)
+            if (clsName.empty()) {
+                clsName = ctx.resolveRefType(mc->method);
             }
         }
     }
@@ -1508,9 +1554,27 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
             if (funcTy) {
                 std::vector<llvm::Value*> argsV;
                 argsV.push_back(obj);
-                for (auto& arg : args) {
-                    auto v = arg->codegen(ctx);
+                unsigned nParams = funcTy->getNumParams();
+                auto doubleTy3 = llvm::Type::getDoubleTy(*ctx.llvmContext);
+                for (size_t ai = 0; ai < args.size(); ai++) {
+                    auto v = args[ai]->codegen(ctx);
                     if (!v) return nullptr;
+                    unsigned paramIdx = ai + 1;
+                    if (paramIdx < nParams) {
+                        auto destTy = funcTy->getParamType(paramIdx);
+                        if (v->getType() != destTy) {
+                            if (v->getType()->isIntegerTy() && destTy->isDoubleTy())
+                                v = ctx.builder->CreateSIToFP(v, destTy, "tofp");
+                            else if (v->getType()->isDoubleTy() && destTy->isIntegerTy())
+                                v = ctx.builder->CreateFPToSI(v, destTy, "tosi");
+                            else if (v->getType()->isIntegerTy() && destTy->isIntegerTy()) {
+                                if (v->getType()->getIntegerBitWidth() < destTy->getIntegerBitWidth())
+                                    v = ctx.builder->CreateZExt(v, destTy);
+                                else if (v->getType()->getIntegerBitWidth() > destTy->getIntegerBitWidth())
+                                    v = ctx.builder->CreateTrunc(v, destTy);
+                            }
+                        }
+                    }
                     argsV.push_back(v);
                 }
                 if (funcTy->getReturnType()->isVoidTy())
@@ -1731,6 +1795,39 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
             dynamic_cast<RefDeclaration*>(stmt.get()) ||
             dynamic_cast<LabelDeclaration*>(stmt.get())) {
             stmt->codegen(ctx);
+        }
+    }
+
+    // Forward-declare all top-level procedures so class methods (and earlier-declared
+    // procedures) can reference procedures that appear later in the same block.
+    // Only safe at the main (outermost) block where top-level VarDecls become globals
+    // and procedures don't capture locals.
+    bool isOutermostBlock = ctx.inMainBlock && !ctx.currentThis &&
+        ctx.builder->GetInsertBlock() &&
+        ctx.builder->GetInsertBlock()->getParent()->getName() == "main";
+    if (isOutermostBlock) {
+        auto ptrTy = ctx.getRefType();
+        for (auto& stmt : statements) {
+            auto* pd = dynamic_cast<ProcedureDecl*>(stmt.get());
+            if (!pd) continue;
+            if (ctx.module->getFunction(pd->name)) continue; // already declared
+            llvm::Type* retTy = pd->hasReturnType ?
+                ctx.getLLVMType(pd->returnType) :
+                llvm::Type::getVoidTy(*ctx.llvmContext);
+            std::vector<llvm::Type*> paramTypes;
+            for (auto& p : pd->params) {
+                if (p.isName)
+                    paramTypes.push_back(ptrTy);
+                else
+                    paramTypes.push_back(ctx.getLLVMType(p.type));
+            }
+            auto funcType = llvm::FunctionType::get(retTy, paramTypes, false);
+            llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
+                                   pd->name, ctx.module.get());
+            // Register return-ref-class so callers can resolve method calls
+            if (!pd->returnRefClass.empty()) {
+                ctx.refTypes[pd->name] = pd->returnRefClass;
+            }
         }
     }
 
@@ -1992,6 +2089,19 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
 
 llvm::Value* RefDeclaration::codegen(CodeGenContext& ctx) {
     auto ty = ctx.getRefType();
+    // In the main block, create a global so top-level procedures can access REF
+    // variables without needing closure capture.
+    if (ctx.inMainBlock && !ctx.currentThis &&
+        ctx.builder->GetInsertBlock() &&
+        ctx.builder->GetInsertBlock()->getParent()->getName() == "main") {
+        auto gv = new llvm::GlobalVariable(
+            *ctx.module, ty, false, llvm::GlobalValue::InternalLinkage,
+            llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*ctx.llvmContext)),
+            "g_" + varName);
+        ctx.globals[varName] = gv;
+        ctx.refTypes[varName] = className;
+        return gv;
+    }
     auto func = ctx.builder->GetInsertBlock()->getParent();
     auto alloca = ctx.createEntryBlockAlloca(func, varName, ty);
     ctx.locals[varName] = alloca;
@@ -2332,8 +2442,8 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         paramTypes.push_back(ctx.getRefType());
     }
     for (auto& p : params) {
-        if (p.isName) {
-            paramTypes.push_back(ctx.getRefType()); // NAME = pointer
+        if (p.isName || p.isArray) {
+            paramTypes.push_back(ctx.getRefType()); // NAME or ARRAY = pointer
         } else {
             paramTypes.push_back(ctx.getLLVMType(p.type));
         }
@@ -2447,6 +2557,19 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             ++argIt;
             continue;
         }
+        if (p.isArray) {
+            // Array param: arg is a pointer to the array data.
+            (&*argIt)->setName(p.name);
+            ArrayInfo info;
+            info.basePtr = &*argIt;
+            info.elementType = ctx.getLLVMType(p.arrayElemType);
+            info.lowerBound = 1; // assume 1-based
+            info.size = 0; // unknown
+            info.isStackArray = false;
+            ctx.arrays[p.name] = info;
+            ++argIt;
+            continue;
+        }
         auto alloca = ctx.createEntryBlockAlloca(func, p.name, ty);
         ctx.builder->CreateStore(&*argIt, alloca);
         ctx.locals[p.name] = alloca;
@@ -2454,16 +2577,6 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         // Register REF class name for member access resolution
         if (!p.refClassName.empty()) {
             ctx.refTypes[p.name] = p.refClassName;
-        }
-        // Register array parameters in ctx.arrays
-        if (p.isArray) {
-            ArrayInfo info;
-            info.basePtr = ctx.builder->CreateLoad(ctx.getRefType(), alloca, p.name + "_arrptr");
-            info.elementType = ctx.getLLVMType(p.arrayElemType);
-            info.lowerBound = 1; // assume 1-based
-            info.size = 0; // unknown
-            info.isStackArray = false;
-            ctx.arrays[p.name] = info;
         }
         // For TEXT parameters, create position tracking
         if (p.type == VarDeclaration::TEXT && p.refClassName.empty() && !p.isArray) {
@@ -2834,6 +2947,16 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // Capture method return-ref-class additions before refTypes is cleared for the body
+    // function. This lets callers resolve chained method calls on results of class methods
+    // that return REF(Class) (e.g. obj.method(...).other_method(...)).
+    std::map<std::string, std::string> methodRefAdditions;
+    for (auto& [k, v] : ctx.refTypes) {
+        if (savedRefTypes.find(k) == savedRefTypes.end()) {
+            methodRefAdditions[k] = v;
+        }
+    }
+
     // Build vtable metadata (indices) now so method dispatch works during codegen.
     // The actual vtable global with function pointers is built later by buildAllVtables().
     {
@@ -2978,6 +3101,9 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
     ctx.currentClassName = savedClassName;
     ctx.restoreScope(savedLocals);
     ctx.refTypes = savedRefTypes;
+    for (auto& [k, v] : methodRefAdditions) {
+        ctx.refTypes[k] = v;
+    }
     ctx.currentProcName = savedProcName;
     ctx.returnValueAlloca = savedRetAlloca;
     ctx.arrays = savedArrays;
