@@ -289,6 +289,19 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
+// obj.field(idx) := expr — assign to a member array element
+class MemberArrayAssignment : public Statement {
+public:
+    ExprPtr object;
+    std::string member;
+    ExprPtr index;
+    ExprPtr value;
+    MemberArrayAssignment(ExprPtr o, std::string m, ExprPtr i, ExprPtr v)
+        : object(std::move(o)), member(std::move(m)),
+          index(std::move(i)), value(std::move(v)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
 // var :- expr
 class RefAssignment : public Statement {
 public:

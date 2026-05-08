@@ -816,6 +816,10 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                         return ctx.builder->CreateLoad(i64Ty, loIt->second, "lo");
                     return llvm::ConstantInt::get(i64Ty, info.lowerBound);
                 } else {
+                    // Prefer dynamic hi (set for array params); fall back to static
+                    auto hiIt = ctx.locals.find(id->name + "__hi");
+                    if (hiIt != ctx.locals.end())
+                        return ctx.builder->CreateLoad(i64Ty, hiIt->second, "hi");
                     auto loIt = ctx.locals.find(id->name + "__lo");
                     llvm::Value* lo;
                     if (loIt != ctx.locals.end())
@@ -1013,11 +1017,37 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         // Check if the callee expects a pointer at this position (NAME or ARRAY param)
         if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isPointerTy()) {
             if (auto* id = dynamic_cast<Identifier*>(arg.get())) {
-                // If it's an array, pass the array's base pointer
+                // If it's an array, pass the array's base pointer + lo + hi
                 auto ait2 = ctx.arrays.find(id->name);
                 if (ait2 != ctx.arrays.end()) {
+                    auto i64Ty2 = llvm::Type::getInt64Ty(*ctx.llvmContext);
                     argsV.push_back(ait2->second.basePtr);
                     paramIdx++;
+                    // Push lo
+                    auto loIt = ctx.locals.find(id->name + "__lo");
+                    llvm::Value* loV = loIt != ctx.locals.end()
+                        ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty2, loIt->second, "lo_arg")
+                        : (llvm::Value*)llvm::ConstantInt::get(i64Ty2, ait2->second.lowerBound);
+                    if (paramIdx < fnTy->getNumParams() &&
+                        fnTy->getParamType(paramIdx)->isIntegerTy(64)) {
+                        argsV.push_back(loV);
+                        paramIdx++;
+                    }
+                    // Push hi
+                    auto hiIt = ctx.locals.find(id->name + "__hi");
+                    llvm::Value* hiV;
+                    if (hiIt != ctx.locals.end()) {
+                        hiV = ctx.builder->CreateLoad(i64Ty2, hiIt->second, "hi_arg");
+                    } else {
+                        long long hiC = ait2->second.lowerBound +
+                            (ait2->second.size > 0 ? ait2->second.size - 1 : 0);
+                        hiV = llvm::ConstantInt::get(i64Ty2, hiC);
+                    }
+                    if (paramIdx < fnTy->getNumParams() &&
+                        fnTy->getParamType(paramIdx)->isIntegerTy(64)) {
+                        argsV.push_back(hiV);
+                        paramIdx++;
+                    }
                     continue;
                 }
                 auto [ptr, ty] = ctx.getVarPtr(id->name);
@@ -1815,11 +1845,17 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
                 ctx.getLLVMType(pd->returnType) :
                 llvm::Type::getVoidTy(*ctx.llvmContext);
             std::vector<llvm::Type*> paramTypes;
+            auto i64Ty3 = llvm::Type::getInt64Ty(*ctx.llvmContext);
             for (auto& p : pd->params) {
-                if (p.isName)
+                if (p.isName) {
                     paramTypes.push_back(ptrTy);
-                else
+                } else if (p.isArray) {
+                    paramTypes.push_back(ptrTy);
+                    paramTypes.push_back(i64Ty3);
+                    paramTypes.push_back(i64Ty3);
+                } else {
                     paramTypes.push_back(ctx.getLLVMType(p.type));
+                }
             }
             auto funcType = llvm::FunctionType::get(retTy, paramTypes, false);
             llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
@@ -2195,6 +2231,62 @@ llvm::Value* MemberAssignment::codegen(CodeGenContext& ctx) {
     return val;
 }
 
+llvm::Value* MemberArrayAssignment::codegen(CodeGenContext& ctx) {
+    auto obj = object->codegen(ctx);
+    if (!obj) return nullptr;
+    std::string clsName;
+    if (auto* qua = dynamic_cast<QuaExpression*>(object.get())) {
+        clsName = qua->className;
+    } else if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
+        clsName = ctx.resolveRefType(ident->name);
+    }
+    if (clsName.empty() && dynamic_cast<ThisExpression*>(object.get())) {
+        clsName = ctx.currentClassName;
+    }
+    if (clsName.empty()) {
+        std::cerr << "Error: cannot determine class for member array assignment '." << member << "'\n";
+        return nullptr;
+    }
+    int fldIdx = ctx.getFieldIndex(clsName, member);
+    if (fldIdx < 0) {
+        std::cerr << "Error: class '" << clsName << "' has no array field '" << member << "'\n";
+        return nullptr;
+    }
+    auto& ci = ctx.classes[clsName];
+    // Load the array pointer from the field
+    auto fldPtr = ctx.builder->CreateStructGEP(ci.structType, obj, fldIdx, member + "_aptr");
+    auto arrPtr = ctx.builder->CreateLoad(ctx.getRefType(), fldPtr, member + "_arr");
+    // Determine element type from arrayMeta + class field
+    auto& fi = ci.fields[0];
+    llvm::Type* elemTy = nullptr;
+    for (auto& f : ci.fields) {
+        if (f.name == member) {
+            elemTy = ctx.getLLVMType(f.type);
+            (void)fi;
+            break;
+        }
+    }
+    if (!elemTy) elemTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    auto idxV = index->codegen(ctx);
+    if (!idxV) return nullptr;
+    long long lo = 1;
+    auto amIt = ci.arrayMeta.find(member);
+    if (amIt != ci.arrayMeta.end()) lo = amIt->second.first;
+    auto adj = ctx.builder->CreateSub(idxV, llvm::ConstantInt::get(i64Ty, lo), "adj_idx");
+    auto gep = ctx.builder->CreateGEP(elemTy, arrPtr, adj, "arr_elem");
+    auto val = value->codegen(ctx);
+    if (!val) return nullptr;
+    if (val->getType() != elemTy) {
+        if (elemTy->isDoubleTy() && val->getType()->isIntegerTy())
+            val = ctx.builder->CreateSIToFP(val, elemTy);
+        else if (elemTy->isIntegerTy(64) && val->getType()->isDoubleTy())
+            val = ctx.builder->CreateFPToSI(val, elemTy);
+    }
+    ctx.builder->CreateStore(val, gep);
+    return val;
+}
+
 llvm::Value* RefAssignment::codegen(CodeGenContext& ctx) {
     // Check if assigning to procedure return variable (return-by-name with :-)
     if (name == ctx.currentProcName && ctx.returnValueAlloca) {
@@ -2442,8 +2534,13 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         paramTypes.push_back(ctx.getRefType());
     }
     for (auto& p : params) {
-        if (p.isName || p.isArray) {
-            paramTypes.push_back(ctx.getRefType()); // NAME or ARRAY = pointer
+        if (p.isName) {
+            paramTypes.push_back(ctx.getRefType()); // NAME = pointer
+        } else if (p.isArray) {
+            // ARRAY: ptr to data, then i64 lo, i64 hi (bounds passed at runtime)
+            paramTypes.push_back(ctx.getRefType());
+            paramTypes.push_back(llvm::Type::getInt64Ty(*ctx.llvmContext));
+            paramTypes.push_back(llvm::Type::getInt64Ty(*ctx.llvmContext));
         } else {
             paramTypes.push_back(ctx.getLLVMType(p.type));
         }
@@ -2558,16 +2655,31 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             continue;
         }
         if (p.isArray) {
-            // Array param: arg is a pointer to the array data.
+            // Array param: ptr to data, plus i64 lo, i64 hi.
             (&*argIt)->setName(p.name);
+            llvm::Value* basePtr = &*argIt;
+            ++argIt;
+            llvm::Value* loArg = &*argIt;
+            (&*argIt)->setName(p.name + "_lo");
+            ++argIt;
+            llvm::Value* hiArg = &*argIt;
+            (&*argIt)->setName(p.name + "_hi");
+            ++argIt;
+            // Store lo and hi in allocas so UPPERBOUND/LOWERBOUND can read them.
+            auto i64Ty2 = llvm::Type::getInt64Ty(*ctx.llvmContext);
+            auto loAlloca = ctx.createEntryBlockAlloca(func, p.name + "__lo", i64Ty2);
+            ctx.builder->CreateStore(loArg, loAlloca);
+            ctx.locals[p.name + "__lo"] = loAlloca;
+            auto hiAlloca = ctx.createEntryBlockAlloca(func, p.name + "__hi", i64Ty2);
+            ctx.builder->CreateStore(hiArg, hiAlloca);
+            ctx.locals[p.name + "__hi"] = hiAlloca;
             ArrayInfo info;
-            info.basePtr = &*argIt;
+            info.basePtr = basePtr;
             info.elementType = ctx.getLLVMType(p.arrayElemType);
-            info.lowerBound = 1; // assume 1-based
-            info.size = 0; // unknown
+            info.lowerBound = 1; // overridden by __lo at runtime
+            info.size = 0; // unknown statically; UPPERBOUND reads __hi
             info.isStackArray = false;
             ctx.arrays[p.name] = info;
-            ++argIt;
             continue;
         }
         auto alloca = ctx.createEntryBlockAlloca(func, p.name, ty);
@@ -2839,6 +2951,14 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
             fi.structIndex = (int)fieldTypes.size();
             ci.fields.push_back(fi);
             fieldTypes.push_back(ctx.getRefType()); // pointer to array data
+            // Pre-populate arrayMeta with the static lower bound (if known). Even when
+            // the upper bound is dynamic, the lower bound is usually a literal. Member
+            // array access from outside the class needs this for index adjustment.
+            long long staticLo = 1;
+            if (auto* il = dynamic_cast<IntegerLiteral*>(ad->lowerBound.get())) {
+                staticLo = il->value;
+            }
+            ci.arrayMeta[ad->name] = {staticLo, 0};
         } else if (auto* cs = dynamic_cast<CompoundStmt*>(stmt.get())) {
             // Multi-var declarations like "INTEGER a, b, c"
             for (auto& inner : cs->statements) {
@@ -3082,8 +3202,12 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
                 auto gep = ctx.builder->CreateStructGEP(ctx.classes[name].structType,
                     ctx.currentThis, idx, ad->name + "_fptr");
                 ctx.builder->CreateStore(info.basePtr, gep);
-                // Save array metadata for methods
-                ctx.classes[name].arrayMeta[ad->name] = {info.lowerBound, info.size};
+                // Save array metadata for methods. Preserve the pre-populated static
+                // lower bound from the AST (info.lowerBound is 0 for dynamic-bound arrays).
+                long long preservedLo = ctx.classes[name].arrayMeta.count(ad->name)
+                    ? ctx.classes[name].arrayMeta[ad->name].first
+                    : info.lowerBound;
+                ctx.classes[name].arrayMeta[ad->name] = {preservedLo, info.size};
             }
             continue;
         }
