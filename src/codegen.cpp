@@ -930,11 +930,45 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                 }
                 auto v = args[ai]->codegen(ctx);
                 if (!v) return nullptr;
+                if (paramIdx < fnTy->getNumParams()) {
+                    auto destTy = fnTy->getParamType(paramIdx);
+                    if (v->getType() != destTy) {
+                        if (v->getType()->isIntegerTy() && destTy->isDoubleTy())
+                            v = ctx.builder->CreateSIToFP(v, destTy, "tofp");
+                        else if (v->getType()->isDoubleTy() && destTy->isIntegerTy())
+                            v = ctx.builder->CreateFPToSI(v, destTy, "tosi");
+                        else if (v->getType()->isIntegerTy() && destTy->isIntegerTy()) {
+                            if (v->getType()->getIntegerBitWidth() < destTy->getIntegerBitWidth())
+                                v = ctx.builder->CreateZExt(v, destTy);
+                            else if (v->getType()->getIntegerBitWidth() > destTy->getIntegerBitWidth())
+                                v = ctx.builder->CreateTrunc(v, destTy);
+                        } else if (destTy->isPointerTy() && v->getType()->isIntegerTy()) {
+                            v = llvm::ConstantPointerNull::get(
+                                llvm::cast<llvm::PointerType>(destTy));
+                        }
+                    }
+                }
                 argsV.push_back(v);
             }
             return ctx.builder->CreateCall(mit->second, argsV);
         }
     }
+
+    auto coerceArg = [&](llvm::Value* v, llvm::Type* destTy) -> llvm::Value* {
+        if (v->getType() == destTy) return v;
+        if (v->getType()->isIntegerTy() && destTy->isDoubleTy())
+            return ctx.builder->CreateSIToFP(v, destTy, "tofp");
+        if (v->getType()->isDoubleTy() && destTy->isIntegerTy())
+            return ctx.builder->CreateFPToSI(v, destTy, "tosi");
+        if (v->getType()->isIntegerTy() && destTy->isIntegerTy()) {
+            if (v->getType()->getIntegerBitWidth() < destTy->getIntegerBitWidth())
+                return ctx.builder->CreateZExt(v, destTy);
+            return ctx.builder->CreateTrunc(v, destTy);
+        }
+        if (destTy->isPointerTy() && v->getType()->isIntegerTy())
+            return llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(destTy));
+        return v;
+    };
 
     // Try finding the method on the current method's owning class (handles INSPECT)
     if (ctx.methodThis && !ctx.methodThisClassName.empty()) {
@@ -946,9 +980,13 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             if (mit != cit->second.methods.end()) {
                 std::vector<llvm::Value*> argsV;
                 argsV.push_back(ctx.methodThis);
-                for (auto& arg : args) {
-                    auto v = arg->codegen(ctx);
+                auto fnTy = mit->second->getFunctionType();
+                unsigned nParams = fnTy->getNumParams();
+                for (size_t ai = 0; ai < args.size(); ai++) {
+                    auto v = args[ai]->codegen(ctx);
                     if (!v) return nullptr;
+                    if (ai + 1 < nParams)
+                        v = coerceArg(v, fnTy->getParamType(ai + 1));
                     argsV.push_back(v);
                 }
                 if (mit->second->getReturnType()->isVoidTy())
@@ -965,9 +1003,13 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             if (mit != clsI.methods.end()) {
                 std::vector<llvm::Value*> argsV;
                 argsV.push_back(ctx.currentThis);
-                for (auto& arg : args) {
-                    auto v = arg->codegen(ctx);
+                auto fnTy = mit->second->getFunctionType();
+                unsigned nParams = fnTy->getNumParams();
+                for (size_t ai = 0; ai < args.size(); ai++) {
+                    auto v = args[ai]->codegen(ctx);
                     if (!v) return nullptr;
+                    if (ai + 1 < nParams)
+                        v = coerceArg(v, fnTy->getParamType(ai + 1));
                     argsV.push_back(v);
                 }
                 if (mit->second->getReturnType()->isVoidTy())
@@ -1611,6 +1653,9 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
                                     v = ctx.builder->CreateZExt(v, destTy);
                                 else if (v->getType()->getIntegerBitWidth() > destTy->getIntegerBitWidth())
                                     v = ctx.builder->CreateTrunc(v, destTy);
+                            } else if (destTy->isPointerTy() && v->getType()->isIntegerTy()) {
+                                v = llvm::ConstantPointerNull::get(
+                                    llvm::cast<llvm::PointerType>(destTy));
                             }
                         }
                     }
@@ -1676,9 +1721,30 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
 
     std::vector<llvm::Value*> argsV;
     argsV.push_back(obj);
-    for (auto& arg : args) {
-        auto v = arg->codegen(ctx);
+    auto fnTy = methodFunc->getFunctionType();
+    unsigned nParams = fnTy->getNumParams();
+    for (size_t ai = 0; ai < args.size(); ai++) {
+        auto v = args[ai]->codegen(ctx);
         if (!v) return nullptr;
+        unsigned pi = ai + 1;
+        if (pi < nParams) {
+            auto destTy = fnTy->getParamType(pi);
+            if (v->getType() != destTy) {
+                if (v->getType()->isIntegerTy() && destTy->isDoubleTy())
+                    v = ctx.builder->CreateSIToFP(v, destTy, "tofp");
+                else if (v->getType()->isDoubleTy() && destTy->isIntegerTy())
+                    v = ctx.builder->CreateFPToSI(v, destTy, "tosi");
+                else if (v->getType()->isIntegerTy() && destTy->isIntegerTy()) {
+                    if (v->getType()->getIntegerBitWidth() < destTy->getIntegerBitWidth())
+                        v = ctx.builder->CreateZExt(v, destTy);
+                    else if (v->getType()->getIntegerBitWidth() > destTy->getIntegerBitWidth())
+                        v = ctx.builder->CreateTrunc(v, destTy);
+                } else if (destTy->isPointerTy() && v->getType()->isIntegerTy()) {
+                    v = llvm::ConstantPointerNull::get(
+                        llvm::cast<llvm::PointerType>(destTy));
+                }
+            }
+        }
         argsV.push_back(v);
     }
     return ctx.builder->CreateCall(methodFunc, argsV);
