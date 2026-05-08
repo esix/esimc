@@ -1462,7 +1462,8 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
                     }
                 }
             }
-            // Fallback: if no implementation exists yet, infer from call args
+            // Fallback: if no implementation exists yet, infer return type as i1
+            // (likely BOOLEAN — common for virtual methods like LESS, EQUAL, MORE)
             if (!funcTy) {
                 std::vector<llvm::Type*> paramTypes;
                 paramTypes.push_back(ptrTy2); // this
@@ -1473,14 +1474,12 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
                     argVals.push_back(v);
                     paramTypes.push_back(v->getType());
                 }
-                // Assume void return for VIRTUAL-only methods (best guess)
-                funcTy = llvm::FunctionType::get(
-                    llvm::Type::getVoidTy(*ctx.llvmContext), paramTypes, false);
+                auto i1Ty = llvm::Type::getInt1Ty(*ctx.llvmContext);
+                funcTy = llvm::FunctionType::get(i1Ty, paramTypes, false);
                 std::vector<llvm::Value*> argsV;
                 argsV.push_back(obj);
                 for (auto& v : argVals) argsV.push_back(v);
-                ctx.builder->CreateCall(funcTy, fp, argsV);
-                return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), 0);
+                return ctx.builder->CreateCall(funcTy, fp, argsV, method + "_vret");
             }
             if (funcTy) {
                 std::vector<llvm::Value*> argsV;
