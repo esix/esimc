@@ -2424,6 +2424,11 @@ llvm::Value* WhileStatement::codegen(CodeGenContext& ctx) {
     ctx.builder->SetInsertPoint(condBB);
 
     auto condV = condition->codegen(ctx);
+    if (!condV) {
+        // Codegen of condition failed (error already reported). Emit a constant
+        // false so the module is at least valid.
+        condV = llvm::ConstantInt::getFalse(*ctx.llvmContext);
+    }
     ctx.builder->CreateCondBr(condV, bodyBB, afterBB);
 
     func->insert(func->end(), bodyBB);
