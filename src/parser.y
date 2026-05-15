@@ -245,6 +245,7 @@ top_level_decls
 top_level_decl
     : class_decl
     | external_decl
+    | procedure_decl
     ;
 
 external_decl

@@ -79,6 +79,11 @@ public:
     std::map<std::string, std::pair<llvm::Value*, llvm::Type*>> nameParams;
     llvm::AllocaInst* returnValueAlloca = nullptr;
 
+    // For each procedure name, which parameter indices are NAME (pass-by-reference).
+    // Call sites use this to pass the address of the caller's variable instead of
+    // the value, even for ptr-typed variables (where the type alone is ambiguous).
+    std::map<std::string, std::set<int>> nameParamIndices;
+
     // REF type info: variable name -> class name
     std::map<std::string, std::string> refTypes;
 

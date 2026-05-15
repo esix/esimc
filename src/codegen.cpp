@@ -1055,7 +1055,25 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
     std::vector<llvm::Value*> argsV;
     auto fnTy = func->getFunctionType();
     size_t paramIdx = 0;
-    for (auto& arg : args) {
+    auto npiIt = ctx.nameParamIndices.find(name);
+    const std::set<int>* nameIdxSet = (npiIt != ctx.nameParamIndices.end())
+        ? &npiIt->second : nullptr;
+    for (size_t userArgIdx = 0; userArgIdx < args.size(); userArgIdx++) {
+        auto& arg = args[userArgIdx];
+        bool isNameParam = nameIdxSet && nameIdxSet->count((int)userArgIdx);
+        // For NAME parameters: pass the address of the caller's storage even if
+        // the variable is itself a pointer type (e.g. REF). This is what makes
+        // assignments inside the callee propagate back to the caller's variable.
+        if (isNameParam) {
+            if (auto* id = dynamic_cast<Identifier*>(arg.get())) {
+                auto [ptr, ty] = ctx.getVarPtr(id->name);
+                if (ptr) {
+                    argsV.push_back(ptr);
+                    paramIdx++;
+                    continue;
+                }
+            }
+        }
         // Check if the callee expects a pointer at this position (NAME or ARRAY param)
         if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isPointerTy()) {
             if (auto* id = dynamic_cast<Identifier*>(arg.get())) {
@@ -2318,6 +2336,36 @@ llvm::Value* MemberArrayAssignment::codegen(CodeGenContext& ctx) {
     if (clsName.empty() && dynamic_cast<ThisExpression*>(object.get())) {
         clsName = ctx.currentClassName;
     }
+    // Inner method-call-on-identifier returning a REF (e.g. ROOT.LINK(0).OTHER)
+    if (clsName.empty()) {
+        if (auto* mc = dynamic_cast<MethodCall*>(object.get())) {
+            std::string innerCls;
+            if (auto* id = dynamic_cast<Identifier*>(mc->object.get())) {
+                innerCls = ctx.resolveRefType(id->name);
+            } else if (dynamic_cast<ThisExpression*>(mc->object.get())) {
+                innerCls = ctx.currentClassName;
+            }
+            if (!innerCls.empty()) {
+                auto cit2 = ctx.classes.find(innerCls);
+                if (cit2 != ctx.classes.end()) {
+                    for (auto& f : cit2->second.fields) {
+                        if (f.name == mc->method && !f.refClassName.empty()) {
+                            clsName = f.refClassName;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (clsName.empty()) {
+                clsName = ctx.resolveRefType(mc->method);
+            }
+        }
+    }
+    if (clsName.empty()) {
+        if (auto* call = dynamic_cast<ProcedureCall*>(object.get())) {
+            clsName = ctx.resolveRefType(call->name);
+        }
+    }
     if (clsName.empty()) {
         std::cerr << "Error: cannot determine class for member array assignment '." << member << "'\n";
         return nullptr;
@@ -2686,6 +2734,19 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         ctx.capturedTypes[funcName] = capturedTys;
     }
 
+    // Record which param indices are NAME (pass-by-reference) so callers can pass
+    // the address of the caller's variable instead of its value. Index is in the
+    // user-visible param list (excluding 'this' for methods).
+    {
+        std::set<int> nameIdx;
+        for (size_t i = 0; i < params.size(); i++) {
+            if (params[i].isName) nameIdx.insert((int)i);
+        }
+        if (!nameIdx.empty()) {
+            ctx.nameParamIndices[funcName] = nameIdx;
+        }
+    }
+
     // Register as method if inside a class
     if (isMethod) {
         ctx.classes[ctx.currentClassName].methods[name] = func;
@@ -3048,6 +3109,7 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
             ClassInfo::FieldInfo fi;
             fi.name = ad->name;
             fi.type = ad->elementType;
+            fi.refClassName = ad->refClassName; // for REF(Class) ARRAY fields
             fi.structIndex = (int)fieldTypes.size();
             ci.fields.push_back(fi);
             fieldTypes.push_back(ctx.getRefType()); // pointer to array data
