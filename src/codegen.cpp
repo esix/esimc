@@ -3153,8 +3153,15 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         }
     }
 
-    // Create struct type
-    ci.structType = llvm::StructType::create(*ctx.llvmContext, fieldTypes, name);
+    // Create struct type — reuse a forward-declared placeholder if one exists
+    // (so any code already using the type sees the same type with body filled in).
+    auto existingIt = ctx.classes.find(name);
+    if (existingIt != ctx.classes.end() && existingIt->second.structType) {
+        ci.structType = existingIt->second.structType;
+        ci.structType->setBody(fieldTypes);
+    } else {
+        ci.structType = llvm::StructType::create(*ctx.llvmContext, fieldTypes, name);
+    }
 
     // Register class before processing body
     ctx.classes[name] = ci;
