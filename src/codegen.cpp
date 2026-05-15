@@ -2120,6 +2120,23 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
             return gv;
         }
 
+        // Inside a class body (currentThis set), heap-allocate so the array
+        // outlives the body coroutine. Otherwise it'd be a stack alloca that
+        // gets freed when the body returns, leaving the field with a dangling ptr.
+        if (ctx.currentThis) {
+            auto elemSize = ctx.module->getDataLayout().getTypeAllocSize(elemTy);
+            auto byteSize = llvm::ConstantInt::get(i64Ty, (long long)elemSize * size);
+            auto ptr = ctx.builder->CreateCall(ctx.allocFunc, {byteSize}, name + "_data");
+            ArrayInfo info;
+            info.basePtr = ptr;
+            info.elementType = elemTy;
+            info.lowerBound = lo;
+            info.size = size;
+            info.isStackArray = false;
+            ctx.arrays[name] = info;
+            if (!refClassName.empty()) ctx.refTypes[name] = refClassName;
+            return ptr;
+        }
         auto arrTy = llvm::ArrayType::get(elemTy, size);
         auto func = ctx.builder->GetInsertBlock()->getParent();
         auto alloca = ctx.createEntryBlockAlloca(func, name, arrTy);
