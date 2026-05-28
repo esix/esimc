@@ -42,6 +42,33 @@ llvm::BasicBlock* CodeGenContext::getOrCreateLabel(const std::string& name) {
     return bb;
 }
 
+// Build the value to pass for a LABEL argument named `labelName`:
+//  - a local label: allocate a {jmp_buf*, id} record pointing at this function's buf
+//  - a LABEL parameter: forward the record pointer we were given
+// Returns nullptr if the name isn't a recognized label.
+llvm::Value* CodeGenContext::makeLabelArg(const std::string& labelName) {
+    auto ptrTy = getRefType();
+    auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
+    // Forwarding a LABEL parameter: pass the record pointer through unchanged.
+    if (labelParamNames.count(labelName)) {
+        auto lit = locals.find(labelName);
+        if (lit != locals.end())
+            return builder->CreateLoad(ptrTy, lit->second, labelName + "_fwd");
+    }
+    // A local label that's a non-local target: build a fresh record.
+    auto idIt = nonLocalLabelIds.find(labelName);
+    if (idIt != nonLocalLabelIds.end() && currentJmpBuf && labelRecordType) {
+        auto func = builder->GetInsertBlock()->getParent();
+        auto rec = createEntryBlockAlloca(func, labelName + "_lblrec", labelRecordType);
+        auto bufSlot = builder->CreateStructGEP(labelRecordType, rec, 0, "lr_buf");
+        builder->CreateStore(currentJmpBuf, bufSlot);
+        auto idSlot = builder->CreateStructGEP(labelRecordType, rec, 1, "lr_id");
+        builder->CreateStore(llvm::ConstantInt::get(i64Ty, idIt->second), idSlot);
+        return rec;
+    }
+    return nullptr;
+}
+
 void CodeGenContext::buildAllVtables() {
     auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
     auto ptrTy = getRefType();
@@ -303,6 +330,18 @@ void CodeGenContext::declareRuntimeFunctions() {
     getcharFunc = llvm::Function::Create(
         llvm::FunctionType::get(i32Ty, false),
         llvm::Function::ExternalLinkage, "getchar", module.get());
+
+    // setjmp(ptr) -> i32 ; longjmp(ptr, i32) for non-local GOTO (LABEL params)
+    setjmpFunc = llvm::Function::Create(
+        llvm::FunctionType::get(i32Ty, {ptrTy}, false),
+        llvm::Function::ExternalLinkage, "setjmp", module.get());
+    longjmpFunc = llvm::Function::Create(
+        llvm::FunctionType::get(voidTy, {ptrTy, i32Ty}, false),
+        llvm::Function::ExternalLinkage, "longjmp", module.get());
+    longjmpFunc->addFnAttr(llvm::Attribute::NoReturn);
+    // Label record: { ptr jmpbuf, i64 id }
+    labelRecordType = llvm::StructType::create(*llvmContext,
+        {ptrTy, i64Ty}, "simula_label");
 
     // simula_alloc(i64) -> ptr
     allocFunc = llvm::Function::Create(
@@ -913,9 +952,22 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             std::vector<llvm::Value*> argsV;
             argsV.push_back(ctx.currentThis);
             auto fnTy = mit->second->getFunctionType();
+            std::string mFuncName = ctx.currentClassName + "_" + name;
+            auto mLpiIt = ctx.labelParamIndices.find(mFuncName);
+            const std::set<int>* mLabelIdx = (mLpiIt != ctx.labelParamIndices.end())
+                ? &mLpiIt->second : nullptr;
             // arg index in callee: 0 is 'this', so user args start at 1
             for (size_t ai = 0; ai < args.size(); ai++) {
                 size_t paramIdx = ai + 1;
+                // LABEL parameter: pass a {jmp_buf, id} record for non-local GOTO.
+                if (mLabelIdx && mLabelIdx->count((int)ai)) {
+                    if (auto* id = dynamic_cast<Identifier*>(args[ai].get())) {
+                        if (auto rec = ctx.makeLabelArg(id->name)) {
+                            argsV.push_back(rec);
+                            continue;
+                        }
+                    }
+                }
                 // If callee expects ptr at this position and arg is an Identifier value,
                 // pass the variable's address (NAME parameter)
                 if (paramIdx < fnTy->getNumParams() &&
@@ -1058,9 +1110,24 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
     auto npiIt = ctx.nameParamIndices.find(name);
     const std::set<int>* nameIdxSet = (npiIt != ctx.nameParamIndices.end())
         ? &npiIt->second : nullptr;
+    auto lpiIt = ctx.labelParamIndices.find(name);
+    const std::set<int>* labelIdxSet = (lpiIt != ctx.labelParamIndices.end())
+        ? &lpiIt->second : nullptr;
     for (size_t userArgIdx = 0; userArgIdx < args.size(); userArgIdx++) {
         auto& arg = args[userArgIdx];
         bool isNameParam = nameIdxSet && nameIdxSet->count((int)userArgIdx);
+        bool isLabelParam = labelIdxSet && labelIdxSet->count((int)userArgIdx);
+        // For LABEL parameters: pass a {jmp_buf, id} record so the callee can
+        // perform a non-local GOTO back into this function.
+        if (isLabelParam) {
+            if (auto* id = dynamic_cast<Identifier*>(arg.get())) {
+                if (auto rec = ctx.makeLabelArg(id->name)) {
+                    argsV.push_back(rec);
+                    paramIdx++;
+                    continue;
+                }
+            }
+        }
         // For NAME parameters: pass the address of the caller's storage even if
         // the variable is itself a pointer type (e.g. REF). This is what makes
         // assignments inside the callee propagate back to the caller's variable.
@@ -2486,28 +2553,41 @@ llvm::Value* LabeledStatement::codegen(CodeGenContext& ctx) {
 llvm::Value* GotoStatement::codegen(CodeGenContext& ctx) {
     auto func = ctx.builder->GetInsertBlock()->getParent();
 
-    // Detect cross-function GOTO: if the label isn't in the current scope's
-    // labelBlocks (cleared on each function entry), it must refer to a label
-    // declared in an enclosing function — typically passed via a LABEL parameter.
-    // We don't support setjmp/longjmp semantics, so emit `unreachable` to keep
-    // the module valid rather than emit an invalid cross-function branch.
+    // GOTO of a LABEL parameter is a non-local jump: load the {jmp_buf, id} record
+    // the caller passed and longjmp back into the caller's setjmp dispatch.
+    if (ctx.labelParamNames.count(label)) {
+        auto recPtrAlloca = ctx.locals.find(label);
+        if (recPtrAlloca != ctx.locals.end()) {
+            auto ptrTy = ctx.getRefType();
+            auto i32Ty = llvm::Type::getInt32Ty(*ctx.llvmContext);
+            auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+            auto recPtr = ctx.builder->CreateLoad(ptrTy, recPtrAlloca->second, label + "_rec");
+            auto bufSlot = ctx.builder->CreateStructGEP(ctx.labelRecordType, recPtr, 0, "lbl_buf");
+            auto buf = ctx.builder->CreateLoad(ptrTy, bufSlot, "lbl_buf_v");
+            auto idSlot = ctx.builder->CreateStructGEP(ctx.labelRecordType, recPtr, 1, "lbl_id");
+            auto id64 = ctx.builder->CreateLoad(i64Ty, idSlot, "lbl_id_v");
+            auto id32 = ctx.builder->CreateTrunc(id64, i32Ty, "lbl_id32");
+            ctx.builder->CreateCall(ctx.longjmpFunc, {buf, id32});
+            ctx.builder->CreateUnreachable();
+            auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_goto", func);
+            ctx.builder->SetInsertPoint(afterBB);
+            return nullptr;
+        }
+    }
+
+    // Local GOTO: branch to the label block in this function.
     auto it = ctx.labelBlocks.find(label);
-    if (it == ctx.labelBlocks.end()) {
+    if (it == ctx.labelBlocks.end() ||
+        (it->second->getParent() && it->second->getParent() != func)) {
+        // Unknown / cross-function label without a LABEL-param record: keep the
+        // module valid rather than emit an invalid branch.
         ctx.builder->CreateUnreachable();
         auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_goto", func);
         ctx.builder->SetInsertPoint(afterBB);
         return nullptr;
     }
 
-    auto targetBB = it->second;
-    if (targetBB->getParent() && targetBB->getParent() != func) {
-        ctx.builder->CreateUnreachable();
-        auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_goto", func);
-        ctx.builder->SetInsertPoint(afterBB);
-        return nullptr;
-    }
-
-    ctx.builder->CreateBr(targetBB);
+    ctx.builder->CreateBr(it->second);
 
     auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_goto", func);
     ctx.builder->SetInsertPoint(afterBB);
@@ -2756,11 +2836,16 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     // user-visible param list (excluding 'this' for methods).
     {
         std::set<int> nameIdx;
+        std::set<int> labelIdx;
         for (size_t i = 0; i < params.size(); i++) {
             if (params[i].isName) nameIdx.insert((int)i);
+            if (params[i].isLabel) labelIdx.insert((int)i);
         }
         if (!nameIdx.empty()) {
             ctx.nameParamIndices[funcName] = nameIdx;
+        }
+        if (!labelIdx.empty()) {
+            ctx.labelParamIndices[funcName] = labelIdx;
         }
     }
 
@@ -2785,6 +2870,12 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto savedLabelBlocks = ctx.labelBlocks;
     auto savedInMainBlock = ctx.inMainBlock;
     ctx.inMainBlock = false;
+    auto savedJmpBuf = ctx.currentJmpBuf;
+    auto savedNonLocalIds = ctx.nonLocalLabelIds;
+    auto savedLabelParamNames = ctx.labelParamNames;
+    ctx.currentJmpBuf = nullptr;
+    ctx.nonLocalLabelIds.clear();
+    ctx.labelParamNames.clear();
 
     // Create entry block
     auto entry = llvm::BasicBlock::Create(*ctx.llvmContext, "entry", func);
@@ -2858,6 +2949,17 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             info.size = 0; // unknown statically; UPPERBOUND reads __hi
             info.isStackArray = false;
             ctx.arrays[p.name] = info;
+            continue;
+        }
+        if (p.isLabel) {
+            // LABEL param: arg is a ptr to a {jmpbuf, id} record. Store as a plain
+            // ptr local and remember the name so GOTO can longjmp to it.
+            auto ptrTy = ctx.getRefType();
+            auto alloca = ctx.createEntryBlockAlloca(func, p.name, ptrTy);
+            ctx.builder->CreateStore(&*argIt, alloca);
+            ctx.locals[p.name] = alloca;
+            ctx.labelParamNames.insert(p.name);
+            ++argIt;
             continue;
         }
         auto alloca = ctx.createEntryBlockAlloca(func, p.name, ty);
@@ -2983,14 +3085,35 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         ctx.setupTextFieldTracking(func);
     }
 
-    // Pre-scan body for labels so they're available for forward references
+    // Pre-scan body for labels so they're available for forward references.
+    // Also collect local label names and detect which are used as non-local
+    // GOTO targets (passed as a LABEL argument to a call).
+    std::set<std::string> localLabels;
+    std::set<std::string> nonLocalTargets;
     {
+        std::function<void(Expression*)> scanExpr = [&](Expression* e) {
+            if (!e) return;
+            auto checkArgs = [&](ExprList& args) {
+                for (auto& a : args) {
+                    if (auto* id = dynamic_cast<Identifier*>(a.get()))
+                        nonLocalTargets.insert(id->name);
+                    scanExpr(a.get());
+                }
+            };
+            if (auto* pc = dynamic_cast<ProcedureCall*>(e)) { checkArgs(pc->args); }
+            else if (auto* mc = dynamic_cast<MethodCall*>(e)) { scanExpr(mc->object.get()); checkArgs(mc->args); }
+            else if (auto* ne = dynamic_cast<NewExpression*>(e)) { checkArgs(ne->args); }
+            else if (auto* bo = dynamic_cast<BinaryOp*>(e)) { scanExpr(bo->lhs.get()); scanExpr(bo->rhs.get()); }
+            else if (auto* ma = dynamic_cast<MemberAccess*>(e)) { scanExpr(ma->object.get()); }
+        };
         std::function<void(Statement*)> scan = [&](Statement* s) {
+            if (!s) return;
             if (auto* ld = dynamic_cast<LabelDeclaration*>(s)) {
-                for (auto& n : ld->labels) ctx.getOrCreateLabel(n);
+                for (auto& n : ld->labels) { ctx.getOrCreateLabel(n); localLabels.insert(n); }
             }
             if (auto* ls = dynamic_cast<LabeledStatement*>(s)) {
                 ctx.getOrCreateLabel(ls->label);
+                localLabels.insert(ls->label);
                 if (ls->statement) scan(ls->statement.get());
             }
             if (auto* b = dynamic_cast<Block*>(s)) {
@@ -3009,8 +3132,38 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             if (auto* fs = dynamic_cast<ForStatement*>(s)) {
                 if (fs->body) scan(fs->body.get());
             }
+            if (auto* es = dynamic_cast<ExprStatement*>(s)) {
+                scanExpr(es->expr.get());
+            }
         };
         if (body) scan(body.get());
+    }
+
+    // Set up non-local GOTO machinery: any local label that is passed as a call
+    // argument may be the target of a longjmp from a callee. Allocate a jmp_buf,
+    // assign each such label an id, and emit a setjmp dispatch at function entry.
+    {
+        std::vector<std::string> nlLabels;
+        for (auto& l : localLabels)
+            if (nonLocalTargets.count(l)) nlLabels.push_back(l);
+        if (!nlLabels.empty()) {
+            auto i8Ty = llvm::Type::getInt8Ty(*ctx.llvmContext);
+            auto i32Ty = llvm::Type::getInt32Ty(*ctx.llvmContext);
+            // jmp_buf: generously sized byte buffer (macOS arm64 needs ~192 bytes).
+            auto bufTy = llvm::ArrayType::get(i8Ty, 512);
+            ctx.currentJmpBuf = ctx.createEntryBlockAlloca(func, "jmpbuf", bufTy);
+            int nextId = 1;
+            for (auto& l : nlLabels) ctx.nonLocalLabelIds[l] = nextId++;
+            // Emit: rc = setjmp(buf); switch rc -> [0:body, id:label]
+            auto rc = ctx.builder->CreateCall(ctx.setjmpFunc, {ctx.currentJmpBuf}, "setjmp_rc");
+            auto bodyStart = llvm::BasicBlock::Create(*ctx.llvmContext, "body_start", func);
+            auto sw = ctx.builder->CreateSwitch(rc, bodyStart, (unsigned)nlLabels.size());
+            for (auto& l : nlLabels) {
+                sw->addCase(llvm::ConstantInt::get(i32Ty, ctx.nonLocalLabelIds[l]),
+                            ctx.getOrCreateLabel(l));
+            }
+            ctx.builder->SetInsertPoint(bodyStart);
+        }
     }
 
     // Generate body
@@ -3043,6 +3196,9 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     ctx.arrays = savedArrays;
     ctx.labelBlocks = savedLabelBlocks;
     ctx.inMainBlock = savedInMainBlock;
+    ctx.currentJmpBuf = savedJmpBuf;
+    ctx.nonLocalLabelIds = savedNonLocalIds;
+    ctx.labelParamNames = savedLabelParamNames;
 
     return func;
 }
@@ -3601,7 +3757,18 @@ llvm::Value* OutTextStatement::codegen(CodeGenContext& ctx) {
 
 llvm::Value* OutImageStatement::codegen(CodeGenContext& ctx) {
     auto nl = ctx.builder->CreateGlobalString("", "newline");
-    return ctx.builder->CreateCall(ctx.putsFunc, {nl});
+    auto r = ctx.builder->CreateCall(ctx.putsFunc, {nl});
+    // Flush stdout: OUTIMAGE conceptually emits a completed line, and flushing
+    // makes output visible promptly (and not lost if the program later crashes).
+    auto voidTy = llvm::Type::getVoidTy(*ctx.llvmContext);
+    auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+    auto i32Ty = llvm::Type::getInt32Ty(*ctx.llvmContext);
+    auto fflushFn = ctx.module->getOrInsertFunction(
+        "fflush", llvm::FunctionType::get(i32Ty, {ptrTy}, false));
+    ctx.builder->CreateCall(fflushFn,
+        {llvm::ConstantPointerNull::get(ptrTy)});
+    (void)voidTy;
+    return r;
 }
 
 llvm::Value* InImageStatement::codegen(CodeGenContext& ctx) {

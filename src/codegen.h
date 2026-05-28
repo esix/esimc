@@ -84,6 +84,18 @@ public:
     // the value, even for ptr-typed variables (where the type alone is ambiguous).
     std::map<std::string, std::set<int>> nameParamIndices;
 
+    // For each procedure name, which parameter indices are LABEL (non-local goto
+    // targets). Call sites pass a {jmp_buf*, id} record; callees longjmp to it.
+    std::map<std::string, std::set<int>> labelParamIndices;
+
+    // Non-local GOTO state for the function currently being compiled:
+    llvm::Value* currentJmpBuf = nullptr;            // ptr to this function's jmp_buf
+    std::map<std::string, int> nonLocalLabelIds;     // local label name -> setjmp id
+    std::set<std::string> labelParamNames;           // names of LABEL params in scope
+    llvm::StructType* labelRecordType = nullptr;     // { ptr jmpbuf, i64 id }
+    llvm::Function* setjmpFunc = nullptr;
+    llvm::Function* longjmpFunc = nullptr;
+
     // REF type info: variable name -> class name
     std::map<std::string, std::string> refTypes;
 
@@ -139,6 +151,7 @@ public:
 
     // Label helpers
     llvm::BasicBlock* getOrCreateLabel(const std::string& name);
+    llvm::Value* makeLabelArg(const std::string& labelName);
 
     llvm::Value* loadClassId(llvm::Value* obj);
 

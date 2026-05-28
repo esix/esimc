@@ -32,6 +32,7 @@ struct ParamSpec {
     bool isArray = false; // for ARRAY parameters
     int arrayElemType = 0; // VarDeclaration::Type for array elements
     bool isName = false; // NAME (pass-by-reference) parameter
+    bool isLabel = false; // LABEL parameter (non-local goto target)
 };
 
 // ============================================================

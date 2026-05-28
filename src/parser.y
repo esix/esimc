@@ -36,6 +36,7 @@ static std::vector<ParamSpec> mergeParams(
         bool isArray = false;
         int arrayElem = 0;
         bool isName = false;
+        bool isLabel = false;
         /* First pass: check NAME/VALUE markers */
         for (auto& sp : specs) {
             if (sp.first == -30 || sp.first == -31) {
@@ -47,10 +48,25 @@ static std::vector<ParamSpec> mergeParams(
                 }
             }
         }
+        /* Check LABEL markers */
+        for (auto& sp : specs) {
+            if (sp.first == -40) {
+                for (auto& sn : sp.second) {
+                    if (matchName(sn, n)) { isLabel = true; break; }
+                }
+            }
+        }
         /* Find this name in the specs */
         for (auto& sp : specs) {
             if (sp.first == -30 || sp.first == -31 || sp.first == -1) {
                 /* NAME/VALUE/unknown markers — skip in type scan */
+                continue;
+            }
+            if (sp.first == -40) {
+                /* LABEL spec: typed as a pointer (TEXT) */
+                for (auto& sn : sp.second) {
+                    if (matchName(sn, n)) { type = VarDeclaration::TEXT; goto found; }
+                }
                 continue;
             }
             if (sp.first == -10) {
@@ -111,7 +127,7 @@ static std::vector<ParamSpec> mergeParams(
         ParamSpec ps;
         ps.name = n; ps.type = type; ps.refClassName = refClass;
         ps.isArray = isArray; ps.arrayElemType = arrayElem;
-        ps.isName = isName;
+        ps.isName = isName; ps.isLabel = isLabel;
         result.push_back(ps);
     }
     return result;
@@ -515,8 +531,8 @@ param_specs
         $$ = $1;
       }
     | param_specs T_LABEL ident_list T_SEMI {
-        /* LABEL parameter spec — treated as TEXT (ptr) */
-        $1->push_back({VarDeclaration::TEXT, std::move(*$3)});
+        /* LABEL parameter spec — encoded as -40 (carries a non-local goto target) */
+        $1->push_back({-40, std::move(*$3)});
         delete $3;
         $$ = $1;
       }
