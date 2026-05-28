@@ -160,7 +160,7 @@ static std::vector<ParamSpec> mergeParams(
 %token T_WHILE T_DO
 %token T_FOR T_STEP T_UNTIL
 %token T_TRUE T_FALSE
-%token T_NOT T_AND T_OR T_EQV T_IMP T_QUA
+%token T_NOT T_AND T_OR T_EQV T_IMP T_QUA T_ANDTHEN T_ORELSE
 %token T_PROCEDURE T_CLASS T_NEW T_THIS
 %token T_REF T_NONE T_IS T_IN
 %token T_VIRTUAL
@@ -931,6 +931,12 @@ expr
       }
     | expr T_OR comparison {
         $$ = new BinaryOp(BinaryOp::OR, ExprPtr($1), ExprPtr($3));
+      }
+    | expr T_ANDTHEN comparison {
+        $$ = new BinaryOp(BinaryOp::ANDTHEN, ExprPtr($1), ExprPtr($3));
+      }
+    | expr T_ORELSE comparison {
+        $$ = new BinaryOp(BinaryOp::ORELSE, ExprPtr($1), ExprPtr($3));
       }
     | expr T_EQV comparison {
         /* EQV = logical equivalence = NOT (a XOR b) */

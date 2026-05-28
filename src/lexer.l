@@ -37,9 +37,9 @@
 "TRUE"                          return T_TRUE;
 "FALSE"                         return T_FALSE;
 "NOT"                           return T_NOT;
+"AND"[ \t\r\n]+"THEN"           return T_ANDTHEN;
+"OR"[ \t\r\n]+"ELSE"            return T_ORELSE;
 "AND"                           return T_AND;
-"OR"[ \t]+"ELSE"                return T_OR;
-"AND"[ \t]+"THEN"               return T_AND;
 "OR"                            return T_OR;
 "EQV"                           return T_EQV;
 "IMP"                           return T_IMP;

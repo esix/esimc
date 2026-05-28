@@ -638,6 +638,42 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
+    // Short-circuit operators (Simula AND THEN / OR ELSE): evaluate the right
+    // operand only when needed, so a guard like `X == NONE OR ELSE X.M(..)`
+    // doesn't dereference a null reference.
+    if (op == ANDTHEN || op == ORELSE) {
+        auto toBool = [&](llvm::Value* v) -> llvm::Value* {
+            if (v->getType()->isIntegerTy(1)) return v;
+            return ctx.builder->CreateICmpNE(v,
+                llvm::ConstantInt::get(v->getType(), 0), "tobool");
+        };
+        auto func = ctx.builder->GetInsertBlock()->getParent();
+        auto Lv = lhs->codegen(ctx);
+        if (!Lv) return nullptr;
+        auto Lb = toBool(Lv);
+        auto entryBB = ctx.builder->GetInsertBlock();
+        auto rhsBB = llvm::BasicBlock::Create(*ctx.llvmContext, "sc_rhs", func);
+        auto contBB = llvm::BasicBlock::Create(*ctx.llvmContext, "sc_cont", func);
+        if (op == ORELSE)
+            ctx.builder->CreateCondBr(Lb, contBB, rhsBB);   // true short-circuits
+        else
+            ctx.builder->CreateCondBr(Lb, rhsBB, contBB);   // false short-circuits
+
+        ctx.builder->SetInsertPoint(rhsBB);
+        auto Rv = rhs->codegen(ctx);
+        if (!Rv) return nullptr;
+        auto Rb = toBool(Rv);
+        auto rhsEndBB = ctx.builder->GetInsertBlock();
+        ctx.builder->CreateBr(contBB);
+
+        ctx.builder->SetInsertPoint(contBB);
+        auto i1Ty = llvm::Type::getInt1Ty(*ctx.llvmContext);
+        auto phi = ctx.builder->CreatePHI(i1Ty, 2, "sctmp");
+        phi->addIncoming(llvm::ConstantInt::get(i1Ty, op == ORELSE ? 1 : 0), entryBB);
+        phi->addIncoming(Rb, rhsEndBB);
+        return phi;
+    }
+
     auto L = lhs->codegen(ctx);
     auto R = rhs->codegen(ctx);
     if (!L || !R) return nullptr;
