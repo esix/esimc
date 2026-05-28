@@ -189,6 +189,100 @@ static std::string preprocessExternals(const std::string& source,
     return out;
 }
 
+// Build the INFILE standard class as an AST (bypassing the lexer, since names
+// like LASTITEM/IMAGE/INIMAGE are reserved keywords and can't be declared in
+// Simula source). Backed by the inopen/inreadline/inclose runtime primitives.
+//
+//   CLASS INFILE(FILENAME); TEXT FILENAME;
+//   BEGIN
+//     INTEGER FH; TEXT IMAGE; BOOLEAN LASTITEM;
+//     PROCEDURE INIMAGE;
+//     BEGIN IMAGE :- INREADLINE(FH, 132);
+//           IF IMAGE == NOTEXT THEN LASTITEM := TRUE; END;
+//     PROCEDURE OPEN(BUF); TEXT BUF; BEGIN FH := INOPEN(FILENAME); INIMAGE; END;
+//     TEXT PROCEDURE INTEXT(N); INTEGER N; BEGIN INTEXT :- IMAGE; INIMAGE; END;
+//     PROCEDURE CLOSE; INCLOSE(FH);
+//   END;
+static StmtPtr buildInfileClass() {
+    auto id = [](const std::string& n) -> ExprPtr {
+        return ExprPtr(new Identifier(n));
+    };
+    // INIMAGE body
+    StmtList inimageBody;
+    {
+        ExprList rlArgs;
+        rlArgs.push_back(id("fh"));
+        rlArgs.push_back(ExprPtr(new IntegerLiteral(132)));
+        inimageBody.push_back(StmtPtr(new RefAssignment(
+            "image", ExprPtr(new ProcedureCall("inreadline", std::move(rlArgs))))));
+        auto cond = ExprPtr(new BinaryOp(BinaryOp::EQ, id("image"),
+                                         ExprPtr(new NoneLiteral())));
+        auto thenS = StmtPtr(new Assignment("lastitem",
+                                            ExprPtr(new BooleanLiteral(true))));
+        inimageBody.push_back(StmtPtr(new IfStatement(std::move(cond),
+                                                      std::move(thenS))));
+    }
+    // OPEN body
+    StmtList openBody;
+    {
+        ExprList opArgs; opArgs.push_back(id("filename"));
+        openBody.push_back(StmtPtr(new Assignment(
+            "fh", ExprPtr(new ProcedureCall("inopen", std::move(opArgs))))));
+        openBody.push_back(StmtPtr(new ExprStatement(
+            ExprPtr(new ProcedureCall("inimage", ExprList())))));
+    }
+    // INTEXT body
+    StmtList intextBody;
+    {
+        intextBody.push_back(StmtPtr(new RefAssignment("intext", id("image"))));
+        intextBody.push_back(StmtPtr(new ExprStatement(
+            ExprPtr(new ProcedureCall("inimage", ExprList())))));
+    }
+    // CLOSE body
+    StmtList closeBody;
+    {
+        ExprList clArgs; clArgs.push_back(id("fh"));
+        closeBody.push_back(StmtPtr(new ExprStatement(
+            ExprPtr(new ProcedureCall("inclose", std::move(clArgs))))));
+    }
+
+    StmtList body;
+    body.push_back(StmtPtr(new VarDeclaration(VarDeclaration::INTEGER, "fh")));
+    body.push_back(StmtPtr(new VarDeclaration(VarDeclaration::TEXT, "image")));
+    body.push_back(StmtPtr(new VarDeclaration(VarDeclaration::BOOLEAN, "lastitem")));
+    body.push_back(StmtPtr(new ProcedureDecl("inimage", false, VarDeclaration::INTEGER,
+        {}, StmtPtr(new Block(std::move(inimageBody))))));
+    {
+        std::vector<ParamSpec> ps; ParamSpec p; p.name = "buf"; p.type = VarDeclaration::TEXT;
+        ps.push_back(p);
+        body.push_back(StmtPtr(new ProcedureDecl("open", false, VarDeclaration::INTEGER,
+            std::move(ps), StmtPtr(new Block(std::move(openBody))))));
+    }
+    {
+        std::vector<ParamSpec> ps; ParamSpec p; p.name = "n"; p.type = VarDeclaration::INTEGER;
+        ps.push_back(p);
+        body.push_back(StmtPtr(new ProcedureDecl("intext", true, VarDeclaration::TEXT,
+            std::move(ps), StmtPtr(new Block(std::move(intextBody))))));
+    }
+    body.push_back(StmtPtr(new ProcedureDecl("close", false, VarDeclaration::INTEGER,
+        {}, StmtPtr(new Block(std::move(closeBody))))));
+
+    std::vector<ParamSpec> classParams;
+    { ParamSpec p; p.name = "filename"; p.type = VarDeclaration::TEXT; classParams.push_back(p); }
+    return StmtPtr(new ClassDecl("infile", "", std::move(classParams), std::move(body)));
+}
+
+// If the source uses INFILE (and doesn't define its own), prepend the built-in
+// INFILE class to the program's outermost block.
+static void maybeInjectInfile(Program* prog, const std::string& source) {
+    auto lc = toLower(source);
+    if (lc.find("infile") == std::string::npos) return;
+    if (lc.find("class infile") != std::string::npos) return;
+    auto* blk = dynamic_cast<Block*>(prog->block.get());
+    if (!blk) return;
+    blk->statements.insert(blk->statements.begin(), buildInfileClass());
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "Usage: esimc <source.sim> [-o output.ll]\n";
@@ -236,6 +330,9 @@ int main(int argc, char** argv) {
         std::cerr << "Error: no program parsed.\n";
         return 1;
     }
+
+    // Inject the built-in INFILE class if the program uses it.
+    maybeInjectInfile(programRoot, preprocessed);
 
     CodeGenContext context;
     context.generateCode(*programRoot);

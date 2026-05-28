@@ -402,6 +402,17 @@ void CodeGenContext::declareRuntimeFunctions() {
     textEqFunc = llvm::Function::Create(
         llvm::FunctionType::get(i64Ty, {ptrTy, ptrTy}, false),
         llvm::Function::ExternalLinkage, "simula_text_eq", module.get());
+
+    // File input primitives (INFILE support)
+    inopenFunc = llvm::Function::Create(
+        llvm::FunctionType::get(i64Ty, {ptrTy}, false),
+        llvm::Function::ExternalLinkage, "simula_inopen", module.get());
+    inreadlineFunc = llvm::Function::Create(
+        llvm::FunctionType::get(ptrTy, {i64Ty, i64Ty}, false),
+        llvm::Function::ExternalLinkage, "simula_inreadline", module.get());
+    incloseFunc = llvm::Function::Create(
+        llvm::FunctionType::get(voidTy, {i64Ty}, false),
+        llvm::Function::ExternalLinkage, "simula_inclose", module.get());
 }
 
 llvm::AllocaInst* CodeGenContext::createEntryBlockAlloca(
@@ -825,6 +836,27 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         auto val = args[0]->codegen(ctx);
         if (!val) return nullptr;
         return ctx.builder->CreateCall(ctx.blanksFunc, {val}, "blanks");
+    }
+
+    // File input primitives backing the injected INFILE class.
+    if (name == "inopen") {
+        if (args.empty()) return nullptr;
+        auto v = args[0]->codegen(ctx);
+        if (!v) return nullptr;
+        return ctx.builder->CreateCall(ctx.inopenFunc, {v}, "inopen");
+    }
+    if (name == "inreadline") {
+        if (args.size() < 2) return nullptr;
+        auto fh = args[0]->codegen(ctx);
+        auto n = args[1]->codegen(ctx);
+        if (!fh || !n) return nullptr;
+        return ctx.builder->CreateCall(ctx.inreadlineFunc, {fh, n}, "inreadline");
+    }
+    if (name == "inclose") {
+        if (args.empty()) return nullptr;
+        auto fh = args[0]->codegen(ctx);
+        if (!fh) return nullptr;
+        return ctx.builder->CreateCall(ctx.incloseFunc, {fh});
     }
 
     if (name == "copy") {

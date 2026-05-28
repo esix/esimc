@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 
 /* ================================================================
  * Platform-specific coroutine backends
@@ -265,4 +266,34 @@ int64_t simula_text_eq(const char* a, const char* b) {
     if (a == NULL && b == NULL) return 1;
     if (a == NULL || b == NULL) return 0;
     return strcmp(a, b) == 0 ? 1 : 0;
+}
+
+/* ================================================================
+ * File input (INFILE support)
+ * ================================================================ */
+
+/* Open a file for reading. Returns a FILE* cast to int64_t (0 on failure). */
+int64_t simula_inopen(const char* name) {
+    if (name == NULL) return 0;
+    FILE* f = fopen(name, "r");
+    return (int64_t)(intptr_t)f;
+}
+
+/* Read one line (without the trailing newline) into a freshly-allocated
+ * string. Returns NULL at end-of-file. `maxlen` caps the line length. */
+char* simula_inreadline(int64_t handle, int64_t maxlen) {
+    FILE* f = (FILE*)(intptr_t)handle;
+    if (f == NULL) return NULL;
+    if (maxlen <= 0) maxlen = 132;
+    size_t cap = (size_t)maxlen + 2;
+    char* buf = (char*)malloc(cap);
+    if (fgets(buf, (int)cap, f) == NULL) { free(buf); return NULL; }
+    size_t len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) buf[--len] = '\0';
+    return buf;
+}
+
+void simula_inclose(int64_t handle) {
+    FILE* f = (FILE*)(intptr_t)handle;
+    if (f != NULL) fclose(f);
 }

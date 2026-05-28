@@ -123,6 +123,9 @@ public:
     llvm::Function* textConcatFunc = nullptr;
     llvm::Function* textLengthFunc = nullptr;
     llvm::Function* textStripFunc = nullptr;
+    llvm::Function* inopenFunc = nullptr;
+    llvm::Function* inreadlineFunc = nullptr;
+    llvm::Function* incloseFunc = nullptr;
     llvm::Function* textSubFunc = nullptr;
     llvm::Function* textEqFunc = nullptr;
 
