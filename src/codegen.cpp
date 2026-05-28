@@ -3961,8 +3961,15 @@ llvm::Value* CallStatement::codegen(CodeGenContext& ctx) {
 llvm::Value* OutIntStatement::codegen(CodeGenContext& ctx) {
     auto val = value->codegen(ctx);
     if (!val) return nullptr;
-    auto fmt = ctx.builder->CreateGlobalString("%lld", "intfmt");
-    return ctx.builder->CreateCall(ctx.printfFunc, {fmt, val});
+    // OUTINT(i, w): right-justify in a field of width w. printf's "%*lld" treats
+    // the width as a minimum, so w==0 prints the number with no padding (matching
+    // the common Simula idiom OUTINT(i, 0)).
+    auto i32Ty = llvm::Type::getInt32Ty(*ctx.llvmContext);
+    llvm::Value* w = width ? width->codegen(ctx) : llvm::ConstantInt::get(i32Ty, 0);
+    if (!w) return nullptr;
+    auto widthI32 = ctx.builder->CreateTrunc(w, i32Ty, "width32");
+    auto fmt = ctx.builder->CreateGlobalString("%*lld", "intfmt");
+    return ctx.builder->CreateCall(ctx.printfFunc, {fmt, widthI32, val});
 }
 
 llvm::Value* OutRealStatement::codegen(CodeGenContext& ctx) {
