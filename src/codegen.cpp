@@ -2717,7 +2717,15 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
 
     auto curVal = ctx.builder->CreateLoad(varTy, varPtr, var);
     auto limitV = limit->codegen(ctx);
-    auto condV = ctx.builder->CreateICmpSLE(curVal, limitV, "forcmp");
+    // Simula FOR-STEP-UNTIL: the continuation test depends on the sign of the
+    // step. For a positive step, loop while cur <= limit; for a negative step,
+    // loop while cur >= limit (sign(step)*(cur-limit) <= 0).
+    auto stepSign = step->codegen(ctx);
+    auto zero = llvm::ConstantInt::get(stepSign->getType(), 0);
+    auto stepNonNeg = ctx.builder->CreateICmpSGE(stepSign, zero, "stepsign");
+    auto leCond = ctx.builder->CreateICmpSLE(curVal, limitV, "forcmp_le");
+    auto geCond = ctx.builder->CreateICmpSGE(curVal, limitV, "forcmp_ge");
+    auto condV = ctx.builder->CreateSelect(stepNonNeg, leCond, geCond, "forcmp");
     ctx.builder->CreateCondBr(condV, bodyBB, afterBB);
 
     func->insert(func->end(), bodyBB);
@@ -2774,7 +2782,12 @@ llvm::Value* ForMultiRangeStatement::codegen(CodeGenContext& ctx) {
 
         auto cur = ctx.builder->CreateLoad(varTy, varPtr, var);
         auto limitV = range.limit->codegen(ctx);
-        auto cond = ctx.builder->CreateICmpSLE(cur, limitV, "fmr_cmp");
+        auto stepSign = range.step->codegen(ctx);
+        auto zero = llvm::ConstantInt::get(stepSign->getType(), 0);
+        auto stepNonNeg = ctx.builder->CreateICmpSGE(stepSign, zero, "fmr_sign");
+        auto leCond = ctx.builder->CreateICmpSLE(cur, limitV, "fmr_le");
+        auto geCond = ctx.builder->CreateICmpSGE(cur, limitV, "fmr_ge");
+        auto cond = ctx.builder->CreateSelect(stepNonNeg, leCond, geCond, "fmr_cmp");
         ctx.builder->CreateCondBr(cond, bodyBB, afterBB);
 
         func->insert(func->end(), bodyBB);
@@ -2960,6 +2973,17 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             ctx.nameParams[p.name] = {&*argIt, ty};
             (&*argIt)->setName(p.name);
             ++argIt;
+            // A NAME TEXT param supports the TEXT cursor operations (SETPOS,
+            // GETCHAR, PUTCHAR, MORE). Register it and give it a local position
+            // counter so those member calls resolve. PUTCHAR writes through to
+            // the caller's buffer (pass-by-reference), so in-place edits stick.
+            if (p.type == VarDeclaration::TEXT && p.refClassName.empty() && !p.isArray) {
+                auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                auto posAlloca = ctx.createEntryBlockAlloca(func, p.name + "__pos", i64Ty);
+                ctx.builder->CreateStore(llvm::ConstantInt::get(i64Ty, 0), posAlloca);
+                ctx.locals[p.name + "__pos"] = posAlloca;
+                ctx.textVars.insert(p.name);
+            }
             continue;
         }
         if (p.isArray) {
