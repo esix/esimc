@@ -2510,6 +2510,13 @@ llvm::Value* RefAssignment::codegen(CodeGenContext& ctx) {
     auto val = value->codegen(ctx);
     if (!val) return nullptr;
     ctx.builder->CreateStore(val, varPtr);
+    // For TEXT variables, a reference assignment (e.g. T :- COPY(X)) resets the
+    // implicit read/write position to the start of the new text.
+    auto [posPtr, posTy] = ctx.getVarPtr(name + "__pos");
+    if (posPtr) {
+        ctx.builder->CreateStore(
+            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), 0), posPtr);
+    }
     return val;
 }
 
