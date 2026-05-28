@@ -710,7 +710,11 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
         }
     }
 
-    bool isReal = L->getType()->isDoubleTy() || R->getType()->isDoubleTy();
+    // Simula's "/" always yields a real result, even for integer operands
+    // (integer division is the separate "//" operator, handled as IDIV). Force
+    // real arithmetic for DIV so e.g. 3/2 is 1.5, not 1.
+    bool isReal = L->getType()->isDoubleTy() || R->getType()->isDoubleTy() ||
+                  op == DIV;
 
     // Promote integer widths: i1/i8 -> i64 when mixed with i64
     if (!isReal && L->getType() != R->getType()) {
