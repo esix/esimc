@@ -133,6 +133,7 @@ public:
     llvm::Function* incloseFunc = nullptr;
     llvm::Function* textSubFunc = nullptr;
     llvm::Function* textEqFunc = nullptr;
+    llvm::Function* lastitemFunc = nullptr;
 
     CodeGenContext();
 

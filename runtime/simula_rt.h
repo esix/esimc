@@ -23,6 +23,10 @@ char* simula_text_strip(const char* s);
 char* simula_text_sub(const char* s, int64_t start, int64_t len);
 int64_t simula_text_eq(const char* a, const char* b);
 
+/* SYSIN LASTITEM: skip whitespace and report whether end-of-file was reached
+ * (look-ahead; the next non-blank char is pushed back so a later read sees it). */
+int64_t simula_lastitem(void);
+
 /* Coroutine management */
 SimulaCoro* simula_coro_create(void);
 void simula_coro_start(SimulaCoro* coro, void (*func)(void*), void* arg);

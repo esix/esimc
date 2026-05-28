@@ -426,6 +426,11 @@ void CodeGenContext::declareRuntimeFunctions() {
     incloseFunc = llvm::Function::Create(
         llvm::FunctionType::get(voidTy, {i64Ty}, false),
         llvm::Function::ExternalLinkage, "simula_inclose", module.get());
+
+    // simula_lastitem() -> i64  (SYSIN end-of-file look-ahead)
+    lastitemFunc = llvm::Function::Create(
+        llvm::FunctionType::get(i64Ty, {}, false),
+        llvm::Function::ExternalLinkage, "simula_lastitem", module.get());
 }
 
 llvm::AllocaInst* CodeGenContext::createEntryBlockAlloca(
@@ -521,6 +526,15 @@ llvm::Value* NoneLiteral::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
+    // SYSIN LASTITEM: a look-ahead end-of-file test (skip whitespace, peek).
+    // Must not consume the next item, so it can't be a flag set by the prior
+    // read — call the runtime peek each time it's evaluated.
+    if (name == "__lastitem" && ctx.lastitemFunc) {
+        auto r = ctx.builder->CreateCall(ctx.lastitemFunc, {}, "lastitem");
+        return ctx.builder->CreateICmpNE(r,
+            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), 0), "lastitembool");
+    }
+
     // Check if this is the return variable of a typed procedure
     if (name == ctx.currentProcName && ctx.returnValueAlloca) {
         return ctx.builder->CreateLoad(ctx.returnValueAlloca->getAllocatedType(),

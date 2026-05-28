@@ -268,6 +268,22 @@ int64_t simula_text_eq(const char* a, const char* b) {
     return strcmp(a, b) == 0 ? 1 : 0;
 }
 
+/* Look-ahead end-of-file test for SYSIN. Skips leading whitespace; if EOF is
+ * reached returns 1 (true), otherwise pushes the next item's first character
+ * back onto the stream and returns 0. This matches the Simula idiom
+ * `WHILE NOT LASTITEM DO ... ININT ...`, where LASTITEM must peek without
+ * consuming the next item. */
+int64_t simula_lastitem(void) {
+    int c;
+    while ((c = getchar()) != EOF) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v')
+            continue;
+        ungetc(c, stdin);
+        return 0;
+    }
+    return 1;
+}
+
 /* ================================================================
  * File input (INFILE support)
  * ================================================================ */
