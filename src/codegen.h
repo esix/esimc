@@ -36,6 +36,11 @@ struct ClassInfo {
     llvm::GlobalVariable* vtableGlobal = nullptr;
     std::vector<std::string> vtableMethodOrder; // method names in vtable order
     std::map<std::string, int> vtableIndex; // method name -> index in vtable (0=classId)
+
+    // Declared return type for VIRTUAL methods that have no implementation in
+    // this class yet. Lets call sites build the right function type when the
+    // concrete override is compiled later. VarDeclaration::Type; -1 void, -2 REF.
+    std::map<std::string, int> virtualReturnTypes;
 };
 
 struct ArrayInfo {

@@ -229,6 +229,19 @@ std::pair<llvm::Value*, llvm::Type*> CodeGenContext::getVarPtr(const std::string
             return {gep, fieldTy};
         }
     }
+    // INSPECT connection: inside `INSPECT X DO`, X's attributes are connected
+    // (currentThis = X), but the enclosing block's own object stays accessible.
+    // methodThis still points at that enclosing object, so fall back to it for
+    // names that aren't attributes of the inspected object.
+    if (methodThis && methodThis != currentThis && !methodThisClassName.empty()) {
+        int idx = getFieldIndex(methodThisClassName, name);
+        if (idx >= 0) {
+            auto& ci = classes[methodThisClassName];
+            auto gep = builder->CreateStructGEP(ci.structType, methodThis, idx, name + "_fptr");
+            auto fieldTy = ci.structType->getElementType(idx);
+            return {gep, fieldTy};
+        }
+    }
     // Check global variables (from outermost block)
     auto git = globals.find(name);
     if (git != globals.end()) {
@@ -537,6 +550,19 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // INSPECT connection: fall back to the enclosing block's object for names
+    // that aren't attributes of the currently-connected (inspected) object.
+    if (ctx.methodThis && ctx.methodThis != ctx.currentThis &&
+        !ctx.methodThisClassName.empty()) {
+        int idx = ctx.getFieldIndex(ctx.methodThisClassName, name);
+        if (idx >= 0) {
+            auto& ci = ctx.classes[ctx.methodThisClassName];
+            auto gep = ctx.builder->CreateStructGEP(ci.structType, ctx.methodThis, idx, name);
+            auto fieldTy = ci.structType->getElementType(idx);
+            return ctx.builder->CreateLoad(fieldTy, gep, name);
+        }
+    }
+
     // Check global variables (from outermost block, accessible by procedures)
     auto git = ctx.globals.find(name);
     if (git != ctx.globals.end()) {
@@ -766,6 +792,43 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                 adjusted, "arr_elem");
         }
         return ctx.builder->CreateLoad(info.elementType, gep, "arr_val");
+    }
+
+    // Class-field array access inside a method/body: NAME(idx) where NAME is an
+    // ARRAY field of the current class (or an inherited one). The parser can't
+    // tell this apart from a function call, so resolve it here against `this`.
+    if (ctx.currentThis && !args.empty()) {
+        std::string searchCls = ctx.currentClassName;
+        while (!searchCls.empty()) {
+            auto cit = ctx.classes.find(searchCls);
+            if (cit == ctx.classes.end()) break;
+            auto amIt = cit->second.arrayMeta.find(name);
+            if (amIt != cit->second.arrayMeta.end()) {
+                int fldIdx = ctx.getFieldIndex(searchCls, name);
+                if (fldIdx >= 0) {
+                    auto ptrTy2 = ctx.getRefType();
+                    auto& ci = cit->second;
+                    auto gep = ctx.builder->CreateStructGEP(ci.structType, ctx.currentThis,
+                                                            fldIdx, name + "_aptr");
+                    auto arrPtr = ctx.builder->CreateLoad(ptrTy2, gep, name + "_arr");
+                    auto idxVal = args[0]->codegen(ctx);
+                    if (!idxVal) return nullptr;
+                    long long lo = amIt->second.first;
+                    auto adjusted = ctx.builder->CreateSub(idxVal,
+                        llvm::ConstantInt::get(i64Ty, lo), "adj_idx");
+                    llvm::Type* elemTy = ptrTy2;
+                    for (auto& f : ci.fields) {
+                        if (f.name == name) {
+                            if (f.refClassName.empty()) elemTy = ctx.getLLVMType(f.type);
+                            break;
+                        }
+                    }
+                    auto elemGep = ctx.builder->CreateGEP(elemTy, arrPtr, adjusted, "marr_elem");
+                    return ctx.builder->CreateLoad(elemTy, elemGep, name + "_val");
+                }
+            }
+            searchCls = cit->second.parentName;
+        }
     }
 
     // Check built-in functions (identifiers are already lowered by the lexer)
@@ -1484,6 +1547,22 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
                     auto mm = ci2.methods.find(member);
                     if (mm != ci2.methods.end()) { funcTy = mm->second->getFunctionType(); break; }
                 }
+                // No implementation compiled yet (concrete override appears later
+                // in the source). Build the type from the VIRTUAL declaration's
+                // declared return type. A no-arg member access takes only `this`.
+                if (!funcTy) {
+                    auto rtIt = cit2->second.virtualReturnTypes.find(member);
+                    if (rtIt != cit2->second.virtualReturnTypes.end()) {
+                        llvm::Type* retTy;
+                        if (rtIt->second == -1)
+                            retTy = llvm::Type::getVoidTy(*ctx.llvmContext);
+                        else if (rtIt->second == -2)
+                            retTy = ptrTy2;
+                        else
+                            retTy = ctx.getLLVMType(rtIt->second);
+                        funcTy = llvm::FunctionType::get(retTy, {ptrTy2}, false);
+                    }
+                }
                 if (funcTy) {
                     if (funcTy->getReturnType()->isVoidTy())
                         return ctx.builder->CreateCall(funcTy, fp, {obj});
@@ -2087,8 +2166,12 @@ llvm::Value* CompoundStmt::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* VarDeclaration::codegen(CodeGenContext& ctx) {
-    // Skip if already declared (two-pass block processing)
-    if (ctx.locals.count(name) || ctx.globals.count(name)) {
+    // Skip if already declared in the current scope (two-pass block processing).
+    // A like-named global only blocks re-declaration at global scope; inside a
+    // procedure or class body it's a genuine local that shadows the global
+    // (Simula block scoping).
+    bool atGlobalScope = ctx.inMainBlock && !ctx.currentThis;
+    if (ctx.locals.count(name) || (atGlobalScope && ctx.globals.count(name))) {
         // But still process initializer if present
         if (init) {
             auto [varPtr, varTy] = ctx.getVarPtr(name);
@@ -2925,6 +3008,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto savedJmpBuf = ctx.currentJmpBuf;
     auto savedNonLocalIds = ctx.nonLocalLabelIds;
     auto savedLabelParamNames = ctx.labelParamNames;
+    auto savedTextVars = ctx.textVars;
     ctx.currentJmpBuf = nullptr;
     ctx.nonLocalLabelIds.clear();
     ctx.labelParamNames.clear();
@@ -2956,6 +3040,21 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         // Track the "outer" this and class name for INSPECT-aware cross-method calls
         ctx.methodThis = ctx.currentThis;
         ctx.methodThisClassName = ctx.currentClassName;
+        // Register the owning class's TEXT fields (including inherited) as TEXT
+        // variables so member TEXT operations (SETPOS/GETCHAR/PUTCHAR/...) inside
+        // the method resolve to the field's cursor rather than class dispatch.
+        {
+            std::string sc = ctx.currentClassName;
+            while (!sc.empty()) {
+                auto cit = ctx.classes.find(sc);
+                if (cit == ctx.classes.end()) break;
+                for (auto& fi : cit->second.fields) {
+                    if (fi.type == VarDeclaration::TEXT && fi.refClassName.empty())
+                        ctx.textVars.insert(fi.name);
+                }
+                sc = cit->second.parentName;
+            }
+        }
     } else if (!ctx.insideMethod) {
         // Only clear class context if not inside a method
         // (nested procedures inside methods should still see class fields)
@@ -3262,6 +3361,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     ctx.currentJmpBuf = savedJmpBuf;
     ctx.nonLocalLabelIds = savedNonLocalIds;
     ctx.labelParamNames = savedLabelParamNames;
+    ctx.textVars = savedTextVars;
 
     return func;
 }
@@ -3510,14 +3610,16 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         // Add VIRTUAL declarations (methods declared but not implemented in this class)
         for (auto& stmt : bodyStmts) {
             if (auto* vd = dynamic_cast<VirtualDecl*>(stmt.get())) {
-                for (auto& mname : vd->methodNames) {
-                    std::string lname = mname;
+                for (size_t mi = 0; mi < vd->methodNames.size(); mi++) {
+                    std::string lname = vd->methodNames[mi];
                     for (auto& c : lname) c = tolower((unsigned char)c);
                     if (ciRef.vtableIndex.find(lname) == ciRef.vtableIndex.end()) {
                         int idx = (int)ciRef.vtableMethodOrder.size() + 1;
                         ciRef.vtableIndex[lname] = idx;
                         ciRef.vtableMethodOrder.push_back(lname);
                     }
+                    if (mi < vd->returnTypes.size())
+                        ciRef.virtualReturnTypes[lname] = vd->returnTypes[mi];
                 }
             }
         }
@@ -3654,6 +3756,29 @@ llvm::Value* InspectStatement::codegen(CodeGenContext& ctx) {
     } else if (auto* call = dynamic_cast<ProcedureCall*>(object.get())) {
         // Array element access like BLOCKS(I) — get the array's ref class
         inspectClass = ctx.resolveRefType(call->name);
+    } else if (auto* ma = dynamic_cast<MemberAccess*>(object.get())) {
+        // Field access like H.IMAP — resolve the base object's class, then the
+        // declared ref class of the named field.
+        std::string baseCls;
+        if (auto* bid = dynamic_cast<Identifier*>(ma->object.get()))
+            baseCls = ctx.resolveRefType(bid->name);
+        else if (dynamic_cast<ThisExpression*>(ma->object.get()))
+            baseCls = ctx.currentClassName;
+        std::string searchCls = baseCls;
+        while (!searchCls.empty()) {
+            auto cit = ctx.classes.find(searchCls);
+            if (cit == ctx.classes.end()) break;
+            bool found = false;
+            for (auto& f : cit->second.fields) {
+                if (f.name == ma->member && f.type == -1) {
+                    inspectClass = f.refClassName;
+                    found = true;
+                    break;
+                }
+            }
+            if (found) break;
+            searchCls = cit->second.parentName;
+        }
     }
 
     auto func = ctx.builder->GetInsertBlock()->getParent();

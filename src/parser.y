@@ -149,6 +149,8 @@ static std::vector<ParamSpec> mergeParams(
     std::vector<std::pair<int, std::vector<std::string>>>* speclist;
     std::vector<InspectStatement::WhenClause>* whenclauses;
     int vartype;
+    std::pair<std::string, int>* ventry;
+    std::vector<std::pair<std::string, int>>* ventries;
 }
 
 /* Keywords */
@@ -192,8 +194,9 @@ static std::vector<ParamSpec> mergeParams(
 %type <stmt> detach_stmt resume_stmt call_stmt
 %type <stmt> outint_stmt outreal_stmt outfix_stmt outtext_stmt outimage_stmt inimage_stmt
 %type <stmt> expr_stmt virtual_spec top_level_decl external_decl
-%type <sval> virtual_entry
-%type <namelist> virtual_entries
+%type <ventry> virtual_entry
+%type <ventries> virtual_entries
+%type <vartype> virtual_is_rhs
 %type <stmtlist> top_level_decls
 %type <stmtlist> stmt_list class_body
 %type <exprlist> arg_list arg_list_ne
@@ -695,37 +698,46 @@ class_body
 
 virtual_spec
     : T_VIRTUAL T_COLON virtual_entries {
-        $$ = new VirtualDecl(std::move(*$3));
+        std::vector<std::string> names;
+        std::vector<int> rets;
+        for (auto& e : *$3) { names.push_back(e.first); rets.push_back(e.second); }
+        $$ = new VirtualDecl(std::move(names), std::move(rets));
         delete $3;
       }
     ;
 
 virtual_entries
-    : virtual_entry { $$ = new std::vector<std::string>(); if ($1) { $$->push_back($1); free($1); } }
+    : virtual_entry {
+        $$ = new std::vector<std::pair<std::string,int>>();
+        if ($1) { $$->push_back(*$1); delete $1; }
+      }
     | virtual_entries virtual_entry {
-        if ($2) { $1->push_back($2); free($2); }
+        if ($2) { $1->push_back(*$2); delete $2; }
         $$ = $1;
       }
     ;
 
+/* Each entry yields (method name, declared return type). Return type uses
+   VarDeclaration::Type values; -1 = untyped/void, -2 = REF. */
 virtual_entry
-    : T_PROCEDURE T_IDENT T_SEMI { $$ = $2; }
-    | type_name T_PROCEDURE T_IDENT T_SEMI { $$ = $3; }
-    | T_REF T_LPAREN T_IDENT T_RPAREN T_PROCEDURE T_IDENT T_SEMI { $$ = $6; }
-    /* IS bindings — consume the full prototype including optional params */
-    | T_PROCEDURE T_IDENT T_IS virtual_is_rhs { $$ = $2; }
-    | type_name T_PROCEDURE T_IDENT T_IS virtual_is_rhs { $$ = $3; }
+    : T_PROCEDURE T_IDENT T_SEMI { $$ = new std::pair<std::string,int>($2, -1); free($2); }
+    | type_name T_PROCEDURE T_IDENT T_SEMI { $$ = new std::pair<std::string,int>($3, $1); free($3); }
+    | T_REF T_LPAREN T_IDENT T_RPAREN T_PROCEDURE T_IDENT T_SEMI { $$ = new std::pair<std::string,int>($6, -2); free($3); free($6); }
+    /* IS bindings — the return type comes from the bound prototype's RHS */
+    | T_PROCEDURE T_IDENT T_IS virtual_is_rhs { $$ = new std::pair<std::string,int>($2, $4); free($2); }
+    | type_name T_PROCEDURE T_IDENT T_IS virtual_is_rhs { $$ = new std::pair<std::string,int>($3, $1); free($3); }
     ;
 
 /* The RHS of a VIRTUAL IS binding: a procedure prototype possibly with params.
-   We consume tokens permissively until we hit ;; or ; */
+   We consume tokens permissively until we hit ;; or ;. The value is the
+   declared return type (VarDeclaration::Type, -1 void, -2 REF). */
 virtual_is_rhs
-    : T_PROCEDURE T_IDENT T_SEMI T_SEMI
-    | T_PROCEDURE T_IDENT T_SEMI
-    | type_name T_PROCEDURE T_IDENT T_SEMI T_SEMI
-    | type_name T_PROCEDURE T_IDENT T_SEMI
-    | T_PROCEDURE T_IDENT T_LPAREN ident_list T_RPAREN T_SEMI param_specs T_SEMI
-    | type_name T_PROCEDURE T_IDENT T_LPAREN ident_list T_RPAREN T_SEMI param_specs T_SEMI
+    : T_PROCEDURE T_IDENT T_SEMI T_SEMI { $$ = -1; }
+    | T_PROCEDURE T_IDENT T_SEMI { $$ = -1; }
+    | type_name T_PROCEDURE T_IDENT T_SEMI T_SEMI { $$ = $1; }
+    | type_name T_PROCEDURE T_IDENT T_SEMI { $$ = $1; }
+    | T_PROCEDURE T_IDENT T_LPAREN ident_list T_RPAREN T_SEMI param_specs T_SEMI { $$ = -1; }
+    | type_name T_PROCEDURE T_IDENT T_LPAREN ident_list T_RPAREN T_SEMI param_specs T_SEMI { $$ = $1; }
     ;
 
 /* ---- INSPECT/WHEN ---- */

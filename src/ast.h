@@ -459,8 +459,13 @@ public:
 class VirtualDecl : public Statement {
 public:
     std::vector<std::string> methodNames;
+    // Declared return type per method, parallel to methodNames.
+    // Uses VarDeclaration::Type values; -1 = untyped/void, -2 = REF.
+    std::vector<int> returnTypes;
     explicit VirtualDecl(std::vector<std::string> names)
-        : methodNames(std::move(names)) {}
+        : methodNames(std::move(names)), returnTypes(methodNames.size(), -1) {}
+    VirtualDecl(std::vector<std::string> names, std::vector<int> rets)
+        : methodNames(std::move(names)), returnTypes(std::move(rets)) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
