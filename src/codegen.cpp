@@ -2087,6 +2087,14 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
     auto savedRefTypes = ctx.refTypes;
     auto savedTextVars = ctx.textVars;
 
+    // Pre-pass: declare all class skeletons in this block so sibling classes can
+    // reference each other regardless of declaration order (Simula sibling classes
+    // are mutually visible). Bodies are generated later in the execution pass.
+    for (auto& stmt : statements) {
+        if (auto* cd = dynamic_cast<ClassDecl*>(stmt.get()))
+            cd->declareSkeleton(ctx);
+    }
+
     // First pass: process all declarations (vars, arrays, refs, labels)
     // so that procedures declared later in the block can reference them
     for (auto& stmt : statements) {
@@ -3368,7 +3376,13 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
 
 // ---- Class declaration ----
 
-llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
+void ClassDecl::declareSkeleton(CodeGenContext& ctx) {
+    // Idempotent: a prior block-level pre-pass may already have built this.
+    {
+        auto it = ctx.classes.find(name);
+        if (it != ctx.classes.end() && it->second.bodyFunc) return;
+    }
+
     ClassInfo ci;
     ci.name = name;
     ci.parentName = parentName;
@@ -3482,23 +3496,8 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         ci.structType = llvm::StructType::create(*ctx.llvmContext, fieldTypes, name);
     }
 
-    // Register class before processing body
+    // Register class before declaring functions/vtable
     ctx.classes[name] = ci;
-
-    // Save state
-    auto savedBlock = ctx.builder->GetInsertBlock();
-    auto savedThis = ctx.currentThis;
-    auto savedClassName = ctx.currentClassName;
-    auto savedLocals = ctx.saveScope();
-    auto savedRefTypes = ctx.refTypes;
-    auto savedProcName = ctx.currentProcName;
-    auto savedRetAlloca = ctx.returnValueAlloca;
-    auto savedArrays = ctx.arrays;
-    auto savedLabelBlocks = ctx.labelBlocks;
-
-    ctx.currentClassName = name;
-    ctx.currentProcName = "";
-    ctx.returnValueAlloca = nullptr;
 
     // Pre-create the class body function declaration AND vtable placeholder
     // (so NEW ClassName inside methods can reference them)
@@ -3514,7 +3513,6 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
         auto ptrTy = ctx.getRefType();
         std::vector<llvm::Type*> vtFields = {i64Ty};
-        // Reserve room — will be expanded later
         for (int i = 0; i < 16; i++) vtFields.push_back(ptrTy);
         auto tmpVtTy = llvm::StructType::create(*ctx.llvmContext, vtFields, name + "_vtable_t");
         ctx.classes[name].vtableType = tmpVtTy;
@@ -3525,7 +3523,6 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
     }
 
     // Pre-pass: create LLVM function declarations for all methods
-    // (so methods can reference each other regardless of declaration order)
     for (auto& stmt : bodyStmts) {
         if (auto* pd = dynamic_cast<ProcedureDecl*>(stmt.get())) {
             llvm::Type* retTy = pd->hasReturnType ?
@@ -3547,7 +3544,97 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         }
     }
 
-    // Pre-pass: compile nested class declarations (so they're available)
+    // Build vtable metadata (indices) so method dispatch works during codegen.
+    {
+        auto& ciRef = ctx.classes[name];
+        auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+        auto ptrTy = ctx.getRefType();
+
+        if (!parentName.empty()) {
+            auto pit = ctx.classes.find(parentName);
+            if (pit != ctx.classes.end()) {
+                ciRef.vtableMethodOrder = pit->second.vtableMethodOrder;
+                ciRef.vtableIndex = pit->second.vtableIndex;
+            }
+        }
+
+        for (auto& [mname, mfunc] : ciRef.methods) {
+            if (ciRef.vtableIndex.find(mname) == ciRef.vtableIndex.end()) {
+                int idx = (int)ciRef.vtableMethodOrder.size() + 1;
+                ciRef.vtableIndex[mname] = idx;
+                ciRef.vtableMethodOrder.push_back(mname);
+            }
+        }
+
+        for (auto& stmt : bodyStmts) {
+            if (auto* vd = dynamic_cast<VirtualDecl*>(stmt.get())) {
+                for (size_t mi = 0; mi < vd->methodNames.size(); mi++) {
+                    std::string lname = vd->methodNames[mi];
+                    for (auto& c : lname) c = tolower((unsigned char)c);
+                    if (ciRef.vtableIndex.find(lname) == ciRef.vtableIndex.end()) {
+                        int idx = (int)ciRef.vtableMethodOrder.size() + 1;
+                        ciRef.vtableIndex[lname] = idx;
+                        ciRef.vtableMethodOrder.push_back(lname);
+                    }
+                    if (mi < vd->returnTypes.size())
+                        ciRef.virtualReturnTypes[lname] = vd->returnTypes[mi];
+                }
+            }
+        }
+
+        if (!parentName.empty()) {
+            auto pit = ctx.classes.find(parentName);
+            if (pit != ctx.classes.end()) {
+                for (auto& [mname, idx] : ciRef.vtableIndex) {
+                    if (pit->second.vtableIndex.find(mname) == pit->second.vtableIndex.end()) {
+                        int newIdx = (int)pit->second.vtableMethodOrder.size() + 1;
+                        pit->second.vtableIndex[mname] = newIdx;
+                        pit->second.vtableMethodOrder.push_back(mname);
+                    }
+                }
+                std::vector<llvm::Type*> pvtFields = {i64Ty};
+                for (size_t i = 0; i < pit->second.vtableMethodOrder.size(); i++)
+                    pvtFields.push_back(ptrTy);
+                pit->second.vtableType->setBody(pvtFields);
+
+                ciRef.vtableMethodOrder = pit->second.vtableMethodOrder;
+                ciRef.vtableIndex = pit->second.vtableIndex;
+                for (auto& [mname, mfunc] : ciRef.methods) {
+                    if (ciRef.vtableIndex.find(mname) == ciRef.vtableIndex.end()) {
+                        int newIdx = (int)ciRef.vtableMethodOrder.size() + 1;
+                        ciRef.vtableIndex[mname] = newIdx;
+                        ciRef.vtableMethodOrder.push_back(mname);
+                    }
+                }
+            }
+        }
+    }
+}
+
+llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
+    // Ensure the skeleton (struct type, body func, method decls, vtable meta)
+    // exists. A block-level pre-pass usually did this already so that sibling
+    // classes can reference each other regardless of order.
+    declareSkeleton(ctx);
+
+    // Save state
+    auto savedBlock = ctx.builder->GetInsertBlock();
+    auto savedThis = ctx.currentThis;
+    auto savedClassName = ctx.currentClassName;
+    auto savedLocals = ctx.saveScope();
+    auto savedRefTypes = ctx.refTypes;
+    auto savedProcName = ctx.currentProcName;
+    auto savedRetAlloca = ctx.returnValueAlloca;
+    auto savedArrays = ctx.arrays;
+    auto savedLabelBlocks = ctx.labelBlocks;
+
+    ctx.currentClassName = name;
+    ctx.currentProcName = "";
+    ctx.returnValueAlloca = nullptr;
+
+    // Pre-pass: compile nested class declarations (so they're available).
+    // Declare every nested skeleton first so nested siblings can reference each
+    // other regardless of order, then generate their bodies.
     {
         auto savedThis = ctx.currentThis;
         auto savedClassName = ctx.currentClassName;
@@ -3556,9 +3643,12 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         ctx.currentClassName = "";
         ctx.insideMethod = false;
         for (auto& stmt : bodyStmts) {
-            if (dynamic_cast<ClassDecl*>(stmt.get())) {
+            if (auto* cd = dynamic_cast<ClassDecl*>(stmt.get()))
+                cd->declareSkeleton(ctx);
+        }
+        for (auto& stmt : bodyStmts) {
+            if (dynamic_cast<ClassDecl*>(stmt.get()))
                 stmt->codegen(ctx);
-            }
         }
         ctx.currentThis = savedThis;
         ctx.currentClassName = savedClassName;
@@ -3582,82 +3672,8 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
         }
     }
 
-    // Build vtable metadata (indices) now so method dispatch works during codegen.
-    // The actual vtable global with function pointers is built later by buildAllVtables().
-    {
-        auto& ciRef = ctx.classes[name];
-        auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
-        auto ptrTy = ctx.getRefType();
-
-        // Inherit parent vtable order
-        if (!parentName.empty()) {
-            auto pit = ctx.classes.find(parentName);
-            if (pit != ctx.classes.end()) {
-                ciRef.vtableMethodOrder = pit->second.vtableMethodOrder;
-                ciRef.vtableIndex = pit->second.vtableIndex;
-            }
-        }
-
-        // Add own methods
-        for (auto& [mname, mfunc] : ciRef.methods) {
-            if (ciRef.vtableIndex.find(mname) == ciRef.vtableIndex.end()) {
-                int idx = (int)ciRef.vtableMethodOrder.size() + 1;
-                ciRef.vtableIndex[mname] = idx;
-                ciRef.vtableMethodOrder.push_back(mname);
-            }
-        }
-
-        // Add VIRTUAL declarations (methods declared but not implemented in this class)
-        for (auto& stmt : bodyStmts) {
-            if (auto* vd = dynamic_cast<VirtualDecl*>(stmt.get())) {
-                for (size_t mi = 0; mi < vd->methodNames.size(); mi++) {
-                    std::string lname = vd->methodNames[mi];
-                    for (auto& c : lname) c = tolower((unsigned char)c);
-                    if (ciRef.vtableIndex.find(lname) == ciRef.vtableIndex.end()) {
-                        int idx = (int)ciRef.vtableMethodOrder.size() + 1;
-                        ciRef.vtableIndex[lname] = idx;
-                        ciRef.vtableMethodOrder.push_back(lname);
-                    }
-                    if (mi < vd->returnTypes.size())
-                        ciRef.virtualReturnTypes[lname] = vd->returnTypes[mi];
-                }
-            }
-        }
-
-        // Propagate new methods UP to parent vtable metadata
-        if (!parentName.empty()) {
-            auto pit = ctx.classes.find(parentName);
-            if (pit != ctx.classes.end()) {
-                for (auto& [mname, idx] : ciRef.vtableIndex) {
-                    if (pit->second.vtableIndex.find(mname) == pit->second.vtableIndex.end()) {
-                        int newIdx = (int)pit->second.vtableMethodOrder.size() + 1;
-                        pit->second.vtableIndex[mname] = newIdx;
-                        pit->second.vtableMethodOrder.push_back(mname);
-                    }
-                }
-                // Rebuild parent vtable type to match new size
-                std::vector<llvm::Type*> pvtFields = {i64Ty};
-                for (size_t i = 0; i < pit->second.vtableMethodOrder.size(); i++)
-                    pvtFields.push_back(ptrTy);
-                pit->second.vtableType->setBody(pvtFields);
-
-                // Re-sync own indices with parent
-                ciRef.vtableMethodOrder = pit->second.vtableMethodOrder;
-                ciRef.vtableIndex = pit->second.vtableIndex;
-                // Add back own-only methods
-                for (auto& [mname, mfunc] : ciRef.methods) {
-                    if (ciRef.vtableIndex.find(mname) == ciRef.vtableIndex.end()) {
-                        int newIdx = (int)ciRef.vtableMethodOrder.size() + 1;
-                        ciRef.vtableIndex[mname] = newIdx;
-                        ciRef.vtableMethodOrder.push_back(mname);
-                    }
-                }
-            }
-        }
-
-        // vtable type and global already created above
-        // (buildAllVtables will set the proper body and initializer)
-    }
+    // vtable metadata was built in declareSkeleton(); buildAllVtables() fills in
+    // the function pointers later.
 
     // Use the pre-declared class body function: void @ClassName_body(ptr %this)
     auto bodyFunc = ctx.classes[name].bodyFunc;

@@ -437,6 +437,11 @@ public:
         : name(std::move(n)), parentName(std::move(parent)),
           params(std::move(p)), bodyStmts(std::move(body)) {}
     llvm::Value* codegen(CodeGenContext& context) override;
+    // Build the class's struct type, body-function and method declarations, and
+    // vtable metadata without emitting any bodies. Idempotent. A block runs this
+    // for all its classes up-front so they can reference each other regardless of
+    // declaration order (Simula sibling classes are mutually visible).
+    void declareSkeleton(CodeGenContext& context);
 };
 
 // INSPECT ref WHEN Class DO stmt ...
