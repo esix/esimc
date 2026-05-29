@@ -283,6 +283,130 @@ static void maybeInjectInfile(Program* prog, const std::string& source) {
     blk->statements.insert(blk->statements.begin(), buildInfileClass());
 }
 
+// SIMSET prelude source: defines LINK and HEAD doubly-linked-list classes.
+// Injected verbatim when source starts with "SIMSET" or uses LINK/HEAD.
+static const char* SIMSET_PRELUDE = R"SIMSET(
+CLASS LINK;
+BEGIN
+    REF(LINK) suc_; REF(LINK) pred_; REF(HEAD) prev_;
+
+    REF(LINK) PROCEDURE SUC;   SUC   :- suc_;
+    REF(LINK) PROCEDURE PRED;  PRED  :- pred_;
+
+    PROCEDURE OUT;
+    BEGIN
+        IF prev_ == NONE THEN GOTO link_out_done;
+        IF pred_ =/= NONE THEN pred_.suc_  :- suc_
+                          ELSE prev_.fst_  :- suc_;
+        IF suc_  =/= NONE THEN suc_.pred_  :- pred_
+                          ELSE prev_.lst_  :- pred_;
+        prev_.n_ := prev_.n_ - 1;
+        prev_ :- NONE; suc_ :- NONE; pred_ :- NONE;
+        link_out_done:
+    END OUT;
+
+    PROCEDURE INTO(S); REF(HEAD) S;
+    BEGIN
+        OUT;
+        prev_ :- S;
+        suc_  :- S.fst_;
+        pred_ :- NONE;
+        IF S.fst_ =/= NONE THEN S.fst_.pred_ :- THIS LINK
+                           ELSE S.lst_        :- THIS LINK;
+        S.fst_ :- THIS LINK;
+        S.n_ := S.n_ + 1;
+    END INTO;
+
+    PROCEDURE PRECEDE(X); REF(LINK) X;
+    BEGIN
+        IF X == NONE OR ELSE X.prev_ == NONE THEN GOTO prec_done;
+        OUT;
+        prev_  :- X.prev_;
+        suc_   :- X;
+        pred_  :- X.pred_;
+        IF X.pred_ =/= NONE THEN X.pred_.suc_ :- THIS LINK
+                            ELSE X.prev_.fst_  :- THIS LINK;
+        X.pred_ :- THIS LINK;
+        X.prev_.n_ := X.prev_.n_ + 1;
+        prec_done:
+    END PRECEDE;
+
+    PROCEDURE FOLLOW(X); REF(LINK) X;
+    BEGIN
+        IF X == NONE OR ELSE X.prev_ == NONE THEN GOTO foll_done;
+        OUT;
+        prev_  :- X.prev_;
+        pred_  :- X;
+        suc_   :- X.suc_;
+        IF X.suc_ =/= NONE THEN X.suc_.pred_ :- THIS LINK
+                           ELSE X.prev_.lst_  :- THIS LINK;
+        X.suc_ :- THIS LINK;
+        X.prev_.n_ := X.prev_.n_ + 1;
+        foll_done:
+    END FOLLOW;
+END LINK;
+
+LINK CLASS HEAD;
+BEGIN
+    REF(LINK) PROCEDURE FIRST;   FIRST   :- fst_;
+    REF(LINK) PROCEDURE LAST;    LAST    :- lst_;
+    INTEGER   PROCEDURE CARDINAL; CARDINAL := n_;
+    BOOLEAN   PROCEDURE EMPTY;   EMPTY   := fst_ == NONE;
+
+    PROCEDURE CLEAR;
+    BEGIN
+        REF(LINK) L, NXT;
+        L :- fst_;
+        WHILE L =/= NONE DO
+        BEGIN
+            NXT :- L.suc_;
+            L.prev_ :- NONE; L.suc_ :- NONE; L.pred_ :- NONE;
+            L :- NXT;
+        END;
+        fst_ :- NONE; lst_ :- NONE; n_ := 0;
+    END CLEAR;
+
+    REF(LINK) fst_; REF(LINK) lst_; INTEGER n_;
+END HEAD;
+)SIMSET";
+
+// Detect whether the source uses SIMSET prefix and prepend the SIMSET prelude.
+static std::string maybeInjectSimset(const std::string& source) {
+    auto lc = toLower(source);
+    // Check for "SIMSET" as a prefix keyword at the start of a program
+    // or as a prefix to BEGIN (e.g. "SIMSET\nBEGIN").
+    // Also inject if the source uses LINK or HEAD class names.
+    bool needsSimset = false;
+    size_t pos = lc.find("simset");
+    if (pos != std::string::npos) {
+        // Make sure it's a standalone word (not a substring)
+        bool prevOk = (pos == 0) || !std::isalnum((unsigned char)lc[pos-1]);
+        bool nextOk = (pos+6 >= lc.size()) || !std::isalnum((unsigned char)lc[pos+6]);
+        needsSimset = prevOk && nextOk;
+    }
+    if (!needsSimset) return source;
+    if (lc.find("class link") != std::string::npos) return source; // already defined
+    if (lc.find("class head") != std::string::npos) return source;
+
+    // Strip "SIMSET" keyword from the source (replace with whitespace)
+    std::string result = source;
+    size_t p = 0;
+    while (true) {
+        auto found = result.find("SIMSET", p);
+        if (found == std::string::npos) { found = result.find("simset", p); }
+        if (found == std::string::npos) break;
+        // Check word boundary
+        bool pb = (found == 0) || !std::isalnum((unsigned char)result[found-1]);
+        bool nb = (found+6 >= result.size()) || !std::isalnum((unsigned char)result[found+6]);
+        if (pb && nb) {
+            result.replace(found, 6, "      ");  // replace with spaces
+        }
+        p = found + 6;
+    }
+    // Prepend the prelude
+    return std::string(SIMSET_PRELUDE) + "\n" + result;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "Usage: esimc <source.sim> [-o output.ll]\n";
@@ -302,7 +426,7 @@ int main(int argc, char** argv) {
     // This emulates Simula's separate-compilation model with a simple include.
     auto srcContent = readFile(inputFile);
     auto srcDir = fs::path(inputFile).parent_path();
-    auto preprocessed = preprocessExternals(srcContent, srcDir);
+    auto preprocessed = maybeInjectSimset(preprocessExternals(srcContent, srcDir));
 
     if (preprocessed != srcContent) {
         // Write to a temp file and parse from there

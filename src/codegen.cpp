@@ -2,11 +2,14 @@
 #include "ast.h"
 
 #include <llvm/IR/Verifier.h>
+#include <llvm/IR/IntrinsicInst.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <iostream>
 #include <algorithm>
 #include <functional>
+#include <cfloat>
+#include <cmath>
 
 // ============================================================
 // CodeGenContext implementation
@@ -984,8 +987,194 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         if (args.empty()) return nullptr;
         auto val = args[0]->codegen(ctx);
         if (!val) return nullptr;
-        return ctx.builder->CreateFPToSI(val, i64Ty, "entier");
+        if (val->getType()->isIntegerTy()) return val; // integer already is entier
+        // Floor toward -inf: use floor intrinsic then convert
+        auto floorF = llvm::Intrinsic::getOrInsertDeclaration(ctx.module.get(),
+            llvm::Intrinsic::floor, {doubleTy});
+        auto floored = ctx.builder->CreateCall(floorF, {val}, "floored");
+        return ctx.builder->CreateFPToSI(floored, i64Ty, "entier");
     }
+
+    if (name == "round") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        if (val->getType()->isIntegerTy()) return val;
+        // ROUND = ENTIER(x + 0.5)
+        auto half = llvm::ConstantFP::get(doubleTy, 0.5);
+        auto shifted = ctx.builder->CreateFAdd(val, half, "round_shift");
+        auto floorF = llvm::Intrinsic::getOrInsertDeclaration(ctx.module.get(),
+            llvm::Intrinsic::floor, {doubleTy});
+        auto floored = ctx.builder->CreateCall(floorF, {shifted}, "floored");
+        return ctx.builder->CreateFPToSI(floored, i64Ty, "round");
+    }
+
+    if (name == "truncate" || name == "trunc") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        if (val->getType()->isIntegerTy()) return val;
+        return ctx.builder->CreateFPToSI(val, i64Ty, "truncate");
+    }
+
+    // Simula 67 math functions — map to C libm intrinsics
+    auto mathFunc1 = [&](const char* intrin, llvm::Intrinsic::ID id) -> llvm::Value* {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        if (val->getType()->isIntegerTy())
+            val = ctx.builder->CreateSIToFP(val, doubleTy, "tofp");
+        auto fn = llvm::Intrinsic::getOrInsertDeclaration(ctx.module.get(), id, {doubleTy});
+        return ctx.builder->CreateCall(fn, {val}, intrin);
+    };
+
+    if (name == "sqrt")   return mathFunc1("sqrt",   llvm::Intrinsic::sqrt);
+    if (name == "sin")    return mathFunc1("sin",    llvm::Intrinsic::sin);
+    if (name == "cos")    return mathFunc1("cos",    llvm::Intrinsic::cos);
+    if (name == "exp")    return mathFunc1("exp",    llvm::Intrinsic::exp);
+    if (name == "log")    return mathFunc1("log2",   llvm::Intrinsic::log2); // Simula LOG = log2
+    if (name == "ln")     return mathFunc1("ln",     llvm::Intrinsic::log);
+    if (name == "log10")  return mathFunc1("log10",  llvm::Intrinsic::log10);
+
+    if (name == "tan") {
+        // tan not in LLVM intrinsics; use libm
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        if (val->getType()->isIntegerTy())
+            val = ctx.builder->CreateSIToFP(val, doubleTy, "tofp");
+        auto tanFn = ctx.module->getOrInsertFunction("tan",
+            llvm::FunctionType::get(doubleTy, {doubleTy}, false));
+        return ctx.builder->CreateCall(tanFn, {val}, "tan");
+    }
+    if (name == "arctan") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        if (val->getType()->isIntegerTy())
+            val = ctx.builder->CreateSIToFP(val, doubleTy, "tofp");
+        auto atanFn = ctx.module->getOrInsertFunction("atan",
+            llvm::FunctionType::get(doubleTy, {doubleTy}, false));
+        return ctx.builder->CreateCall(atanFn, {val}, "arctan");
+    }
+    if (name == "arcsin") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        if (val->getType()->isIntegerTy())
+            val = ctx.builder->CreateSIToFP(val, doubleTy, "tofp");
+        auto asinFn = ctx.module->getOrInsertFunction("asin",
+            llvm::FunctionType::get(doubleTy, {doubleTy}, false));
+        return ctx.builder->CreateCall(asinFn, {val}, "arcsin");
+    }
+    if (name == "arccos") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        if (val->getType()->isIntegerTy())
+            val = ctx.builder->CreateSIToFP(val, doubleTy, "tofp");
+        auto acosFn = ctx.module->getOrInsertFunction("acos",
+            llvm::FunctionType::get(doubleTy, {doubleTy}, false));
+        return ctx.builder->CreateCall(acosFn, {val}, "arccos");
+    }
+
+    if (name == "max" || name == "maxval") {
+        if (args.size() < 2) return nullptr;
+        auto a = args[0]->codegen(ctx); auto b = args[1]->codegen(ctx);
+        if (!a || !b) return nullptr;
+        bool fp = a->getType()->isDoubleTy() || b->getType()->isDoubleTy();
+        if (fp) {
+            if (a->getType()->isIntegerTy()) a = ctx.builder->CreateSIToFP(a, doubleTy);
+            if (b->getType()->isIntegerTy()) b = ctx.builder->CreateSIToFP(b, doubleTy);
+            auto cmp = ctx.builder->CreateFCmpOGT(a, b, "cmp");
+            return ctx.builder->CreateSelect(cmp, a, b, "max");
+        }
+        auto cmp = ctx.builder->CreateICmpSGT(a, b, "cmp");
+        return ctx.builder->CreateSelect(cmp, a, b, "max");
+    }
+    if (name == "min" || name == "minval") {
+        if (args.size() < 2) return nullptr;
+        auto a = args[0]->codegen(ctx); auto b = args[1]->codegen(ctx);
+        if (!a || !b) return nullptr;
+        bool fp = a->getType()->isDoubleTy() || b->getType()->isDoubleTy();
+        if (fp) {
+            if (a->getType()->isIntegerTy()) a = ctx.builder->CreateSIToFP(a, doubleTy);
+            if (b->getType()->isIntegerTy()) b = ctx.builder->CreateSIToFP(b, doubleTy);
+            auto cmp = ctx.builder->CreateFCmpOLT(a, b, "cmp");
+            return ctx.builder->CreateSelect(cmp, a, b, "min");
+        }
+        auto cmp = ctx.builder->CreateICmpSLT(a, b, "cmp");
+        return ctx.builder->CreateSelect(cmp, a, b, "min");
+    }
+
+    // Character classification (Simula 67 standard)
+    if (name == "digit") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        // val is a CHARACTER (i8); DIGIT returns BOOLEAN
+        auto ch = ctx.builder->CreateZExt(val, i64Ty, "ch");
+        auto c0 = llvm::ConstantInt::get(i64Ty, '0');
+        auto c9 = llvm::ConstantInt::get(i64Ty, '9');
+        auto ge0 = ctx.builder->CreateICmpSGE(ch, c0);
+        auto le9 = ctx.builder->CreateICmpSLE(ch, c9);
+        return ctx.builder->CreateAnd(ge0, le9, "digit");
+    }
+    if (name == "letter") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        auto ch = ctx.builder->CreateZExt(val, i64Ty, "ch");
+        auto lo = llvm::ConstantInt::get(i64Ty, 'a'), hi = llvm::ConstantInt::get(i64Ty, 'z');
+        auto lo2 = llvm::ConstantInt::get(i64Ty, 'A'), hi2 = llvm::ConstantInt::get(i64Ty, 'Z');
+        auto lower = ctx.builder->CreateAnd(ctx.builder->CreateICmpSGE(ch,lo),ctx.builder->CreateICmpSLE(ch,hi));
+        auto upper = ctx.builder->CreateAnd(ctx.builder->CreateICmpSGE(ch,lo2),ctx.builder->CreateICmpSLE(ch,hi2));
+        return ctx.builder->CreateOr(lower, upper, "letter");
+    }
+    if (name == "lowcase") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        // lowercase: if 'A'-'Z', add 32
+        auto ch = ctx.builder->CreateZExt(val, i64Ty, "ch");
+        auto loA = llvm::ConstantInt::get(i64Ty, 'A'), hiZ = llvm::ConstantInt::get(i64Ty, 'Z');
+        auto isUpper = ctx.builder->CreateAnd(ctx.builder->CreateICmpSGE(ch,loA),ctx.builder->CreateICmpSLE(ch,hiZ));
+        auto diff = llvm::ConstantInt::get(i64Ty, 32);
+        auto lower = ctx.builder->CreateAdd(ch, diff);
+        auto result = ctx.builder->CreateSelect(isUpper, lower, ch, "lowcase");
+        return ctx.builder->CreateTrunc(result, i8Ty, "lowch");
+    }
+    if (name == "upcase") {
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        auto ch = ctx.builder->CreateZExt(val, i64Ty, "ch");
+        auto loa = llvm::ConstantInt::get(i64Ty, 'a'), hiz = llvm::ConstantInt::get(i64Ty, 'z');
+        auto isLower = ctx.builder->CreateAnd(ctx.builder->CreateICmpSGE(ch,loa),ctx.builder->CreateICmpSLE(ch,hiz));
+        auto diff = llvm::ConstantInt::get(i64Ty, 32);
+        auto upper = ctx.builder->CreateSub(ch, diff);
+        auto result = ctx.builder->CreateSelect(isLower, upper, ch, "upcase");
+        return ctx.builder->CreateTrunc(result, i8Ty, "upch");
+    }
+    if (name == "isodigit") { // like digit but includes _
+        if (args.empty()) return nullptr;
+        auto val = args[0]->codegen(ctx);
+        if (!val) return nullptr;
+        auto ch = ctx.builder->CreateZExt(val, i64Ty, "ch");
+        auto c0 = llvm::ConstantInt::get(i64Ty, '0');
+        auto c9 = llvm::ConstantInt::get(i64Ty, '9');
+        auto ge0 = ctx.builder->CreateICmpSGE(ch, c0);
+        auto le9 = ctx.builder->CreateICmpSLE(ch, c9);
+        return ctx.builder->CreateAnd(ge0, le9, "isodigit");
+    }
+    if (name == "isoletter") { return nullptr; } // alias for letter
+
+    // MAXINT / MININT / MAXREAL — manifest constants
+    if (name == "maxint")  return llvm::ConstantInt::get(i64Ty, INT64_MAX);
+    if (name == "minint")  return llvm::ConstantInt::get(i64Ty, INT64_MIN);
+    if (name == "maxreal") return llvm::ConstantFP::get(doubleTy, DBL_MAX);
+    if (name == "minreal") return llvm::ConstantFP::get(doubleTy, DBL_MIN);
+    if (name == "pi")      return llvm::ConstantFP::get(doubleTy, M_PI);
 
     if (name == "sign") {
         if (args.empty()) return nullptr;
@@ -1681,6 +1870,18 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
         clsName = qua->className;
     } else if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
         clsName = ctx.resolveRefType(ident->name);
+        // Also look in current class fields
+        if (clsName.empty() && ctx.currentThis && !ctx.currentClassName.empty()) {
+            std::string sc = ctx.currentClassName;
+            while (!sc.empty() && clsName.empty()) {
+                auto cit = ctx.classes.find(sc);
+                if (cit == ctx.classes.end()) break;
+                for (auto& fi : cit->second.fields)
+                    if (fi.name == ident->name && !fi.refClassName.empty())
+                        { clsName = fi.refClassName; break; }
+                sc = cit->second.parentName;
+            }
+        }
     }
     if (clsName.empty() && dynamic_cast<ThisExpression*>(object.get())) {
         clsName = ctx.currentClassName;
@@ -1692,6 +1893,40 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
     if (clsName.empty()) {
         if (auto* ne = dynamic_cast<NewExpression*>(object.get()))
             clsName = ne->className;
+    }
+    // Chained member access: resolve refClassName of intermediate member
+    if (clsName.empty()) {
+        if (auto* ma = dynamic_cast<MemberAccess*>(object.get())) {
+            std::string outerCls;
+            if (auto* id = dynamic_cast<Identifier*>(ma->object.get()))
+                outerCls = ctx.resolveRefType(id->name);
+            if (outerCls.empty() && ctx.currentThis) {
+                if (auto* id = dynamic_cast<Identifier*>(ma->object.get())) {
+                    std::string sc = ctx.currentClassName;
+                    while (!sc.empty() && outerCls.empty()) {
+                        auto cit = ctx.classes.find(sc);
+                        if (cit == ctx.classes.end()) break;
+                        for (auto& fi : cit->second.fields)
+                            if (fi.name == id->name && !fi.refClassName.empty())
+                                { outerCls = fi.refClassName; break; }
+                        sc = cit->second.parentName;
+                    }
+                }
+            }
+            if (auto* th = dynamic_cast<ThisExpression*>(ma->object.get()))
+                outerCls = ctx.currentClassName;
+            if (!outerCls.empty()) {
+                std::string sc = outerCls;
+                while (!sc.empty() && clsName.empty()) {
+                    auto cit = ctx.classes.find(sc);
+                    if (cit == ctx.classes.end()) break;
+                    for (auto& fi : cit->second.fields)
+                        if (fi.name == ma->member && !fi.refClassName.empty())
+                            { clsName = fi.refClassName; break; }
+                    sc = cit->second.parentName;
+                }
+            }
+        }
     }
 
     if (clsName.empty()) {
@@ -2751,6 +2986,18 @@ llvm::Value* MemberAssignment::codegen(CodeGenContext& ctx) {
         clsName = qua->className;
     } else if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
         clsName = ctx.resolveRefType(ident->name);
+        // Also check if ident is a REF field of the current class
+        if (clsName.empty() && ctx.currentThis && !ctx.currentClassName.empty()) {
+            std::string sc = ctx.currentClassName;
+            while (!sc.empty() && clsName.empty()) {
+                auto cit = ctx.classes.find(sc);
+                if (cit == ctx.classes.end()) break;
+                for (auto& fi : cit->second.fields)
+                    if (fi.name == ident->name && !fi.refClassName.empty())
+                        { clsName = fi.refClassName; break; }
+                sc = cit->second.parentName;
+            }
+        }
     }
     if (clsName.empty() && dynamic_cast<ThisExpression*>(object.get())) {
         clsName = ctx.currentClassName;
@@ -2758,6 +3005,42 @@ llvm::Value* MemberAssignment::codegen(CodeGenContext& ctx) {
     if (clsName.empty()) {
         if (auto* call = dynamic_cast<ProcedureCall*>(object.get())) {
             clsName = ctx.resolveRefType(call->name);
+        }
+    }
+    // For chained access like S.fst_.pred_: resolve the refClassName of the
+    // intermediate member (S.fst_) by looking up fst_ in S's class.
+    if (clsName.empty()) {
+        if (auto* ma = dynamic_cast<MemberAccess*>(object.get())) {
+            // Determine the class of ma->object
+            std::string outerCls;
+            if (auto* id = dynamic_cast<Identifier*>(ma->object.get()))
+                outerCls = ctx.resolveRefType(id->name);
+            if (outerCls.empty()) {
+                if (auto* id = dynamic_cast<Identifier*>(ma->object.get())) {
+                    // Check class fields
+                    std::string sc = ctx.currentClassName;
+                    while (!sc.empty() && outerCls.empty()) {
+                        auto cit = ctx.classes.find(sc);
+                        if (cit == ctx.classes.end()) break;
+                        for (auto& fi : cit->second.fields)
+                            if (fi.name == id->name && !fi.refClassName.empty())
+                                { outerCls = fi.refClassName; break; }
+                        sc = cit->second.parentName;
+                    }
+                }
+            }
+            if (!outerCls.empty()) {
+                // Find refClassName of ma->member in outerCls
+                std::string sc = outerCls;
+                while (!sc.empty() && clsName.empty()) {
+                    auto cit = ctx.classes.find(sc);
+                    if (cit == ctx.classes.end()) break;
+                    for (auto& fi : cit->second.fields)
+                        if (fi.name == ma->member && !fi.refClassName.empty())
+                            { clsName = fi.refClassName; break; }
+                    sc = cit->second.parentName;
+                }
+            }
         }
     }
     if (clsName.empty()) {
@@ -2936,6 +3219,54 @@ llvm::Value* LabeledStatement::codegen(CodeGenContext& ctx) {
     return nullptr;
 }
 
+llvm::Value* SwitchDeclaration::codegen(CodeGenContext& ctx) {
+    // Store label list; basic blocks will be resolved at GO TO S(I) time.
+    ctx.switches[name] = labels;
+    // Pre-create label blocks so forward references work.
+    for (auto& lbl : labels)
+        ctx.getOrCreateLabel(lbl);
+    return nullptr;
+}
+
+llvm::Value* ComputedGoto::codegen(CodeGenContext& ctx) {
+    // GO TO S(expr) — indirect branch to one of the labels in switch S.
+    auto it = ctx.switches.find(switchName);
+    if (it == ctx.switches.end()) {
+        std::cerr << "Error: unknown switch '" << switchName << "'\n";
+        return nullptr;
+    }
+    auto& labels = it->second;
+    auto func = ctx.builder->GetInsertBlock()->getParent();
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+
+    auto idxVal = index->codegen(ctx);
+    if (!idxVal) return nullptr;
+    // Switch index is 1-based; truncate to i32 for LLVM switch
+    if (!idxVal->getType()->isIntegerTy(64))
+        idxVal = ctx.builder->CreateSExtOrTrunc(idxVal, i64Ty);
+    auto one = llvm::ConstantInt::get(i64Ty, 1);
+    auto idx0 = ctx.builder->CreateSub(idxVal, one, "sw_idx0");
+    auto idx32 = ctx.builder->CreateTrunc(idx0, llvm::Type::getInt32Ty(*ctx.llvmContext), "sw_i32");
+
+    // Create a default block (unreachable — out-of-range)
+    auto defaultBB = llvm::BasicBlock::Create(*ctx.llvmContext, "sw_default", func);
+    llvm::IRBuilder<> tmpB(defaultBB);
+    tmpB.CreateUnreachable();
+
+    // LLVM switch instruction (i32 index, i32 case values)
+    auto i32Ty = llvm::Type::getInt32Ty(*ctx.llvmContext);
+    auto sw = ctx.builder->CreateSwitch(idx32, defaultBB, (unsigned)labels.size());
+    for (size_t i = 0; i < labels.size(); i++) {
+        auto lbb = ctx.getOrCreateLabel(labels[i]);
+        if (!lbb->getParent()) func->insert(func->end(), lbb);
+        sw->addCase(llvm::ConstantInt::get(i32Ty, (int32_t)i), lbb);
+    }
+
+    auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_cgoto", func);
+    ctx.builder->SetInsertPoint(afterBB);
+    return nullptr;
+}
+
 llvm::Value* GotoStatement::codegen(CodeGenContext& ctx) {
     auto func = ctx.builder->GetInsertBlock()->getParent();
 
@@ -2962,18 +3293,19 @@ llvm::Value* GotoStatement::codegen(CodeGenContext& ctx) {
     }
 
     // Local GOTO: branch to the label block in this function.
-    auto it = ctx.labelBlocks.find(label);
-    if (it == ctx.labelBlocks.end() ||
-        (it->second->getParent() && it->second->getParent() != func)) {
-        // Unknown / cross-function label without a LABEL-param record: keep the
-        // module valid rather than emit an invalid branch.
+    // Use getOrCreateLabel so forward GOTO (jumping to a label not yet seen) works.
+    auto labelBB = ctx.getOrCreateLabel(label);
+    if (labelBB->getParent() && labelBB->getParent() != func) {
+        // Cross-function: can't branch there — emit unreachable
         ctx.builder->CreateUnreachable();
         auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_goto", func);
         ctx.builder->SetInsertPoint(afterBB);
         return nullptr;
     }
+    // Attach the block to this function if not yet done
+    if (!labelBB->getParent()) func->insert(func->end(), labelBB);
 
-    ctx.builder->CreateBr(it->second);
+    ctx.builder->CreateBr(labelBB);
 
     auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_goto", func);
     ctx.builder->SetInsertPoint(afterBB);
@@ -3287,6 +3619,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto savedNameParams = ctx.nameParams;
     auto savedArrays = ctx.arrays;
     auto savedLabelBlocks = ctx.labelBlocks;
+    auto savedSwitches = ctx.switches;
     auto savedInMainBlock = ctx.inMainBlock;
     ctx.inMainBlock = false;
     auto savedJmpBuf = ctx.currentJmpBuf;
@@ -3676,6 +4009,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     ctx.nameParams = savedNameParams;
     ctx.arrays = savedArrays;
     ctx.labelBlocks = savedLabelBlocks;
+    ctx.switches = savedSwitches;
     ctx.inMainBlock = savedInMainBlock;
     ctx.currentJmpBuf = savedJmpBuf;
     ctx.nonLocalLabelIds = savedNonLocalIds;

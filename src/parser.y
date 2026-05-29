@@ -166,7 +166,7 @@ static std::vector<ParamSpec> mergeParams(
 %token T_VIRTUAL
 %token T_INSPECT T_WHEN T_OTHERWISE
 %token T_DETACH T_RESUME T_CALL
-%token T_ARRAY T_LABEL T_GOTO
+%token T_ARRAY T_LABEL T_GOTO T_SWITCH
 %token T_NOTEXT T_EXTERNAL
 /* T_VALUE and T_NAME removed — handled as identifiers contextually */
 %token T_OUTINT T_OUTREAL T_OUTFIX T_OUTTEXT T_OUTIMAGE
@@ -187,7 +187,7 @@ static std::vector<ParamSpec> mergeParams(
 %type <expr> expr comparison additive multiplicative power unary postfix primary
 %type <stmt> statement block
 %type <stmt> declaration array_decl ref_declaration
-%type <stmt> label_decl labeled_stmt goto_stmt
+%type <stmt> label_decl labeled_stmt goto_stmt switch_decl
 %type <stmt> if_stmt while_stmt for_stmt
 %type <stmt> procedure_decl class_decl
 %type <stmt> inspect_stmt
@@ -200,7 +200,7 @@ static std::vector<ParamSpec> mergeParams(
 %type <stmtlist> top_level_decls
 %type <stmtlist> stmt_list class_body
 %type <exprlist> arg_list arg_list_ne
-%type <namelist> ident_list
+%type <namelist> ident_list switch_label_list
 %type <sval> io_keyword
 %type <paramlist> typed_param_list opt_typed_params
 %type <speclist> param_specs
@@ -226,6 +226,17 @@ program
         delete $1;
       }
     | top_level_decls T_DOT {
+        programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
+        delete $1;
+      }
+    | top_level_decls block {
+        /* class/procedure defs followed by main block (e.g. after SIMSET injection) */
+        $1->push_back(StmtPtr($2));
+        programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
+        delete $1;
+      }
+    | top_level_decls block T_DOT {
+        $1->push_back(StmtPtr($2));
         programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
         delete $1;
       }
@@ -321,6 +332,7 @@ statement
     | array_decl
     | ref_declaration
     | label_decl
+    | switch_decl
     | labeled_stmt
     | goto_stmt
     | if_stmt
@@ -469,6 +481,28 @@ labeled_stmt
 goto_stmt
     : T_GOTO T_IDENT {
         $$ = new GotoStatement($2);
+      }
+    | T_GOTO T_IDENT T_LPAREN expr T_RPAREN {
+        /* Computed goto: GO TO S(expr) */
+        $$ = new ComputedGoto($2, ExprPtr($4));
+      }
+    ;
+
+switch_decl
+    : T_SWITCH T_IDENT T_ASSIGN switch_label_list {
+        $$ = new SwitchDeclaration($2, std::move(*$4));
+        delete $4;
+      }
+    ;
+
+switch_label_list
+    : T_IDENT {
+        $$ = new std::vector<std::string>();
+        $$->push_back($1);
+      }
+    | switch_label_list T_COMMA T_IDENT {
+        $$ = $1;
+        $$->push_back($3);
       }
     ;
 

@@ -353,6 +353,26 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
+// SWITCH S := L1, L2, ..., Ln  (computed goto declaration)
+class SwitchDeclaration : public Statement {
+public:
+    std::string name;
+    std::vector<std::string> labels;
+    SwitchDeclaration(std::string n, std::vector<std::string> ls)
+        : name(std::move(n)), labels(std::move(ls)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
+// GO TO S(expr)  — computed goto via switch
+class ComputedGoto : public Statement {
+public:
+    std::string switchName;
+    ExprPtr index;
+    ComputedGoto(std::string s, ExprPtr i)
+        : switchName(std::move(s)), index(std::move(i)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
 // IF cond THEN stmt [ELSE stmt]
 class IfStatement : public Statement {
 public:

@@ -111,6 +111,9 @@ public:
     llvm::Function* setjmpFunc = nullptr;
     llvm::Function* longjmpFunc = nullptr;
 
+    // SWITCH declarations: name -> ordered list of label names
+    std::map<std::string, std::vector<std::string>> switches;
+
     // REF type info: variable name -> class name
     std::map<std::string, std::string> refTypes;
 

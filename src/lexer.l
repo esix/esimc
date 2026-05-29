@@ -61,6 +61,7 @@
 "CALL"                          return T_CALL;
 "ARRAY"                         return T_ARRAY;
 "LABEL"                         return T_LABEL;
+"SWITCH"                        return T_SWITCH;
 "NOTEXT"                        return T_NOTEXT;
 "EXTERNAL"                      return T_EXTERNAL;
 "GO"[ \t]+"TO"                  return T_GOTO;
