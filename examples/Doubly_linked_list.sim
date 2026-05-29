@@ -1,0 +1,58 @@
+! Doubly-linked list using SIMSET
+SIMSET
+BEGIN
+    LINK CLASS NODE(VAL); INTEGER VAL;
+    BEGIN
+    END NODE;
+
+    REF(HEAD) LIST;
+    REF(LINK) L;
+    REF(NODE) N;
+    INTEGER I;
+
+    LIST :- NEW HEAD;
+
+    FOR I := 1 STEP 1 UNTIL 5 DO
+        NEW NODE(I).INTO(LIST);
+
+    OUTTEXT("Forward:  ");
+    L :- LIST.FIRST;
+    WHILE L =/= NONE DO
+    BEGIN
+        OUTINT(L QUA NODE.VAL, 3);
+        L :- L.SUC;
+    END;
+    OUTIMAGE;
+
+    OUTTEXT("Backward: ");
+    L :- LIST.LAST;
+    WHILE L =/= NONE DO
+    BEGIN
+        OUTINT(L QUA NODE.VAL, 3);
+        L :- L.PRED;
+    END;
+    OUTIMAGE;
+
+    OUTTEXT("Size: "); OUTINT(LIST.CARDINAL, 0); OUTIMAGE;
+
+    ! Remove middle element (value 3)
+    L :- LIST.FIRST;
+    WHILE L =/= NONE DO
+    BEGIN
+        IF L QUA NODE.VAL = 3 THEN
+        BEGIN
+            L.OUT;
+            GOTO DONE;
+        END;
+        L :- L.SUC;
+    END;
+    DONE:
+    OUTTEXT("After removing 3:");
+    L :- LIST.FIRST;
+    WHILE L =/= NONE DO
+    BEGIN
+        OUTINT(L QUA NODE.VAL, 3);
+        L :- L.SUC;
+    END;
+    OUTIMAGE;
+END.

@@ -1,0 +1,17 @@
+! Day of week using SWITCH (computed goto)
+BEGIN
+    SWITCH DAY := MON, TUE, WED, THU, FRI, SAT, SUN;
+    INTEGER D;
+    FOR D := 1 STEP 1 UNTIL 7 DO
+    BEGIN
+        GO TO DAY(D);
+    MON: OUTTEXT("Monday");    GOTO DONE;
+    TUE: OUTTEXT("Tuesday");   GOTO DONE;
+    WED: OUTTEXT("Wednesday"); GOTO DONE;
+    THU: OUTTEXT("Thursday");  GOTO DONE;
+    FRI: OUTTEXT("Friday");    GOTO DONE;
+    SAT: OUTTEXT("Saturday");  GOTO DONE;
+    SUN: OUTTEXT("Sunday");
+    DONE: OUTIMAGE;
+    END;
+END.

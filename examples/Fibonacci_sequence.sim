@@ -1,0 +1,11 @@
+! Fibonacci sequence — first 20 terms using SWITCH
+BEGIN
+    INTEGER A, B, C, I;
+    A := 0; B := 1;
+    FOR I := 1 STEP 1 UNTIL 20 DO
+    BEGIN
+        OUTINT(A, 0); OUTTEXT(" ");
+        C := A + B; A := B; B := C;
+    END;
+    OUTIMAGE;
+END.

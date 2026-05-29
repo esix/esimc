@@ -1,0 +1,19 @@
+! Sieve of Eratosthenes — print all primes up to N
+BEGIN
+    INTEGER N, I, J;
+    N := 100;
+    BEGIN
+        BOOLEAN ARRAY SIEVE(2:N);
+        FOR I := 2 STEP 1 UNTIL N DO
+            SIEVE(I) := TRUE;
+        FOR I := 2 STEP 1 UNTIL ENTIER(SQRT(N)) DO
+            IF SIEVE(I) THEN
+                FOR J := I*I STEP I UNTIL N DO
+                    SIEVE(J) := FALSE;
+        FOR I := 2 STEP 1 UNTIL N DO
+            IF SIEVE(I) THEN BEGIN
+                OUTINT(I, 4);
+            END;
+        OUTIMAGE;
+    END;
+END.
