@@ -7,7 +7,7 @@ extern "C" {
 
 #include <stdint.h>
 
-#define SIMULA_CORO_STACK_SIZE (256 * 1024)
+#define SIMULA_CORO_STACK_SIZE (32 * 1024)
 
 typedef struct SimulaCoro SimulaCoro;
 

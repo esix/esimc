@@ -240,23 +240,27 @@ public:
     VarDeclaration::Type elementType;
     std::string name;
     ExprPtr lowerBound, upperBound;
+    ExprPtr lowerBound2, upperBound2; // second dimension (nullptr = 1D)
     std::string refClassName; // for REF arrays: the element class name
     ArrayDeclaration(VarDeclaration::Type t, std::string n, ExprPtr lo, ExprPtr hi,
-                     std::string rc = "")
+                     std::string rc = "",
+                     ExprPtr lo2 = nullptr, ExprPtr hi2 = nullptr)
         : elementType(t), name(std::move(n)),
           lowerBound(std::move(lo)), upperBound(std::move(hi)),
+          lowerBound2(std::move(lo2)), upperBound2(std::move(hi2)),
           refClassName(std::move(rc)) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// Array element assignment: a(i) := expr
+// Array element assignment: a(i) := expr  or  a(i,j) := expr  (2D)
 class ArrayAssignment : public Statement {
 public:
     std::string name;
     ExprPtr index;
+    ExprPtr index2; // second dimension index (nullptr = 1D)
     ExprPtr value;
-    ArrayAssignment(std::string n, ExprPtr i, ExprPtr v)
-        : name(std::move(n)), index(std::move(i)), value(std::move(v)) {}
+    ArrayAssignment(std::string n, ExprPtr i, ExprPtr v, ExprPtr i2 = nullptr)
+        : name(std::move(n)), index(std::move(i)), index2(std::move(i2)), value(std::move(v)) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 

@@ -41,6 +41,10 @@ struct ClassInfo {
     // this class yet. Lets call sites build the right function type when the
     // concrete override is compiled later. VarDeclaration::Type; -1 void, -2 REF.
     std::map<std::string, int> virtualReturnTypes;
+
+    // Index of the first field that belongs to THIS class (not inherited from parent).
+    // Constructor args are stored starting at this index. Set during declareSkeleton.
+    int firstOwnFieldIndex = 2;
 };
 
 struct ArrayInfo {
@@ -49,6 +53,12 @@ struct ArrayInfo {
     long long lowerBound;
     long long size;
     bool isStackArray;       // true: basePtr is alloca of [N x T]; false: basePtr is ptr to T
+    // 2D array support (stride == 0 means 1D array)
+    long long lowerBound2 = 0;
+    long long stride = 0;    // number of columns (hi2-lo2+1); 0 = 1D
+    // Dynamic second-dimension lower bound (runtime value stored in __lo2 alloca)
+    bool hasDynLo2 = false;
+    bool hasDynStride = false;
 };
 
 class CodeGenContext {

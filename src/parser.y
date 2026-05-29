@@ -425,13 +425,10 @@ array_decl
                                   ExprPtr($8), ExprPtr($10), $3);
       }
     | type_name T_ARRAY T_IDENT T_LPAREN expr T_COLON expr T_COMMA expr T_COLON expr T_RPAREN {
-        /* 2D array: TYPE ARRAY a(lo1:hi1, lo2:hi2)
-           Treat as 1D with size = (hi1-lo1+1) * (hi2-lo2+1).
-           Index access a(i, j) computed as (i-lo1)*dim2 + (j-lo2). */
-        // For now, just use the first dimension's bounds, ignoring the second.
-        // This is a simplification — we accept the syntax but don't fully support 2D.
+        /* 2D array: TYPE ARRAY a(lo1:hi1, lo2:hi2) */
         $$ = new ArrayDeclaration((VarDeclaration::Type)$1, $3,
-                                  ExprPtr($5), ExprPtr($7));
+                                  ExprPtr($5), ExprPtr($7),
+                                  "", ExprPtr($9), ExprPtr($11));
       }
     ;
 
@@ -855,9 +852,10 @@ expr_stmt
         } else {
             ProcedureCall* call = dynamic_cast<ProcedureCall*>($1);
             if (call) {
-                /* a(i) := expr  ->  ArrayAssignment */
+                /* a(i) := expr or a(i,j) := expr -> ArrayAssignment */
                 ExprPtr idx(call->args.empty() ? nullptr : call->args[0].release());
-                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3));
+                ExprPtr idx2(call->args.size() >= 2 ? call->args[1].release() : nullptr);
+                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), std::move(idx2));
                 delete $1;
             } else {
                 MemberAccess* ma = dynamic_cast<MemberAccess*>($1);
@@ -891,9 +889,10 @@ expr_stmt
         } else {
             ProcedureCall* call = dynamic_cast<ProcedureCall*>($1);
             if (call) {
-                /* a(i) :- expr  ->  ArrayAssignment (ref-assign to array element) */
+                /* a(i) :- expr or a(i,j) :- expr -> ArrayAssignment (ref-assign) */
                 ExprPtr idx(call->args.empty() ? nullptr : call->args[0].release());
-                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3));
+                ExprPtr idx2(call->args.size() >= 2 ? call->args[1].release() : nullptr);
+                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), std::move(idx2));
                 delete $1;
             } else {
                 MemberAccess* ma = dynamic_cast<MemberAccess*>($1);

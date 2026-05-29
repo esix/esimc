@@ -605,7 +605,7 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
                         else
                             callArgs.push_back(llvm::ConstantPointerNull::get(
                                 llvm::PointerType::getUnqual(*ctx.llvmContext)));
-                    } else if (capName.substr(0, 6) == "__arr_") {
+                    } else if (capName.size() > 6 && capName.substr(0, 6) == "__arr_") {
                         std::string arrName = capName.substr(6);
                         auto ait2 = ctx.arrays.find(arrName);
                         if (ait2 != ctx.arrays.end())
@@ -613,6 +613,45 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
                         else
                             callArgs.push_back(llvm::ConstantPointerNull::get(
                                 llvm::PointerType::getUnqual(*ctx.llvmContext)));
+                    } else if (capName.size() > 8 && capName.substr(0, 8) == "__arrlo_") {
+                        // Dynamic lo (first dim) capture
+                        std::string arrName = capName.substr(8);
+                        auto i64Ty5 = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                        auto loIt = ctx.locals.find(arrName + "__lo");
+                        if (loIt != ctx.locals.end())
+                            callArgs.push_back(ctx.builder->CreateLoad(i64Ty5, loIt->second, "lov"));
+                        else {
+                            auto ait3 = ctx.arrays.find(arrName);
+                            callArgs.push_back(llvm::ConstantInt::get(i64Ty5,
+                                ait3 != ctx.arrays.end() ? ait3->second.lowerBound : 0));
+                        }
+                    } else if (capName.size() > 8 && capName.substr(0, 8) == "__arr2d_") {
+                        // 2D array lo2/stride: pass as i64 values
+                        std::string rest = capName.substr(8);
+                        auto i64Ty5 = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                        if (rest.size() > 4 && rest.substr(rest.size()-4) == "_lo2") {
+                            std::string arrName = rest.substr(0, rest.size()-4);
+                            auto lo2It = ctx.locals.find(arrName + "__lo2");
+                            if (lo2It != ctx.locals.end())
+                                callArgs.push_back(ctx.builder->CreateLoad(i64Ty5, lo2It->second, "lo2v"));
+                            else {
+                                auto ait3 = ctx.arrays.find(arrName);
+                                callArgs.push_back(llvm::ConstantInt::get(i64Ty5,
+                                    ait3 != ctx.arrays.end() ? ait3->second.lowerBound2 : 0));
+                            }
+                        } else if (rest.size() > 7 && rest.substr(rest.size()-7) == "_stride") {
+                            std::string arrName = rest.substr(0, rest.size()-7);
+                            auto strIt = ctx.locals.find(arrName + "__stride");
+                            if (strIt != ctx.locals.end())
+                                callArgs.push_back(ctx.builder->CreateLoad(i64Ty5, strIt->second, "stridev"));
+                            else {
+                                auto ait3 = ctx.arrays.find(arrName);
+                                callArgs.push_back(llvm::ConstantInt::get(i64Ty5,
+                                    (ait3 != ctx.arrays.end() && ait3->second.stride > 0) ? ait3->second.stride : 1));
+                            }
+                        } else {
+                            callArgs.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), 0));
+                        }
                     } else {
                         auto [ptr, ty] = ctx.getVarPtr(capName);
                         if (ptr) callArgs.push_back(ptr);
@@ -827,7 +866,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         }
         auto idxVal = args[0]->codegen(ctx);
         if (!idxVal) return nullptr;
-        // Compute adjusted index: index - lowerBound
+        // Compute adjusted first-dimension index: index - lowerBound
         llvm::Value* loBound;
         auto loIt = ctx.locals.find(name + "__lo");
         if (loIt != ctx.locals.end()) {
@@ -836,9 +875,31 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             loBound = llvm::ConstantInt::get(i64Ty, info.lowerBound);
         }
         auto adjusted = ctx.builder->CreateSub(idxVal, loBound, "adj_idx");
+
+        // 2D array: flat_idx = (i - lo1) * stride + (j - lo2)
+        if (args.size() >= 2 && (info.stride != 0 || info.hasDynStride)) {
+            auto idxVal2 = args[1]->codegen(ctx);
+            if (!idxVal2) return nullptr;
+            llvm::Value* stride;
+            llvm::Value* lo2;
+            if (info.hasDynStride) {
+                stride = ctx.builder->CreateLoad(i64Ty,
+                    ctx.locals[name + "__stride"], "stride");
+                lo2 = ctx.builder->CreateLoad(i64Ty,
+                    ctx.locals[name + "__lo2"], "lo2");
+            } else {
+                stride = llvm::ConstantInt::get(i64Ty, info.stride);
+                lo2 = llvm::ConstantInt::get(i64Ty, info.lowerBound2);
+            }
+            auto row = ctx.builder->CreateMul(adjusted, stride, "row_off");
+            auto col = ctx.builder->CreateSub(idxVal2, lo2, "col_adj");
+            adjusted = ctx.builder->CreateAdd(row, col, "flat_idx");
+        }
+
         llvm::Value* gep;
         if (info.isStackArray) {
-            auto arrTy = llvm::ArrayType::get(info.elementType, info.size);
+            auto totalSize = (info.stride > 0) ? info.size : info.size;
+            auto arrTy = llvm::ArrayType::get(info.elementType, totalSize > 0 ? (size_t)totalSize : 1);
             gep = ctx.builder->CreateGEP(arrTy, info.basePtr,
                 {llvm::ConstantInt::get(i64Ty, 0), adjusted}, "arr_elem");
         } else {
@@ -906,11 +967,17 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
     }
 
     if (name == "mod") {
+        // Simula 67: MOD(a,b) = a - b*ENTIER(a/b), always non-negative when b>0.
+        // C SRem truncates toward zero (can give negative result); add b to fix.
         if (args.size() < 2) return nullptr;
         auto a = args[0]->codegen(ctx);
         auto b = args[1]->codegen(ctx);
         if (!a || !b) return nullptr;
-        return ctx.builder->CreateSRem(a, b, "mod");
+        auto rem = ctx.builder->CreateSRem(a, b, "srem");
+        auto zero = llvm::ConstantInt::get(rem->getType(), 0);
+        auto isNeg = ctx.builder->CreateICmpSLT(rem, zero, "rem_neg");
+        auto adj = ctx.builder->CreateAdd(rem, b, "rem_adj");
+        return ctx.builder->CreateSelect(isNeg, adj, rem, "mod");
     }
 
     if (name == "entier") {
@@ -1293,37 +1360,57 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         // Check if the callee expects a pointer at this position (NAME or ARRAY param)
         if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isPointerTy()) {
             if (auto* id = dynamic_cast<Identifier*>(arg.get())) {
-                // If it's an array, pass the array's base pointer + lo + hi
+                // If it's an array, pass: ptr, lo, hi, lo2, stride
                 auto ait2 = ctx.arrays.find(id->name);
                 if (ait2 != ctx.arrays.end()) {
+                    auto& ainfo = ait2->second;
                     auto i64Ty2 = llvm::Type::getInt64Ty(*ctx.llvmContext);
-                    argsV.push_back(ait2->second.basePtr);
+                    auto ptrTyArr = llvm::PointerType::getUnqual(*ctx.llvmContext);
+                    llvm::Value* basePtr = ainfo.basePtr;
+                    // For dynamic (heap-allocated) arrays, load ptr from alloca
+                    if (!ainfo.isStackArray && !llvm::isa<llvm::GlobalVariable>(ainfo.basePtr)) {
+                        auto ptrIt = ctx.locals.find(id->name);
+                        if (ptrIt != ctx.locals.end())
+                            basePtr = ctx.builder->CreateLoad(ptrTyArr, ptrIt->second, "arr_ptr");
+                    }
+                    argsV.push_back(basePtr);
                     paramIdx++;
-                    // Push lo
+                    // lo
                     auto loIt = ctx.locals.find(id->name + "__lo");
                     llvm::Value* loV = loIt != ctx.locals.end()
                         ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty2, loIt->second, "lo_arg")
-                        : (llvm::Value*)llvm::ConstantInt::get(i64Ty2, ait2->second.lowerBound);
-                    if (paramIdx < fnTy->getNumParams() &&
-                        fnTy->getParamType(paramIdx)->isIntegerTy(64)) {
-                        argsV.push_back(loV);
-                        paramIdx++;
-                    }
-                    // Push hi
+                        : (llvm::Value*)llvm::ConstantInt::get(i64Ty2, ainfo.lowerBound);
+                    if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isIntegerTy(64))
+                        { argsV.push_back(loV); paramIdx++; }
+                    // hi
                     auto hiIt = ctx.locals.find(id->name + "__hi");
                     llvm::Value* hiV;
                     if (hiIt != ctx.locals.end()) {
                         hiV = ctx.builder->CreateLoad(i64Ty2, hiIt->second, "hi_arg");
                     } else {
-                        long long hiC = ait2->second.lowerBound +
-                            (ait2->second.size > 0 ? ait2->second.size - 1 : 0);
+                        long long hiC = ainfo.lowerBound + (ainfo.size > 0 ? ainfo.size - 1 : 0);
                         hiV = llvm::ConstantInt::get(i64Ty2, hiC);
                     }
-                    if (paramIdx < fnTy->getNumParams() &&
-                        fnTy->getParamType(paramIdx)->isIntegerTy(64)) {
-                        argsV.push_back(hiV);
-                        paramIdx++;
+                    if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isIntegerTy(64))
+                        { argsV.push_back(hiV); paramIdx++; }
+                    // lo2: lower bound of second dimension (0 for 1D)
+                    llvm::Value* lo2V = llvm::ConstantInt::get(i64Ty2, ainfo.lowerBound2);
+                    if (ainfo.hasDynLo2) {
+                        auto lo2It = ctx.locals.find(id->name + "__lo2");
+                        if (lo2It != ctx.locals.end())
+                            lo2V = ctx.builder->CreateLoad(i64Ty2, lo2It->second, "lo2_arg");
                     }
+                    if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isIntegerTy(64))
+                        { argsV.push_back(lo2V); paramIdx++; }
+                    // stride: columns per row (1 for 1D)
+                    llvm::Value* strideV = llvm::ConstantInt::get(i64Ty2, ainfo.stride > 0 ? ainfo.stride : 1);
+                    if (ainfo.hasDynStride) {
+                        auto strIt = ctx.locals.find(id->name + "__stride");
+                        if (strIt != ctx.locals.end())
+                            strideV = ctx.builder->CreateLoad(i64Ty2, strIt->second, "stride_arg");
+                    }
+                    if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isIntegerTy(64))
+                        { argsV.push_back(strideV); paramIdx++; }
                     continue;
                 }
                 auto [ptr, ty] = ctx.getVarPtr(id->name);
@@ -1371,14 +1458,54 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                 else
                     argsV.push_back(llvm::ConstantPointerNull::get(
                         llvm::PointerType::getUnqual(*ctx.llvmContext)));
-            } else if (capName.substr(0, 6) == "__arr_") {
+            } else if (capName.size() > 6 && capName.substr(0, 6) == "__arr_") {
+                // Array base ptr capture
                 std::string arrName = capName.substr(6);
+                auto ptrTyN = llvm::PointerType::getUnqual(*ctx.llvmContext);
                 auto ait2 = ctx.arrays.find(arrName);
                 if (ait2 != ctx.arrays.end())
                     argsV.push_back(ait2->second.basePtr);
                 else
-                    argsV.push_back(llvm::ConstantPointerNull::get(
-                        llvm::PointerType::getUnqual(*ctx.llvmContext)));
+                    argsV.push_back(llvm::ConstantPointerNull::get(ptrTyN));
+            } else if (capName.size() > 8 && capName.substr(0, 8) == "__arrlo_") {
+                // Dynamic lo (first dim) value capture
+                std::string arrName = capName.substr(8);
+                auto i64Ty5 = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                auto loIt = ctx.locals.find(arrName + "__lo");
+                if (loIt != ctx.locals.end())
+                    argsV.push_back(ctx.builder->CreateLoad(i64Ty5, loIt->second, "lov"));
+                else {
+                    auto ait3 = ctx.arrays.find(arrName);
+                    argsV.push_back(llvm::ConstantInt::get(i64Ty5,
+                        ait3 != ctx.arrays.end() ? ait3->second.lowerBound : 0));
+                }
+            } else if (capName.size() > 8 && capName.substr(0, 8) == "__arr2d_") {
+                // 2D array extra captures: lo2 and stride as i64 values
+                std::string rest = capName.substr(8);
+                auto i64Ty4 = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                if (rest.size() > 4 && rest.substr(rest.size()-4) == "_lo2") {
+                    std::string arrName = rest.substr(0, rest.size()-4);
+                    auto lo2It = ctx.locals.find(arrName + "__lo2");
+                    if (lo2It != ctx.locals.end())
+                        argsV.push_back(ctx.builder->CreateLoad(i64Ty4, lo2It->second, "lo2v"));
+                    else {
+                        auto ait2 = ctx.arrays.find(arrName);
+                        argsV.push_back(llvm::ConstantInt::get(i64Ty4,
+                            ait2 != ctx.arrays.end() ? ait2->second.lowerBound2 : 0));
+                    }
+                } else if (rest.size() > 7 && rest.substr(rest.size()-7) == "_stride") {
+                    std::string arrName = rest.substr(0, rest.size()-7);
+                    auto strIt = ctx.locals.find(arrName + "__stride");
+                    if (strIt != ctx.locals.end())
+                        argsV.push_back(ctx.builder->CreateLoad(i64Ty4, strIt->second, "stridev"));
+                    else {
+                        auto ait2 = ctx.arrays.find(arrName);
+                        argsV.push_back(llvm::ConstantInt::get(i64Ty4,
+                            (ait2 != ctx.arrays.end() && ait2->second.stride > 0) ? ait2->second.stride : 1));
+                    }
+                } else {
+                    argsV.push_back(llvm::ConstantInt::get(i64Ty4, 0));
+                }
             } else {
                 auto [ptr, ty] = ctx.getVarPtr(capName);
                 if (ptr) {
@@ -1417,13 +1544,12 @@ llvm::Value* NewExpression::codegen(CodeGenContext& ctx) {
     auto coroPtr = ctx.builder->CreateStructGEP(ci.structType, obj, 1, "coro_ptr");
     ctx.builder->CreateStore(coro, coroPtr);
 
-    // Store constructor arguments into fields.
-    // Constructor params start at field index 2. Skip companion fields like
-    // "FIELD__pos" that aren't real constructor parameters — those are paired
-    // bookkeeping fields the compiler adds and shouldn't consume an argument.
+    // Store constructor arguments into this class's own parameter fields only.
+    // Inherited parent fields are left for the parent body coroutine to set up.
+    // Skip companion "__pos" fields — those are bookkeeping fields, not params.
     size_t argIdx = 0;
     for (auto& param : ci.fields) {
-        if (param.structIndex < 2) continue;
+        if (param.structIndex < ci.firstOwnFieldIndex) continue;
         if (param.name.size() >= 5 &&
             param.name.compare(param.name.size() - 5, 5, "__pos") == 0) continue;
         if (argIdx < args.size()) {
@@ -2183,7 +2309,10 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
                 if (p.isName) {
                     paramTypes.push_back(ptrTy);
                 } else if (p.isArray) {
+                    // ptr, lo, hi, lo2, stride
                     paramTypes.push_back(ptrTy);
+                    paramTypes.push_back(i64Ty3);
+                    paramTypes.push_back(i64Ty3);
                     paramTypes.push_back(i64Ty3);
                     paramTypes.push_back(i64Ty3);
                 } else {
@@ -2343,9 +2472,47 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
         }
     }
 
-    if (constBounds) {
+    // Evaluate second dimension bounds if this is a 2D array
+    llvm::Value* lo2Val = nullptr, *hi2Val = nullptr;
+    long long lo2 = 0, hi2 = 0;
+    bool has2D = (lowerBound2 != nullptr && upperBound2 != nullptr);
+    bool constBounds2 = false;
+    if (has2D) {
+        lo2Val = lowerBound2->codegen(ctx);
+        hi2Val = upperBound2->codegen(ctx);
+        if (lo2Val && hi2Val) {
+            if (auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(lo2Val))
+                if (auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(hi2Val)) {
+                    lo2 = c1->getSExtValue(); hi2 = c2->getSExtValue();
+                    constBounds2 = true;
+                }
+        }
+    }
+
+    // Use fully-constant path only when ALL required bounds are compile-time constants
+    bool fullyConst = constBounds && (!has2D || constBounds2);
+    if (fullyConst) {
         long long size = hi - lo + 1;
         if (size <= 0) size = 1;
+        long long stride = 0; // 0 = 1D
+        if (has2D) {
+            stride = hi2 - lo2 + 1;
+            if (stride <= 0) stride = 1;
+            size = size * stride; // total elements
+        }
+
+        auto allocArr = [&](llvm::Value* basePtr, bool isStack) {
+            ArrayInfo info;
+            info.basePtr = basePtr;
+            info.elementType = elemTy;
+            info.lowerBound = lo;
+            info.size = size;
+            info.isStackArray = isStack;
+            info.lowerBound2 = lo2;
+            info.stride = stride;
+            ctx.arrays[name] = info;
+            if (!refClassName.empty()) ctx.refTypes[name] = refClassName;
+        };
 
         // In main block, use a global array so procedures can access it
         if (ctx.inMainBlock && !ctx.currentThis) {
@@ -2353,53 +2520,50 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
             auto gv = new llvm::GlobalVariable(
                 *ctx.module, arrTy, false, llvm::GlobalValue::InternalLinkage,
                 llvm::Constant::getNullValue(arrTy), "g_" + name);
-            ArrayInfo info;
-            info.basePtr = gv;
-            info.elementType = elemTy;
-            info.lowerBound = lo;
-            info.size = size;
-            info.isStackArray = true; // same layout as stack array
-            ctx.arrays[name] = info;
-            if (!refClassName.empty()) ctx.refTypes[name] = refClassName;
+            allocArr(gv, true);
             return gv;
         }
 
         // Inside a class body (currentThis set), heap-allocate so the array
-        // outlives the body coroutine. Otherwise it'd be a stack alloca that
-        // gets freed when the body returns, leaving the field with a dangling ptr.
+        // outlives the body coroutine.
         if (ctx.currentThis) {
             auto elemSize = ctx.module->getDataLayout().getTypeAllocSize(elemTy);
             auto byteSize = llvm::ConstantInt::get(i64Ty, (long long)elemSize * size);
             auto ptr = ctx.builder->CreateCall(ctx.allocFunc, {byteSize}, name + "_data");
-            ArrayInfo info;
-            info.basePtr = ptr;
-            info.elementType = elemTy;
-            info.lowerBound = lo;
-            info.size = size;
-            info.isStackArray = false;
-            ctx.arrays[name] = info;
-            if (!refClassName.empty()) ctx.refTypes[name] = refClassName;
+            allocArr(ptr, false);
             return ptr;
         }
         auto arrTy = llvm::ArrayType::get(elemTy, size);
         auto func = ctx.builder->GetInsertBlock()->getParent();
         auto alloca = ctx.createEntryBlockAlloca(func, name, arrTy);
         ctx.builder->CreateStore(llvm::Constant::getNullValue(arrTy), alloca);
-
-        ArrayInfo info;
-        info.basePtr = alloca;
-        info.elementType = elemTy;
-        info.lowerBound = lo;
-        info.size = size;
-        info.isStackArray = true;
-        ctx.arrays[name] = info;
-        if (!refClassName.empty()) ctx.refTypes[name] = refClassName;
+        allocArr(alloca, true);
         return alloca;
     } else {
-        // Dynamic bounds: heap-allocate via simula_alloc
-        auto sizeVal = ctx.builder->CreateAdd(
-            ctx.builder->CreateSub(hiVal, loVal, "range"),
-            llvm::ConstantInt::get(i64Ty, 1), "arrsize");
+        // Dynamic or mixed bounds: heap-allocate via simula_alloc
+        // First dimension size
+        llvm::Value* sizeVal;
+        if (constBounds) {
+            sizeVal = llvm::ConstantInt::get(i64Ty, hi - lo + 1);
+        } else {
+            sizeVal = ctx.builder->CreateAdd(
+                ctx.builder->CreateSub(hiVal, loVal, "range"),
+                llvm::ConstantInt::get(i64Ty, 1), "arrsize");
+        }
+
+        // If 2D, compute stride and multiply total size
+        llvm::Value* strideVal = nullptr;
+        if (has2D && lo2Val && hi2Val) {
+            if (constBounds2) {
+                strideVal = llvm::ConstantInt::get(i64Ty, hi2 - lo2 + 1);
+            } else {
+                strideVal = ctx.builder->CreateAdd(
+                    ctx.builder->CreateSub(hi2Val, lo2Val, "range2"),
+                    llvm::ConstantInt::get(i64Ty, 1), "stride");
+            }
+            sizeVal = ctx.builder->CreateMul(sizeVal, strideVal, "totalsize");
+        }
+
         auto elemSize = ctx.module->getDataLayout().getTypeAllocSize(elemTy);
         auto byteSize = ctx.builder->CreateMul(sizeVal,
             llvm::ConstantInt::get(i64Ty, elemSize), "bytes");
@@ -2411,21 +2575,38 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
         auto alloca = ctx.createEntryBlockAlloca(func, name, ptrTy);
         ctx.builder->CreateStore(ptr, alloca);
 
-        // Store lower bound for index adjustment
-        // For dynamic bounds, store loVal in a separate alloca
-        auto loAlloca = ctx.createEntryBlockAlloca(func, name + "__lo", i64Ty);
-        ctx.builder->CreateStore(loVal, loAlloca);
-
+        // Store lower bound for first-dimension index adjustment
         ArrayInfo info;
         info.basePtr = ptr;
         info.elementType = elemTy;
-        info.lowerBound = 0; // will use dynamic adjustment
-        info.size = 0;
         info.isStackArray = false;
+        info.size = 0;
+        info.hasDynLo2 = false;
+        info.hasDynStride = false;
+        if (constBounds) {
+            info.lowerBound = lo; // use static lo directly
+        } else {
+            info.lowerBound = 0; // will use dynamic __lo
+            auto loAlloca = ctx.createEntryBlockAlloca(func, name + "__lo", i64Ty);
+            ctx.builder->CreateStore(loVal, loAlloca);
+            ctx.locals[name + "__lo"] = loAlloca;
+        }
+
+        if (has2D && strideVal) {
+            // Store dynamic lo2 and stride for 2D access
+            auto lo2Alloca = ctx.createEntryBlockAlloca(func, name + "__lo2", i64Ty);
+            ctx.builder->CreateStore(lo2Val ? lo2Val : llvm::ConstantInt::get(i64Ty, lo2),
+                                     lo2Alloca);
+            ctx.locals[name + "__lo2"] = lo2Alloca;
+            auto strAlloca = ctx.createEntryBlockAlloca(func, name + "__stride", i64Ty);
+            ctx.builder->CreateStore(strideVal, strAlloca);
+            ctx.locals[name + "__stride"] = strAlloca;
+            info.hasDynLo2 = true;
+            info.hasDynStride = true;
+        }
+
         ctx.arrays[name] = info;
         if (!refClassName.empty()) ctx.refTypes[name] = refClassName;
-        // Store lo alloca name for dynamic index adjustment
-        ctx.locals[name + "__lo"] = loAlloca;
         return ptr;
     }
 }
@@ -2442,7 +2623,7 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
     auto idxVal = index->codegen(ctx);
     if (!idxVal) return nullptr;
 
-    // Compute adjusted index = index - lowerBound
+    // Compute adjusted first-dimension index = index - lowerBound
     llvm::Value* loBound;
     auto loIt = ctx.locals.find(name + "__lo");
     if (loIt != ctx.locals.end()) {
@@ -2452,9 +2633,30 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
     }
     auto adjusted = ctx.builder->CreateSub(idxVal, loBound, "adj_idx");
 
+    // 2D array: flat_idx = (i - lo1) * stride + (j - lo2)
+    if (index2 && (info.stride != 0 || info.hasDynStride)) {
+        auto idxVal2 = index2->codegen(ctx);
+        if (!idxVal2) return nullptr;
+        llvm::Value* stride;
+        llvm::Value* lo2;
+        if (info.hasDynStride) {
+            stride = ctx.builder->CreateLoad(i64Ty,
+                ctx.locals[name + "__stride"], "stride");
+            lo2 = ctx.builder->CreateLoad(i64Ty,
+                ctx.locals[name + "__lo2"], "lo2");
+        } else {
+            stride = llvm::ConstantInt::get(i64Ty, info.stride);
+            lo2 = llvm::ConstantInt::get(i64Ty, info.lowerBound2);
+        }
+        auto row = ctx.builder->CreateMul(adjusted, stride, "row_off");
+        auto col = ctx.builder->CreateSub(idxVal2, lo2, "col_adj");
+        adjusted = ctx.builder->CreateAdd(row, col, "flat_idx");
+    }
+
     llvm::Value* gep;
     if (info.isStackArray) {
-        auto arrTy = llvm::ArrayType::get(info.elementType, info.size);
+        auto totalSize = info.size > 0 ? (size_t)info.size : 1;
+        auto arrTy = llvm::ArrayType::get(info.elementType, totalSize);
         gep = ctx.builder->CreateGEP(arrTy, info.basePtr,
             {llvm::ConstantInt::get(i64Ty, 0), adjusted}, "arr_elem");
     } else {
@@ -2977,10 +3179,12 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         if (p.isName) {
             paramTypes.push_back(ctx.getRefType()); // NAME = pointer
         } else if (p.isArray) {
-            // ARRAY: ptr to data, then i64 lo, i64 hi (bounds passed at runtime)
+            // ARRAY: ptr, lo1, hi1, lo2, stride (stride=1 for 1D; lo2 unused for 1D)
             paramTypes.push_back(ctx.getRefType());
-            paramTypes.push_back(llvm::Type::getInt64Ty(*ctx.llvmContext));
-            paramTypes.push_back(llvm::Type::getInt64Ty(*ctx.llvmContext));
+            paramTypes.push_back(llvm::Type::getInt64Ty(*ctx.llvmContext)); // lo
+            paramTypes.push_back(llvm::Type::getInt64Ty(*ctx.llvmContext)); // hi
+            paramTypes.push_back(llvm::Type::getInt64Ty(*ctx.llvmContext)); // lo2
+            paramTypes.push_back(llvm::Type::getInt64Ty(*ctx.llvmContext)); // stride
         } else {
             paramTypes.push_back(ctx.getLLVMType(p.type));
         }
@@ -2997,12 +3201,30 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             capturedTys.push_back(ptrTy);
             paramTypes.push_back(ptrTy);
         }
-        // Capture outer arrays (pass base pointer)
+        // Capture outer arrays (pass base pointer; also pass lo, lo2+stride for dyn bounds)
+        auto i64TyC = llvm::Type::getInt64Ty(*ctx.llvmContext);
         for (auto& [aname, ainfo] : ctx.arrays) {
             if (llvm::isa<llvm::GlobalVariable>(ainfo.basePtr)) continue;
             captured.push_back("__arr_" + aname);
             capturedTys.push_back(ptrTy);
             paramTypes.push_back(ptrTy);
+            // Also capture lo (first dim lower bound) if it's dynamic (lowerBound==0 sentinel)
+            if (ainfo.lowerBound == 0 && ctx.locals.count(aname + "__lo")) {
+                captured.push_back("__arrlo_" + aname);
+                capturedTys.push_back(i64TyC);
+                paramTypes.push_back(i64TyC);
+            }
+            if ((ainfo.hasDynStride || ainfo.stride > 0) &&
+                (ctx.locals.count(aname + "__lo2") || ainfo.lowerBound2 != 0 ||
+                 ctx.locals.count(aname + "__stride") || ainfo.stride > 0)) {
+                // Pass lo2 and stride as separate i64 value params
+                captured.push_back("__arr2d_" + aname + "_lo2");
+                capturedTys.push_back(i64TyC);
+                paramTypes.push_back(i64TyC);
+                captured.push_back("__arr2d_" + aname + "_stride");
+                capturedTys.push_back(i64TyC);
+                paramTypes.push_back(i64TyC);
+            }
         }
         // If inside a method, also capture 'this' pointer
         if (ctx.insideMethod && ctx.currentThis) {
@@ -3148,17 +3370,13 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             continue;
         }
         if (p.isArray) {
-            // Array param: ptr to data, plus i64 lo, i64 hi.
+            // Array param: ptr, lo, hi, lo2, stride
             (&*argIt)->setName(p.name);
-            llvm::Value* basePtr = &*argIt;
-            ++argIt;
-            llvm::Value* loArg = &*argIt;
-            (&*argIt)->setName(p.name + "_lo");
-            ++argIt;
-            llvm::Value* hiArg = &*argIt;
-            (&*argIt)->setName(p.name + "_hi");
-            ++argIt;
-            // Store lo and hi in allocas so UPPERBOUND/LOWERBOUND can read them.
+            llvm::Value* basePtr = &*argIt; ++argIt;
+            llvm::Value* loArg = &*argIt;  (&*argIt)->setName(p.name + "_lo");  ++argIt;
+            llvm::Value* hiArg = &*argIt;  (&*argIt)->setName(p.name + "_hi");  ++argIt;
+            llvm::Value* lo2Arg = &*argIt; (&*argIt)->setName(p.name + "_lo2"); ++argIt;
+            llvm::Value* strideArg = &*argIt; (&*argIt)->setName(p.name + "_stride"); ++argIt;
             auto i64Ty2 = llvm::Type::getInt64Ty(*ctx.llvmContext);
             auto loAlloca = ctx.createEntryBlockAlloca(func, p.name + "__lo", i64Ty2);
             ctx.builder->CreateStore(loArg, loAlloca);
@@ -3166,12 +3384,20 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             auto hiAlloca = ctx.createEntryBlockAlloca(func, p.name + "__hi", i64Ty2);
             ctx.builder->CreateStore(hiArg, hiAlloca);
             ctx.locals[p.name + "__hi"] = hiAlloca;
+            auto lo2Alloca = ctx.createEntryBlockAlloca(func, p.name + "__lo2", i64Ty2);
+            ctx.builder->CreateStore(lo2Arg, lo2Alloca);
+            ctx.locals[p.name + "__lo2"] = lo2Alloca;
+            auto strAlloca = ctx.createEntryBlockAlloca(func, p.name + "__stride", i64Ty2);
+            ctx.builder->CreateStore(strideArg, strAlloca);
+            ctx.locals[p.name + "__stride"] = strAlloca;
             ArrayInfo info;
             info.basePtr = basePtr;
             info.elementType = ctx.getLLVMType(p.arrayElemType);
-            info.lowerBound = 1; // overridden by __lo at runtime
-            info.size = 0; // unknown statically; UPPERBOUND reads __hi
+            info.lowerBound = 0; // overridden by __lo at runtime
+            info.size = 0;
             info.isStackArray = false;
+            info.hasDynLo2 = true;
+            info.hasDynStride = true;
             ctx.arrays[p.name] = info;
             continue;
         }
@@ -3241,16 +3467,47 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             ctx.currentThis = capPtr;
             continue;
         }
-        // Handle array captures
-        if (capName.substr(0, 6) == "__arr_") {
+        // Handle array base ptr captures: __arr_NAME
+        if (capName.size() > 6 && capName.substr(0, 6) == "__arr_") {
             std::string arrName = capName.substr(6);
-            // Look up the outer array info to get metadata
             auto outerIt = savedArrays.find(arrName);
             if (outerIt != savedArrays.end()) {
                 ArrayInfo ainfo = outerIt->second;
                 ainfo.basePtr = capPtr;
-                ainfo.isStackArray = false; // accessed through pointer
+                ainfo.isStackArray = false;
                 ctx.arrays[arrName] = ainfo;
+            }
+            continue;
+        }
+        // Handle dynamic lo (first dim) captures: __arrlo_NAME (i64 value)
+        if (capName.size() > 8 && capName.substr(0, 8) == "__arrlo_") {
+            std::string arrName = capName.substr(8);
+            auto i64Ty4 = llvm::Type::getInt64Ty(*ctx.llvmContext);
+            auto loAlloca = ctx.createEntryBlockAlloca(func, arrName + "__lo", i64Ty4);
+            ctx.builder->CreateStore(capPtr, loAlloca);
+            ctx.locals[arrName + "__lo"] = loAlloca;
+            continue;
+        }
+        // Handle 2D array lo2/stride captures: __arr2d_NAME_lo2 and __arr2d_NAME_stride
+        // These are i64 VALUES passed as function arguments (not pointers)
+        if (capName.size() > 8 && capName.substr(0, 8) == "__arr2d_") {
+            std::string rest = capName.substr(8);
+            auto i64Ty4 = llvm::Type::getInt64Ty(*ctx.llvmContext);
+            if (rest.size() > 4 && rest.substr(rest.size()-4) == "_lo2") {
+                std::string arrName = rest.substr(0, rest.size()-4);
+                // capPtr is actually an i64 value (lo2); store in a new alloca
+                auto lo2Alloca = ctx.createEntryBlockAlloca(func, arrName + "__lo2", i64Ty4);
+                ctx.builder->CreateStore(capPtr, lo2Alloca);
+                ctx.locals[arrName + "__lo2"] = lo2Alloca;
+                if (ctx.arrays.count(arrName))
+                    ctx.arrays[arrName].hasDynLo2 = true;
+            } else if (rest.size() > 7 && rest.substr(rest.size()-7) == "_stride") {
+                std::string arrName = rest.substr(0, rest.size()-7);
+                auto strAlloca = ctx.createEntryBlockAlloca(func, arrName + "__stride", i64Ty4);
+                ctx.builder->CreateStore(capPtr, strAlloca);
+                ctx.locals[arrName + "__stride"] = strAlloca;
+                if (ctx.arrays.count(arrName))
+                    ctx.arrays[arrName].hasDynStride = true;
             }
             continue;
         }
@@ -3462,6 +3719,8 @@ void ClassDecl::declareSkeleton(CodeGenContext& ctx) {
             ci.methods = pit->second.methods;
         }
     }
+    // Constructor args start after vtable, coro, and all inherited fields.
+    ci.firstOwnFieldIndex = (int)fieldTypes.size();
 
     // Add constructor parameter fields
     for (auto& p : params) {
