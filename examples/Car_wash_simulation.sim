@@ -1,0 +1,59 @@
+! Classic SIMULATION example: one-server car wash with a FIFO queue.
+! Deterministic because the drawing-library streams are seeded.
+SIMULATION
+BEGIN
+    REF(HEAD) WAITLINE;
+    INTEGER SEED, NSERVED;
+    REAL TOTALWAIT;
+
+    PROCESS CLASS CAR(ID); INTEGER ID;
+    BEGIN
+        REAL ARRIVED;
+        ARRIVED := TIME;
+        WAIT(WAITLINE);
+        ! served: washer reactivates us when our wash is done;
+        TOTALWAIT := TOTALWAIT + (TIME - ARRIVED);
+        NSERVED := NSERVED + 1;
+    END;
+
+    PROCESS CLASS WASHER;
+    BEGIN
+        REF(CAR) C;
+        WHILE TRUE DO
+        BEGIN
+            IF WAITLINE.EMPTY THEN PASSIVATE;
+            C :- WAITLINE.FIRST QUA CAR;
+            C.OUT;
+            HOLD(10.0);          ! each wash takes 10 minutes;
+            ACTIVATE C;
+        END;
+    END;
+
+    PROCESS CLASS GENERATOR;
+    BEGIN
+        REF(CAR) C;
+        INTEGER I;
+        FOR I := 1 STEP 1 UNTIL 5 DO
+        BEGIN
+            C :- NEW CAR(I);
+            ACTIVATE C;
+            ACTIVATE WASHERREF;   ! wake the washer if it is idle;
+            HOLD(NEGEXP(1.0 / 8.0, SEED));   ! mean 8 min between arrivals;
+        END;
+    END;
+
+    REF(WASHER) WASHERREF;
+    REF(GENERATOR) GEN;
+
+    SEED := 42;
+    WAITLINE :- NEW HEAD;
+    WASHERREF :- NEW WASHER;
+    GEN :- NEW GENERATOR;
+
+    ACTIVATE GEN;
+    HOLD(200.0);
+
+    OUTTEXT("Cars washed: "); OUTINT(NSERVED, 0); OUTIMAGE;
+    OUTTEXT("Average wait: "); OUTFIX(TOTALWAIT / NSERVED, 2, 0);
+    OUTTEXT(" minutes"); OUTIMAGE;
+END.

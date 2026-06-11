@@ -46,6 +46,19 @@ void simula_outreal(double v, int64_t d, int64_t w);
 void simula_outfrac(int64_t v, int64_t d, int64_t w);
 int64_t simula_infrac(void);
 
+/* SIMULATION event scheduling */
+double simula_sim_time(void);
+void* simula_sim_current(void);
+int64_t simula_sim_idle(void* obj);
+int64_t simula_sim_terminated(void* obj);
+double simula_sim_evtime(void* obj);
+void simula_sim_cancel(void* obj);
+void simula_sim_activate(void* obj, double t, int64_t prior, int64_t reactivate);
+void simula_sim_activate_rel(void* obj, void* other, int64_t before, int64_t reactivate);
+void simula_sim_hold(double dt);
+void simula_sim_passivate(void);
+void simula_sim_terminate(void* obj);
+
 /* Random drawing procedures (seed passed by reference, advanced per draw) */
 int64_t simula_randint(int64_t a, int64_t b, int64_t* u);
 double simula_uniform(double a, double b, int64_t* u);

@@ -718,8 +718,10 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
         }
     }
 
-    // If the name refers to a function, return its pointer (procedure-as-value)
-    if (func) {
+    // If the name refers to a function, return its pointer (procedure-as-value).
+    // "main" is excluded: in Simula it denotes the main program process, not
+    // the C entry point.
+    if (func && name != "main") {
         return func;
     }
 
@@ -746,6 +748,31 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
                 llvm::FunctionType::get(i32Ty, {ptrTy}, false));
             ctx.builder->CreateCall(fflushFn,
                 {llvm::ConstantPointerNull::get(ptrTy)});
+            return llvm::ConstantInt::get(i64Ty, 0);
+        }
+        // SIMULATION environment
+        if (name == "time") {
+            auto fn = ctx.module->getOrInsertFunction("simula_sim_time",
+                llvm::FunctionType::get(doubleTy, {}, false));
+            return ctx.builder->CreateCall(fn, {}, "time");
+        }
+        if (name == "current") {
+            auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+            auto fn = ctx.module->getOrInsertFunction("simula_sim_current",
+                llvm::FunctionType::get(ptrTy, {}, false));
+            return ctx.builder->CreateCall(fn, {}, "current");
+        }
+        if (name == "main") {
+            // The main program process: represented by the null object (the
+            // scheduler uses NULL for "main is current").
+            auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+            return llvm::ConstantPointerNull::get(ptrTy);
+        }
+        if (name == "passivate") {
+            auto voidTy = llvm::Type::getVoidTy(*ctx.llvmContext);
+            auto fn = ctx.module->getOrInsertFunction("simula_sim_passivate",
+                llvm::FunctionType::get(voidTy, {}, false));
+            ctx.builder->CreateCall(fn, {});
             return llvm::ConstantInt::get(i64Ty, 0);
         }
     }
@@ -1617,6 +1644,84 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // SIMULATION scheduling builtins
+    {
+        auto ptrTyS = llvm::PointerType::getUnqual(*ctx.llvmContext);
+        auto voidTyS = llvm::Type::getVoidTy(*ctx.llvmContext);
+        if (name == "hold" && args.size() == 1) {
+            auto dt = args[0]->codegen(ctx);
+            if (!dt) return nullptr;
+            if (dt->getType()->isIntegerTy())
+                dt = ctx.builder->CreateSIToFP(dt, doubleTy, "tofp");
+            auto fn = ctx.module->getOrInsertFunction("simula_sim_hold",
+                llvm::FunctionType::get(voidTyS, {doubleTy}, false));
+            return ctx.builder->CreateCall(fn, {dt});
+        }
+        if (name == "cancel" && args.size() == 1) {
+            auto p = args[0]->codegen(ctx);
+            if (!p) return nullptr;
+            auto fn = ctx.module->getOrInsertFunction("simula_sim_cancel",
+                llvm::FunctionType::get(voidTyS, {ptrTyS}, false));
+            return ctx.builder->CreateCall(fn, {p});
+        }
+        if (name == "wait" && args.size() == 1) {
+            // WAIT(Q): CURRENT.INTO(Q); PASSIVATE;
+            auto q = args[0]->codegen(ctx);
+            if (!q) return nullptr;
+            auto curFn = ctx.module->getOrInsertFunction("simula_sim_current",
+                llvm::FunctionType::get(ptrTyS, {}, false));
+            auto cur = ctx.builder->CreateCall(curFn, {}, "current");
+            auto linkIt = ctx.classes.find("link");
+            if (linkIt != ctx.classes.end()) {
+                auto mIt = linkIt->second.methods.find("into");
+                if (mIt != linkIt->second.methods.end())
+                    ctx.builder->CreateCall(mIt->second, {cur, q});
+            }
+            auto pasFn = ctx.module->getOrInsertFunction("simula_sim_passivate",
+                llvm::FunctionType::get(voidTyS, {}, false));
+            return ctx.builder->CreateCall(pasFn, {});
+        }
+        if (name == "simterm" && args.size() == 1) {
+            auto p = args[0]->codegen(ctx);
+            if (!p) return nullptr;
+            auto fn = ctx.module->getOrInsertFunction("simula_sim_terminate",
+                llvm::FunctionType::get(voidTyS, {ptrTyS}, false));
+            return ctx.builder->CreateCall(fn, {p});
+        }
+        if (name == "accum" && args.size() == 4) {
+            // ACCUM(A,B,C,D): A := A + C*(TIME-B); B := TIME; C := C + D
+            auto getPtr = [&](Expression* e) -> llvm::Value* {
+                if (auto* id = dynamic_cast<Identifier*>(e)) {
+                    auto [p, ty] = ctx.getVarPtr(id->name);
+                    return p;
+                }
+                return nullptr;
+            };
+            auto aP = getPtr(args[0].get());
+            auto bP = getPtr(args[1].get());
+            auto cP = getPtr(args[2].get());
+            auto dV = args[3]->codegen(ctx);
+            if (!aP || !bP || !cP || !dV) {
+                (ctx.hadError = true, std::cerr) << "Error: ACCUM needs REAL variables for its first three arguments\n";
+                return nullptr;
+            }
+            if (dV->getType()->isIntegerTy())
+                dV = ctx.builder->CreateSIToFP(dV, doubleTy, "tofp");
+            auto timeFn = ctx.module->getOrInsertFunction("simula_sim_time",
+                llvm::FunctionType::get(doubleTy, {}, false));
+            auto now = ctx.builder->CreateCall(timeFn, {}, "now");
+            auto a = ctx.builder->CreateLoad(doubleTy, aP, "a");
+            auto b = ctx.builder->CreateLoad(doubleTy, bP, "b");
+            auto c = ctx.builder->CreateLoad(doubleTy, cP, "c");
+            auto dt = ctx.builder->CreateFSub(now, b, "dt");
+            auto add = ctx.builder->CreateFMul(c, dt, "c_dt");
+            ctx.builder->CreateStore(ctx.builder->CreateFAdd(a, add), aP);
+            ctx.builder->CreateStore(now, bP);
+            ctx.builder->CreateStore(ctx.builder->CreateFAdd(c, dV), cP);
+            return llvm::ConstantInt::get(i64Ty, 0);
+        }
+    }
+
     if (name == "outchar") {
         if (args.empty()) return nullptr;
         auto val = args[0]->codegen(ctx);
@@ -2365,6 +2470,24 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
             return ctx.builder->CreateCall(mit->second, {obj}, member + "_ret");
         }
         searchClass = cit3->second.parentName;
+    }
+
+    // PROCESS scheduling attributes (SIMULATION)
+    if (member == "evtime" || member == "idle" || member == "terminated") {
+        auto i64TyP = llvm::Type::getInt64Ty(*ctx.llvmContext);
+        auto doubleTyP = llvm::Type::getDoubleTy(*ctx.llvmContext);
+        auto ptrTyP = llvm::PointerType::getUnqual(*ctx.llvmContext);
+        if (member == "evtime") {
+            auto fn = ctx.module->getOrInsertFunction("simula_sim_evtime",
+                llvm::FunctionType::get(doubleTyP, {ptrTyP}, false));
+            return ctx.builder->CreateCall(fn, {obj}, "evtime");
+        }
+        auto fn = ctx.module->getOrInsertFunction(
+            member == "idle" ? "simula_sim_idle" : "simula_sim_terminated",
+            llvm::FunctionType::get(i64TyP, {ptrTyP}, false));
+        auto r = ctx.builder->CreateCall(fn, {obj}, member);
+        return ctx.builder->CreateICmpNE(r,
+            llvm::ConstantInt::get(i64TyP, 0), member + "_b");
     }
 
     (ctx.hadError = true, std::cerr) << "Error: class '" << clsName << "' has no field or method '" << member << "'\n";
@@ -3638,6 +3761,52 @@ llvm::Value* InnerStatement::codegen(CodeGenContext& ctx) {
     return nullptr;
 }
 
+llvm::Value* ActivateStatement::codegen(CodeGenContext& ctx) {
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    auto doubleTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
+    auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+    auto voidTy = llvm::Type::getVoidTy(*ctx.llvmContext);
+
+    auto obj = process->codegen(ctx);
+    if (!obj) return nullptr;
+
+    auto re = llvm::ConstantInt::get(i64Ty, reactivate ? 1 : 0);
+
+    if (mode == BEFORE || mode == AFTER) {
+        auto other = otherProc->codegen(ctx);
+        if (!other) return nullptr;
+        auto fn = ctx.module->getOrInsertFunction("simula_sim_activate_rel",
+            llvm::FunctionType::get(voidTy, {ptrTy, ptrTy, i64Ty, i64Ty}, false));
+        return ctx.builder->CreateCall(fn, {obj, other,
+            llvm::ConstantInt::get(i64Ty, mode == BEFORE ? 1 : 0), re});
+    }
+
+    auto timeFn = ctx.module->getOrInsertFunction("simula_sim_time",
+        llvm::FunctionType::get(doubleTy, {}, false));
+    llvm::Value* t;
+    bool pr = prior;
+    if (mode == DIRECT) {
+        // Direct activation: now, ranked ahead of other notices at this time.
+        t = ctx.builder->CreateCall(timeFn, {}, "now");
+        pr = true;
+    } else {
+        auto e = timeExpr->codegen(ctx);
+        if (!e) return nullptr;
+        if (e->getType()->isIntegerTy())
+            e = ctx.builder->CreateSIToFP(e, doubleTy, "tofp");
+        if (mode == DELAY) {
+            auto now = ctx.builder->CreateCall(timeFn, {}, "now");
+            t = ctx.builder->CreateFAdd(now, e, "at");
+        } else {
+            t = e;
+        }
+    }
+    auto fn = ctx.module->getOrInsertFunction("simula_sim_activate",
+        llvm::FunctionType::get(voidTy, {ptrTy, doubleTy, i64Ty, i64Ty}, false));
+    return ctx.builder->CreateCall(fn, {obj, t,
+        llvm::ConstantInt::get(i64Ty, pr ? 1 : 0), re});
+}
+
 llvm::Value* SwitchDeclaration::codegen(CodeGenContext& ctx) {
     // Store label list; basic blocks will be resolved at GO TO S(I) time.
     ctx.switches[name] = labels;
@@ -4751,7 +4920,9 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
     ctx.currentThis = bodyFunc->arg_begin();
     ctx.currentThis->setName("this");
     ctx.locals.clear();
-    ctx.refTypes.clear();
+    // Keep the enclosing block's REF types (globals stay visible inside class
+    // bodies); class fields are overlaid below.
+    ctx.refTypes = savedRefTypes;
     ctx.arrays.clear();
     ctx.labelBlocks.clear();
 

@@ -361,6 +361,22 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
+// ACTIVATE/REACTIVATE process scheduling statement
+class ActivateStatement : public Statement {
+public:
+    enum Mode { DIRECT, AT, DELAY, BEFORE, AFTER };
+    ExprPtr process;
+    Mode mode;
+    ExprPtr timeExpr;   // AT/DELAY
+    ExprPtr otherProc;  // BEFORE/AFTER
+    bool prior = false;
+    bool reactivate = false;
+    ActivateStatement(ExprPtr p, Mode m, ExprPtr t, ExprPtr o, bool pr, bool re)
+        : process(std::move(p)), mode(m), timeExpr(std::move(t)),
+          otherProc(std::move(o)), prior(pr), reactivate(re) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
 // SWITCH S := L1, L2, ..., Ln  (computed goto declaration)
 class SwitchDeclaration : public Statement {
 public:

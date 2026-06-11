@@ -431,11 +431,11 @@ BEGIN
     BEGIN
         OUT;
         prev_ :- S;
-        suc_  :- S.fst_;
-        pred_ :- NONE;
-        IF S.fst_ =/= NONE THEN S.fst_.pred_ :- THIS LINK
-                           ELSE S.lst_        :- THIS LINK;
-        S.fst_ :- THIS LINK;
+        pred_ :- S.lst_;
+        suc_  :- NONE;
+        IF S.lst_ =/= NONE THEN S.lst_.suc_ :- THIS LINK
+                           ELSE S.fst_       :- THIS LINK;
+        S.lst_ :- THIS LINK;
         S.n_ := S.n_ + 1;
     END INTO;
 
@@ -492,41 +492,70 @@ BEGIN
 END HEAD;
 )SIMSET";
 
-// Detect whether the source uses SIMSET prefix and prepend the SIMSET prelude.
+// PROCESS prelude for SIMULATION: a LINK subclass whose body detaches at
+// creation (processes start passive), runs the user body at INNER, then
+// terminates through the scheduler.
+static const char* PROCESS_PRELUDE = R"PROC(
+LINK CLASS PROCESS;
+BEGIN
+    DETACH;
+    INNER;
+    SIMTERM(THIS PROCESS);
+END PROCESS;
+)PROC";
+
+// Is source[pos..pos+len) a standalone word outside any string literal?
+static bool isWordAt(const std::string& src, size_t pos, size_t len) {
+    bool pb = (pos == 0) || !(std::isalnum((unsigned char)src[pos-1]) || src[pos-1] == '_');
+    bool nb = (pos+len >= src.size()) ||
+              !(std::isalnum((unsigned char)src[pos+len]) || src[pos+len] == '_');
+    if (!pb || !nb) return false;
+    // Count unclosed quotes before pos (Simula strings use "...")
+    bool inString = false;
+    for (size_t i = 0; i < pos; i++)
+        if (src[i] == '"') inString = !inString;
+    return !inString;
+}
+
+// Case-insensitive standalone-word search outside string literals.
+static size_t findWord(const std::string& lcSrc, const std::string& word, size_t from = 0) {
+    size_t p = from;
+    while ((p = lcSrc.find(word, p)) != std::string::npos) {
+        if (isWordAt(lcSrc, p, word.size())) return p;
+        p += word.size();
+    }
+    return std::string::npos;
+}
+
+// Blank every standalone occurrence of word (outside strings); word is given
+// in lowercase, source may be any case.
+static void blankWord(std::string& src, const std::string& word) {
+    auto lc = toLower(src);
+    size_t p = 0;
+    while ((p = findWord(lc, word, p)) != std::string::npos) {
+        for (size_t i = 0; i < word.size(); i++) src[p + i] = ' ';
+        p += word.size();
+    }
+}
+
+// Detect SIMSET/SIMULATION prefix usage and prepend the matching preludes.
+// SIMULATION implies SIMSET (it is prefixed by it in the standard).
 static std::string maybeInjectSimset(const std::string& source) {
     auto lc = toLower(source);
-    // Check for "SIMSET" as a prefix keyword at the start of a program
-    // or as a prefix to BEGIN (e.g. "SIMSET\nBEGIN").
-    // Also inject if the source uses LINK or HEAD class names.
-    bool needsSimset = false;
-    size_t pos = lc.find("simset");
-    if (pos != std::string::npos) {
-        // Make sure it's a standalone word (not a substring)
-        bool prevOk = (pos == 0) || !std::isalnum((unsigned char)lc[pos-1]);
-        bool nextOk = (pos+6 >= lc.size()) || !std::isalnum((unsigned char)lc[pos+6]);
-        needsSimset = prevOk && nextOk;
-    }
-    if (!needsSimset) return source;
-    if (lc.find("class link") != std::string::npos) return source; // already defined
+    bool wantsSimulation = findWord(lc, "simulation") != std::string::npos &&
+                           lc.find("class process") == std::string::npos;
+    bool wantsSimset = findWord(lc, "simset") != std::string::npos;
+    if (!wantsSimset && !wantsSimulation) return source;
+    if (lc.find("class link") != std::string::npos) return source; // user-defined
     if (lc.find("class head") != std::string::npos) return source;
 
-    // Strip "SIMSET" keyword from the source (replace with whitespace)
     std::string result = source;
-    size_t p = 0;
-    while (true) {
-        auto found = result.find("SIMSET", p);
-        if (found == std::string::npos) { found = result.find("simset", p); }
-        if (found == std::string::npos) break;
-        // Check word boundary
-        bool pb = (found == 0) || !std::isalnum((unsigned char)result[found-1]);
-        bool nb = (found+6 >= result.size()) || !std::isalnum((unsigned char)result[found+6]);
-        if (pb && nb) {
-            result.replace(found, 6, "      ");  // replace with spaces
-        }
-        p = found + 6;
-    }
-    // Prepend the prelude
-    return std::string(SIMSET_PRELUDE) + "\n" + result;
+    blankWord(result, "simset");
+    if (wantsSimulation) blankWord(result, "simulation");
+
+    std::string prelude = SIMSET_PRELUDE;
+    if (wantsSimulation) prelude += PROCESS_PRELUDE;
+    return prelude + "\n" + result;
 }
 
 int main(int argc, char** argv) {

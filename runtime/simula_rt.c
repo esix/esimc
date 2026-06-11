@@ -689,3 +689,191 @@ void simula_histo(double* a, int64_t an, const double* b, int64_t bn,
     while (i < bn && c > b[i]) i++;
     if (i < an) a[i] += w;
 }
+
+/* ================================================================
+ * SIMULATION: event list (SQS) and process scheduling
+ *
+ * Every switch is main->process (resume) or process->main (detach):
+ * scheduling statements only edit the SQS; HOLD/PASSIVATE/body-end
+ * yield. The main program acts as the main process: HOLD in main
+ * drives the event loop directly.
+ * ================================================================ */
+
+typedef struct SimNotice {
+    void* obj;                 /* process object (struct: [vtable, coro, ...]) */
+    double evtime;
+    uint64_t seq;              /* FIFO rank within equal evtime */
+    struct SimNotice* next;
+} SimNotice;
+
+typedef struct SimProcState {
+    void* obj;
+    int terminated;
+    struct SimProcState* next;
+} SimProcState;
+
+static SimNotice* sim_sqs = NULL;
+static SimProcState* sim_procs = NULL;
+static double sim_time_v = 0.0;
+static void* sim_current_obj = NULL;   /* NULL = main program */
+static uint64_t sim_seq_counter = 0;
+
+static SimulaCoro* sim_coro_of(void* obj) {
+    return (SimulaCoro*)((void**)obj)[1];
+}
+
+static SimProcState* sim_state_of(void* obj) {
+    for (SimProcState* p = sim_procs; p; p = p->next)
+        if (p->obj == obj) return p;
+    SimProcState* p = (SimProcState*)malloc(sizeof *p);
+    p->obj = obj; p->terminated = 0; p->next = sim_procs; sim_procs = p;
+    return p;
+}
+
+static void sim_remove_notice(void* obj) {
+    SimNotice** pp = &sim_sqs;
+    while (*pp) {
+        if ((*pp)->obj == obj) {
+            SimNotice* dead = *pp;
+            *pp = dead->next;
+            free(dead);
+            return;  /* a process has at most one notice */
+        }
+        pp = &(*pp)->next;
+    }
+}
+
+static int sim_has_notice(void* obj) {
+    for (SimNotice* n = sim_sqs; n; n = n->next)
+        if (n->obj == obj) return 1;
+    return 0;
+}
+
+/* prior != 0 ranks the notice before others with the same evtime */
+static void sim_insert(void* obj, double t, int prior) {
+    if (t < sim_time_v) t = sim_time_v;
+    SimNotice* n = (SimNotice*)malloc(sizeof *n);
+    n->obj = obj; n->evtime = t; n->seq = ++sim_seq_counter;
+    SimNotice** pp = &sim_sqs;
+    while (*pp && ((*pp)->evtime < t || ((*pp)->evtime == t && !prior)))
+        pp = &(*pp)->next;
+    n->next = *pp;
+    *pp = n;
+}
+
+double simula_sim_time(void) { return sim_time_v; }
+void* simula_sim_current(void) { return sim_current_obj; }
+
+int64_t simula_sim_idle(void* obj) {
+    if (obj == NULL) return 0;
+    if (obj == sim_current_obj) return 0;
+    return sim_has_notice(obj) ? 0 : 1;
+}
+
+int64_t simula_sim_terminated(void* obj) {
+    if (obj == NULL) return 0;
+    for (SimProcState* p = sim_procs; p; p = p->next)
+        if (p->obj == obj) return p->terminated;
+    return 0;
+}
+
+double simula_sim_evtime(void* obj) {
+    for (SimNotice* n = sim_sqs; n; n = n->next)
+        if (n->obj == obj) return n->evtime;
+    if (obj == sim_current_obj) return sim_time_v;
+    return 0.0;
+}
+
+void simula_sim_cancel(void* obj) {
+    if (obj != NULL) sim_remove_notice(obj);
+}
+
+/* ACTIVATE: schedule only if idle. REACTIVATE: always re-schedule. */
+void simula_sim_activate(void* obj, double t, int64_t prior, int64_t reactivate) {
+    if (obj == NULL) return;
+    if (simula_sim_terminated(obj)) return;
+    if (sim_has_notice(obj) || obj == sim_current_obj) {
+        if (!reactivate) return;
+        sim_remove_notice(obj);
+    }
+    sim_state_of(obj);
+    sim_insert(obj, t, (int)prior);
+}
+
+/* ACTIVATE ... BEFORE/AFTER other: adopt the other's evtime and rank. */
+void simula_sim_activate_rel(void* obj, void* other, int64_t before,
+                             int64_t reactivate) {
+    if (obj == NULL || other == NULL) return;
+    if (simula_sim_terminated(obj)) return;
+    SimNotice* on = NULL;
+    for (SimNotice* n = sim_sqs; n; n = n->next)
+        if (n->obj == other) { on = n; break; }
+    if (on == NULL) return;  /* other idle: no effect (standard) */
+    if (sim_has_notice(obj) || obj == sim_current_obj) {
+        if (!reactivate) return;
+        sim_remove_notice(obj);
+        /* re-find: removal may have changed links */
+        on = NULL;
+        for (SimNotice* n = sim_sqs; n; n = n->next)
+            if (n->obj == other) { on = n; break; }
+        if (on == NULL) return;
+    }
+    sim_state_of(obj);
+    SimNotice* nn = (SimNotice*)malloc(sizeof *nn);
+    nn->obj = obj; nn->evtime = on->evtime; nn->seq = ++sim_seq_counter;
+    if (before) {
+        SimNotice** pp = &sim_sqs;
+        while (*pp && *pp != on) pp = &(*pp)->next;
+        nn->next = on; *pp = nn;
+    } else {
+        nn->next = on->next; on->next = nn;
+    }
+}
+
+/* Run queued events from the main context until the SQS is exhausted or
+ * the next event lies beyond `until` (pass INFINITY to drain). */
+static void sim_main_loop(double until) {
+    while (sim_sqs && sim_sqs->evtime <= until) {
+        SimNotice* n = sim_sqs;
+        sim_sqs = n->next;
+        sim_time_v = n->evtime;
+        void* obj = n->obj;
+        free(n);
+        if (simula_sim_terminated(obj)) continue;
+        sim_current_obj = obj;
+        simula_coro_resume(sim_coro_of(obj));
+        sim_current_obj = NULL;
+    }
+    if (until != INFINITY && sim_time_v < until) sim_time_v = until;
+}
+
+/* HOLD(dt): from a process, reschedule self and yield to the scheduler;
+ * from the main program, drive the event loop for dt time units. */
+void simula_sim_hold(double dt) {
+    if (dt < 0.0) dt = 0.0;
+    if (sim_current_obj == NULL) {
+        sim_main_loop(sim_time_v + dt);
+        return;
+    }
+    void* self = sim_current_obj;
+    sim_insert(self, sim_time_v + dt, 0);
+    simula_coro_detach(sim_coro_of(self));
+}
+
+/* PASSIVATE: from a process, yield without rescheduling; from the main
+ * program, drain the whole event list. */
+void simula_sim_passivate(void) {
+    if (sim_current_obj == NULL) {
+        sim_main_loop(INFINITY);
+        return;
+    }
+    void* self = sim_current_obj;
+    simula_coro_detach(sim_coro_of(self));
+}
+
+/* End of a process body: mark terminated and yield forever. */
+void simula_sim_terminate(void* obj) {
+    sim_state_of(obj)->terminated = 1;
+    sim_remove_notice(obj);
+    for (;;) simula_coro_detach(sim_coro_of(obj));
+}

@@ -166,6 +166,7 @@ static std::vector<ParamSpec> mergeParams(
 %token T_VIRTUAL
 %token T_INSPECT T_WHEN T_OTHERWISE
 %token T_DETACH T_RESUME T_CALL T_INNER
+%token T_ACTIVATE T_REACTIVATE T_AT T_DELAY T_BEFORE T_AFTER T_PRIOR
 %token T_ARRAY T_LABEL T_GOTO T_SWITCH
 %token T_NOTEXT T_EXTERNAL
 /* T_VALUE and T_NAME removed — handled as identifiers contextually */
@@ -191,7 +192,7 @@ static std::vector<ParamSpec> mergeParams(
 %type <stmt> if_stmt while_stmt for_stmt
 %type <stmt> procedure_decl class_decl
 %type <stmt> inspect_stmt
-%type <stmt> detach_stmt resume_stmt call_stmt
+%type <stmt> detach_stmt resume_stmt call_stmt activate_stmt
 %type <stmt> outint_stmt outreal_stmt outfix_stmt outtext_stmt outimage_stmt inimage_stmt
 %type <stmt> expr_stmt virtual_spec top_level_decl external_decl
 %type <ventry> virtual_entry
@@ -236,6 +237,11 @@ program
         delete $1;
       }
     | top_level_decls block T_DOT {
+        $1->push_back(StmtPtr($2));
+        programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
+        delete $1;
+      }
+    | top_level_decls block T_SEMI {
         $1->push_back(StmtPtr($2));
         programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
         delete $1;
@@ -344,6 +350,7 @@ statement
     | detach_stmt
     | resume_stmt
     | call_stmt
+    | activate_stmt
     | outint_stmt
     | outreal_stmt
     | outfix_stmt
@@ -813,6 +820,65 @@ when_clauses
 detach_stmt
     : T_DETACH { $$ = new DetachStatement(); }
     | T_INNER  { $$ = new InnerStatement(); }
+    ;
+
+activate_stmt
+    : T_ACTIVATE expr {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::DIRECT,
+                                   nullptr, nullptr, false, false);
+      }
+    | T_ACTIVATE expr T_AT expr {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::AT,
+                                   ExprPtr($4), nullptr, false, false);
+      }
+    | T_ACTIVATE expr T_AT expr T_PRIOR {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::AT,
+                                   ExprPtr($4), nullptr, true, false);
+      }
+    | T_ACTIVATE expr T_DELAY expr {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::DELAY,
+                                   ExprPtr($4), nullptr, false, false);
+      }
+    | T_ACTIVATE expr T_DELAY expr T_PRIOR {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::DELAY,
+                                   ExprPtr($4), nullptr, true, false);
+      }
+    | T_ACTIVATE expr T_BEFORE expr {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::BEFORE,
+                                   nullptr, ExprPtr($4), false, false);
+      }
+    | T_ACTIVATE expr T_AFTER expr {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::AFTER,
+                                   nullptr, ExprPtr($4), false, false);
+      }
+    | T_REACTIVATE expr {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::DIRECT,
+                                   nullptr, nullptr, false, true);
+      }
+    | T_REACTIVATE expr T_AT expr {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::AT,
+                                   ExprPtr($4), nullptr, false, true);
+      }
+    | T_REACTIVATE expr T_AT expr T_PRIOR {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::AT,
+                                   ExprPtr($4), nullptr, true, true);
+      }
+    | T_REACTIVATE expr T_DELAY expr {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::DELAY,
+                                   ExprPtr($4), nullptr, false, true);
+      }
+    | T_REACTIVATE expr T_DELAY expr T_PRIOR {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::DELAY,
+                                   ExprPtr($4), nullptr, true, true);
+      }
+    | T_REACTIVATE expr T_BEFORE expr {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::BEFORE,
+                                   nullptr, ExprPtr($4), false, true);
+      }
+    | T_REACTIVATE expr T_AFTER expr {
+        $$ = new ActivateStatement(ExprPtr($2), ActivateStatement::AFTER,
+                                   nullptr, ExprPtr($4), false, true);
+      }
     ;
 
 resume_stmt

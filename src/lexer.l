@@ -57,6 +57,13 @@
 "WHEN"                          return T_WHEN;
 "OTHERWISE"                     return T_OTHERWISE;
 "INNER"                         return T_INNER;
+"ACTIVATE"                      return T_ACTIVATE;
+"REACTIVATE"                    return T_REACTIVATE;
+"AT"                            return T_AT;
+"DELAY"                         return T_DELAY;
+"BEFORE"                        return T_BEFORE;
+"AFTER"                         return T_AFTER;
+"PRIOR"                         return T_PRIOR;
 "DETACH"                        return T_DETACH;
 "RESUME"                        return T_RESUME;
 "CALL"                          return T_CALL;
