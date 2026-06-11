@@ -1627,6 +1627,66 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                     continue;
                 }
             }
+            // Array element actual A(I): pass the element's address so callee
+            // writes reach the array. (The index is evaluated once at call
+            // time — full per-access thunk re-evaluation is not implemented.)
+            if (auto* pc = dynamic_cast<ProcedureCall*>(arg.get())) {
+                auto ait3 = ctx.arrays.find(pc->name);
+                if (ait3 != ctx.arrays.end() && !pc->args.empty()) {
+                    auto& ainfo = ait3->second;
+                    auto i64Ty3 = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                    auto idxVal = pc->args[0]->codegen(ctx);
+                    if (!idxVal) return nullptr;
+                    llvm::Value* loBound;
+                    auto loIt3 = ctx.locals.find(pc->name + "__lo");
+                    if (loIt3 != ctx.locals.end())
+                        loBound = ctx.builder->CreateLoad(i64Ty3, loIt3->second, "lo");
+                    else
+                        loBound = llvm::ConstantInt::get(i64Ty3, ainfo.lowerBound);
+                    auto adjusted = ctx.builder->CreateSub(idxVal, loBound, "adj_idx");
+                    if (pc->args.size() >= 2 && (ainfo.stride != 0 || ainfo.hasDynStride)) {
+                        auto idxVal2 = pc->args[1]->codegen(ctx);
+                        if (!idxVal2) return nullptr;
+                        llvm::Value *stride, *lo2;
+                        if (ainfo.hasDynStride) {
+                            stride = ctx.builder->CreateLoad(i64Ty3,
+                                ctx.locals[pc->name + "__stride"], "stride");
+                            lo2 = ctx.builder->CreateLoad(i64Ty3,
+                                ctx.locals[pc->name + "__lo2"], "lo2");
+                        } else {
+                            stride = llvm::ConstantInt::get(i64Ty3, ainfo.stride);
+                            lo2 = llvm::ConstantInt::get(i64Ty3, ainfo.lowerBound2);
+                        }
+                        auto row = ctx.builder->CreateMul(adjusted, stride, "row_off");
+                        auto col = ctx.builder->CreateSub(idxVal2, lo2, "col_adj");
+                        adjusted = ctx.builder->CreateAdd(row, col, "flat_idx");
+                    }
+                    llvm::Value* gep;
+                    if (ainfo.isStackArray) {
+                        auto arrTy = llvm::ArrayType::get(ainfo.elementType,
+                            ainfo.size > 0 ? (size_t)ainfo.size : 1);
+                        gep = ctx.builder->CreateGEP(arrTy, ainfo.basePtr,
+                            {llvm::ConstantInt::get(i64Ty3, 0), adjusted}, "name_elem");
+                    } else {
+                        gep = ctx.builder->CreateGEP(ainfo.elementType, ainfo.basePtr,
+                            adjusted, "name_elem");
+                    }
+                    argsV.push_back(gep);
+                    paramIdx++;
+                    continue;
+                }
+            }
+            // Any other expression: evaluate once into a temporary and pass
+            // its address (reads see the value; writes go to the temp). This
+            // avoids the null-pointer crash; true thunks are still missing.
+            auto v = arg->codegen(ctx);
+            if (!v) return nullptr;
+            auto curFunc = ctx.builder->GetInsertBlock()->getParent();
+            auto tmp = ctx.createEntryBlockAlloca(curFunc, "name_tmp", v->getType());
+            ctx.builder->CreateStore(v, tmp);
+            argsV.push_back(tmp);
+            paramIdx++;
+            continue;
         }
         // Check if the callee expects a pointer at this position (NAME or ARRAY param)
         if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isPointerTy()) {
