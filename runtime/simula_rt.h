@@ -54,6 +54,7 @@ int64_t simula_sim_terminated(void* obj);
 double simula_sim_evtime(void* obj);
 void simula_sim_cancel(void* obj);
 void simula_sim_activate(void* obj, double t, int64_t prior, int64_t reactivate);
+void simula_sim_activate_now(void* obj, int64_t reactivate);
 void simula_sim_activate_rel(void* obj, void* other, int64_t before, int64_t reactivate);
 void simula_sim_hold(double dt);
 void simula_sim_passivate(void);
@@ -77,6 +78,9 @@ void simula_histo(double* a, int64_t an, const double* b, int64_t bn,
 int64_t simula_text_getint(const char* t);
 double simula_text_getreal(const char* t);
 int64_t simula_text_getfrac(const char* t);
+int64_t simula_text_getint_at(const char* t, int64_t* pos0);
+double simula_text_getreal_at(const char* t, int64_t* pos0);
+int64_t simula_text_getfrac_at(const char* t, int64_t* pos0);
 void simula_text_putint(char* t, int64_t v);
 void simula_text_putfix(char* t, double r, int64_t d);
 void simula_text_putreal(char* t, double r, int64_t d);

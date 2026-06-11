@@ -877,3 +877,79 @@ void simula_sim_terminate(void* obj) {
     sim_remove_notice(obj);
     for (;;) simula_coro_detach(sim_coro_of(obj));
 }
+
+/* Position-advancing de-editing: scan from *pos0 (0-based offset into t),
+ * parse the item, and leave *pos0 just past it — so sequential GETINT /
+ * GETREAL / GETFRAC walk through the text like the standard requires. */
+int64_t simula_text_getint_at(const char* t, int64_t* pos0) {
+    if (t == NULL) return 0;
+    int64_t len = (int64_t)strlen(t);
+    int64_t i = (pos0 && *pos0 > 0) ? *pos0 : 0;
+    if (i > len) i = len;
+    while (i < len && (t[i] == ' ' || t[i] == '\t')) i++;
+    char* end = NULL;
+    long long v = strtoll(t + i, &end, 10);
+    if (pos0) *pos0 = end ? (int64_t)(end - t) : i;
+    return (int64_t)v;
+}
+
+double simula_text_getreal_at(const char* t, int64_t* pos0) {
+    if (t == NULL) return 0.0;
+    int64_t len = (int64_t)strlen(t);
+    int64_t i = (pos0 && *pos0 > 0) ? *pos0 : 0;
+    if (i > len) i = len;
+    while (i < len && (t[i] == ' ' || t[i] == '\t')) i++;
+    /* normalize '&' exponent to 'e' in a bounded window */
+    char buf[64]; size_t j = 0;
+    int64_t k = i;
+    for (; t[k] && j < 62; k++)
+        buf[j++] = (t[k] == '&') ? 'e' : t[k];
+    buf[j] = '\0';
+    char* end = NULL;
+    double v = strtod(buf, &end);
+    if (pos0) *pos0 = i + (end ? (int64_t)(end - buf) : 0);
+    return v;
+}
+
+int64_t simula_text_getfrac_at(const char* t, int64_t* pos0) {
+    if (t == NULL) return 0;
+    int64_t len = (int64_t)strlen(t);
+    int64_t i = (pos0 && *pos0 > 0) ? *pos0 : 0;
+    if (i > len) i = len;
+    while (i < len && (t[i] == ' ' || t[i] == '\t')) i++;
+    int64_t v = 0; int neg = 0; int seen = 0;
+    if (i < len && (t[i] == '-' || t[i] == '+')) { neg = (t[i] == '-'); i++; }
+    while (i < len) {
+        if (t[i] >= '0' && t[i] <= '9') { v = v * 10 + (t[i] - '0'); seen = 1; i++; }
+        else if ((t[i] == ' ' || t[i] == '.') && seen &&
+                 i + 1 < len && t[i+1] >= '0' && t[i+1] <= '9') i++;
+        else break;
+    }
+    if (pos0) *pos0 = i;
+    return neg ? -v : v;
+}
+
+/* Direct activation (plain ACTIVATE X): per the standard X becomes current
+ * at once and the activator continues only after X yields. From a process
+ * this is exact: schedule self's continuation, schedule X ahead of it, and
+ * yield to the scheduler. From the main program we drain all current-time
+ * events (X runs first among them) before main continues. */
+void simula_sim_activate_now(void* obj, int64_t reactivate) {
+    if (obj == NULL) return;
+    if (simula_sim_terminated(obj)) return;
+    if (sim_has_notice(obj) || obj == sim_current_obj) {
+        if (!reactivate) return;
+        if (obj == sim_current_obj) return; /* reactivating self: no-op here */
+        sim_remove_notice(obj);
+    }
+    sim_state_of(obj);
+    if (sim_current_obj == NULL) {
+        sim_insert(obj, sim_time_v, 1);
+        sim_main_loop(sim_time_v);
+        return;
+    }
+    void* self = sim_current_obj;
+    sim_insert(self, sim_time_v, 1);  /* continuation first among existing */
+    sim_insert(obj, sim_time_v, 1);   /* X ahead of the continuation */
+    simula_coro_detach(sim_coro_of(self));
+}

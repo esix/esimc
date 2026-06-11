@@ -750,6 +750,11 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
                 {llvm::ConstantPointerNull::get(ptrTy)});
             return llvm::ConstantInt::get(i64Ty, 0);
         }
+        if (name == "infrac") {
+            auto fn = ctx.module->getOrInsertFunction("simula_infrac",
+                llvm::FunctionType::get(i64Ty, {}, false));
+            return ctx.builder->CreateCall(fn, {}, "infrac");
+        }
         // SIMULATION environment
         if (name == "time") {
             auto fn = ctx.module->getOrInsertFunction("simula_sim_time",
@@ -1506,11 +1511,35 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         auto toI = [&](llvm::Value* v) {
             return v->getType()->isDoubleTy() ? simulaRealToInt(ctx, v, i64Ty) : v;
         };
-        // Address of the seed variable; rvalue seeds go through a temp.
+        // Address of the seed variable; 1D array elements get their element
+        // address (so the stored seed advances); other rvalues use a temp.
         auto seedPtr = [&](Expression* e) -> llvm::Value* {
             if (auto* id = dynamic_cast<Identifier*>(e)) {
                 auto [p, ty] = ctx.getVarPtr(id->name);
                 if (p) return p;
+            }
+            if (auto* pc = dynamic_cast<ProcedureCall*>(e)) {
+                auto ait = ctx.arrays.find(pc->name);
+                if (ait != ctx.arrays.end() && pc->args.size() == 1) {
+                    auto& ai = ait->second;
+                    auto idx = pc->args[0]->codegen(ctx);
+                    if (!idx) return nullptr;
+                    llvm::Value* lo;
+                    auto loIt = ctx.locals.find(pc->name + "__lo");
+                    if (loIt != ctx.locals.end())
+                        lo = ctx.builder->CreateLoad(i64Ty, loIt->second, "lo");
+                    else
+                        lo = llvm::ConstantInt::get(i64Ty, ai.lowerBound);
+                    auto adj = ctx.builder->CreateSub(idx, lo, "adj_idx");
+                    if (ai.isStackArray) {
+                        auto arrTy = llvm::ArrayType::get(ai.elementType,
+                            ai.size > 0 ? (size_t)ai.size : 1);
+                        return ctx.builder->CreateGEP(arrTy, ai.basePtr,
+                            {llvm::ConstantInt::get(i64Ty, 0), adj}, "seed_elem");
+                    }
+                    return ctx.builder->CreateGEP(ai.elementType, ai.basePtr,
+                        adj, "seed_elem");
+                }
             }
             auto v = e->codegen(ctx);
             if (!v) return nullptr;
@@ -2296,21 +2325,22 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
             if (member == "main") {
                 return dataPtr;
             }
-            if (member == "getint") {
-                auto fn = ctx.module->getOrInsertFunction("simula_text_getint",
-                    llvm::FunctionType::get(i64Ty, {ptrTy}, false));
-                return ctx.builder->CreateCall(fn, {dataPtr}, "getint");
-            }
-            if (member == "getreal") {
+            if (member == "getint" || member == "getreal" || member == "getfrac") {
+                // De-editing advances POS past the item, so sequential calls
+                // walk through the text. Falls back to scan-from-start when no
+                // position slot exists.
                 auto dblTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
-                auto fn = ctx.module->getOrInsertFunction("simula_text_getreal",
-                    llvm::FunctionType::get(dblTy, {ptrTy}, false));
-                return ctx.builder->CreateCall(fn, {dataPtr}, "getreal");
-            }
-            if (member == "getfrac") {
-                auto fn = ctx.module->getOrInsertFunction("simula_text_getfrac",
-                    llvm::FunctionType::get(i64Ty, {ptrTy}, false));
-                return ctx.builder->CreateCall(fn, {dataPtr}, "getfrac");
+                llvm::Type* retTy = (member == "getreal") ? (llvm::Type*)dblTy
+                                                          : (llvm::Type*)i64Ty;
+                if (posStorage) {
+                    auto fn = ctx.module->getOrInsertFunction(
+                        "simula_text_" + member + "_at",
+                        llvm::FunctionType::get(retTy, {ptrTy, ptrTy}, false));
+                    return ctx.builder->CreateCall(fn, {dataPtr, posStorage}, member);
+                }
+                auto fn = ctx.module->getOrInsertFunction("simula_text_" + member,
+                    llvm::FunctionType::get(retTy, {ptrTy}, false));
+                return ctx.builder->CreateCall(fn, {dataPtr}, member);
             }
             if (member == "constant") {
                 // Texts in this implementation are always writable
@@ -2904,6 +2934,39 @@ llvm::Value* ThisExpression::codegen(CodeGenContext& ctx) {
     return ctx.currentThis;
 }
 
+// Shared by IS/IN: test the object's class id against a set of ids, with a
+// runtime NONE guard (NONE IS/IN C is false, never a null dereference).
+static llvm::Value* classIdTest(CodeGenContext& ctx, llvm::Value* obj,
+                                const std::set<int>& ids, const char* label) {
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+    auto func = ctx.builder->GetInsertBlock()->getParent();
+
+    auto isNone = ctx.builder->CreateICmpEQ(
+        obj, llvm::ConstantPointerNull::get(ptrTy), "isin_none");
+    auto entryBB = ctx.builder->GetInsertBlock();
+    auto loadBB = llvm::BasicBlock::Create(*ctx.llvmContext, "isin_load", func);
+    auto contBB = llvm::BasicBlock::Create(*ctx.llvmContext, "isin_cont", func);
+    ctx.builder->CreateCondBr(isNone, contBB, loadBB);
+
+    ctx.builder->SetInsertPoint(loadBB);
+    auto classId = ctx.loadClassId(obj);
+    llvm::Value* result = ctx.builder->getFalse();
+    for (int id : ids) {
+        auto cmp = ctx.builder->CreateICmpEQ(classId,
+            llvm::ConstantInt::get(i64Ty, id), label);
+        result = ctx.builder->CreateOr(result, cmp, "isin_or");
+    }
+    auto loadEndBB = ctx.builder->GetInsertBlock();
+    ctx.builder->CreateBr(contBB);
+
+    ctx.builder->SetInsertPoint(contBB);
+    auto phi = ctx.builder->CreatePHI(ctx.builder->getInt1Ty(), 2, "isin_res");
+    phi->addIncoming(ctx.builder->getFalse(), entryBB);
+    phi->addIncoming(result, loadEndBB);
+    return phi;
+}
+
 llvm::Value* IsExpression::codegen(CodeGenContext& ctx) {
     auto obj = object->codegen(ctx);
     if (!obj) return nullptr;
@@ -2913,11 +2976,7 @@ llvm::Value* IsExpression::codegen(CodeGenContext& ctx) {
         (ctx.hadError = true, std::cerr) << "Error: unknown class '" << className << "' in IS expression\n";
         return nullptr;
     }
-
-    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
-    auto classId = ctx.loadClassId(obj);
-    return ctx.builder->CreateICmpEQ(classId,
-        llvm::ConstantInt::get(i64Ty, cit->second.classId), "is_check");
+    return classIdTest(ctx, obj, {cit->second.classId}, "is_check");
 }
 
 llvm::Value* InExpression::codegen(CodeGenContext& ctx) {
@@ -2930,17 +2989,7 @@ llvm::Value* InExpression::codegen(CodeGenContext& ctx) {
         (ctx.hadError = true, std::cerr) << "Error: unknown class '" << className << "' in IN expression\n";
         return nullptr;
     }
-
-    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
-    auto classId = ctx.loadClassId(obj);
-
-    llvm::Value* result = ctx.builder->getFalse();
-    for (int id : ids) {
-        auto cmp = ctx.builder->CreateICmpEQ(classId,
-            llvm::ConstantInt::get(i64Ty, id), "in_cmp");
-        result = ctx.builder->CreateOr(result, cmp, "in_or");
-    }
-    return result;
+    return classIdTest(ctx, obj, ids, "in_cmp");
 }
 
 // ---- Conditional expression ----
@@ -3781,15 +3830,20 @@ llvm::Value* ActivateStatement::codegen(CodeGenContext& ctx) {
             llvm::ConstantInt::get(i64Ty, mode == BEFORE ? 1 : 0), re});
     }
 
+    if (mode == DIRECT) {
+        // Direct activation: the activated process runs immediately; the
+        // activator continues after it yields (exact from a process, all
+        // current-time events drain when activating from the main program).
+        auto fnNow = ctx.module->getOrInsertFunction("simula_sim_activate_now",
+            llvm::FunctionType::get(voidTy, {ptrTy, i64Ty}, false));
+        return ctx.builder->CreateCall(fnNow, {obj, re});
+    }
+
     auto timeFn = ctx.module->getOrInsertFunction("simula_sim_time",
         llvm::FunctionType::get(doubleTy, {}, false));
     llvm::Value* t;
     bool pr = prior;
-    if (mode == DIRECT) {
-        // Direct activation: now, ranked ahead of other notices at this time.
-        t = ctx.builder->CreateCall(timeFn, {}, "now");
-        pr = true;
-    } else {
+    {
         auto e = timeExpr->codegen(ctx);
         if (!e) return nullptr;
         if (e->getType()->isIntegerTy())
