@@ -1468,40 +1468,153 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         return llvm::ConstantInt::get(i64Ty, 0);
     }
 
-    // UNIFORM(lo, hi, seed) — random real. Uses C rand().
-    if (name == "uniform") {
-        auto lo = args.size() > 0 ? args[0]->codegen(ctx) : nullptr;
-        auto hi = args.size() > 1 ? args[1]->codegen(ctx) : nullptr;
-        if (!lo || !hi) return llvm::ConstantFP::get(doubleTy, 0.0);
-        auto randFunc = ctx.module->getOrInsertFunction("rand",
-            llvm::FunctionType::get(llvm::Type::getInt32Ty(*ctx.llvmContext), false));
-        auto rval = ctx.builder->CreateCall(randFunc, {}, "rval");
-        auto rvalD = ctx.builder->CreateSIToFP(rval, doubleTy, "rvald");
-        auto maxD = llvm::ConstantFP::get(doubleTy, 2147483647.0);
-        auto norm = ctx.builder->CreateFDiv(rvalD, maxD, "norm");
-        auto loD = lo->getType()->isDoubleTy() ? lo : ctx.builder->CreateSIToFP(lo, doubleTy);
-        auto hiD = hi->getType()->isDoubleTy() ? hi : ctx.builder->CreateSIToFP(hi, doubleTy);
-        auto range = ctx.builder->CreateFSub(hiD, loD, "range");
-        return ctx.builder->CreateFAdd(loD, ctx.builder->CreateFMul(norm, range), "uniform");
-    }
+    // Random drawing procedures (Simula 67 ch. 9.9). The INTEGER seed actual
+    // is taken by reference and advanced on every basic draw.
+    {
+        auto ptrTyR = llvm::PointerType::getUnqual(*ctx.llvmContext);
+        auto toD = [&](llvm::Value* v) {
+            return v->getType()->isDoubleTy() ? v
+                 : ctx.builder->CreateSIToFP(v, doubleTy, "tofp");
+        };
+        auto toI = [&](llvm::Value* v) {
+            return v->getType()->isDoubleTy() ? simulaRealToInt(ctx, v, i64Ty) : v;
+        };
+        // Address of the seed variable; rvalue seeds go through a temp.
+        auto seedPtr = [&](Expression* e) -> llvm::Value* {
+            if (auto* id = dynamic_cast<Identifier*>(e)) {
+                auto [p, ty] = ctx.getVarPtr(id->name);
+                if (p) return p;
+            }
+            auto v = e->codegen(ctx);
+            if (!v) return nullptr;
+            auto fn0 = ctx.builder->GetInsertBlock()->getParent();
+            auto tmp = ctx.createEntryBlockAlloca(fn0, "seed_tmp", i64Ty);
+            ctx.builder->CreateStore(toI(v), tmp);
+            return tmp;
+        };
+        // REAL ARRAY actual: (data ptr, lo, size) from local/global array info.
+        struct ArrArg { llvm::Value* base; long long lo; long long n; };
+        auto arrArg = [&](Expression* e, ArrArg& out) -> bool {
+            auto* id = dynamic_cast<Identifier*>(e);
+            if (!id) return false;
+            auto it = ctx.arrays.find(id->name);
+            if (it == ctx.arrays.end()) return false;
+            out = {it->second.basePtr, it->second.lowerBound, it->second.size};
+            return true;
+        };
 
-    // RANDINT(low, high, seed) — random integer. Uses C rand() ignoring seed.
-    if (name == "randint") {
-        auto lo = args[0]->codegen(ctx);
-        auto hi = args[1]->codegen(ctx);
-        if (!lo || !hi) return nullptr;
-        auto randFunc = ctx.module->getOrInsertFunction("rand",
-            llvm::FunctionType::get(llvm::Type::getInt32Ty(*ctx.llvmContext), false));
-        auto rval = ctx.builder->CreateCall(randFunc, {}, "rval");
-        auto rval64 = ctx.builder->CreateSExt(rval, i64Ty, "rval64");
-        auto range = ctx.builder->CreateAdd(
-            ctx.builder->CreateSub(hi, lo, "range"), llvm::ConstantInt::get(i64Ty, 1), "range1");
-        auto modval = ctx.builder->CreateSRem(rval64, range, "modval");
-        // Make positive
-        auto absmod = ctx.builder->CreateSelect(
-            ctx.builder->CreateICmpSLT(modval, llvm::ConstantInt::get(i64Ty, 0)),
-            ctx.builder->CreateNeg(modval), modval, "absmod");
-        return ctx.builder->CreateAdd(lo, absmod, "randint");
+        if (name == "uniform" && args.size() == 3) {
+            auto a = args[0]->codegen(ctx); auto b = args[1]->codegen(ctx);
+            auto u = seedPtr(args[2].get());
+            if (!a || !b || !u) return nullptr;
+            auto fn = ctx.module->getOrInsertFunction("simula_uniform",
+                llvm::FunctionType::get(doubleTy, {doubleTy, doubleTy, ptrTyR}, false));
+            return ctx.builder->CreateCall(fn, {toD(a), toD(b), u}, "uniform");
+        }
+        if (name == "randint" && args.size() == 3) {
+            auto a = args[0]->codegen(ctx); auto b = args[1]->codegen(ctx);
+            auto u = seedPtr(args[2].get());
+            if (!a || !b || !u) return nullptr;
+            auto fn = ctx.module->getOrInsertFunction("simula_randint",
+                llvm::FunctionType::get(i64Ty, {i64Ty, i64Ty, ptrTyR}, false));
+            return ctx.builder->CreateCall(fn, {toI(a), toI(b), u}, "randint");
+        }
+        if (name == "normal" && args.size() == 3) {
+            auto m = args[0]->codegen(ctx); auto s = args[1]->codegen(ctx);
+            auto u = seedPtr(args[2].get());
+            if (!m || !s || !u) return nullptr;
+            auto fn = ctx.module->getOrInsertFunction("simula_normal",
+                llvm::FunctionType::get(doubleTy, {doubleTy, doubleTy, ptrTyR}, false));
+            return ctx.builder->CreateCall(fn, {toD(m), toD(s), u}, "normal");
+        }
+        if (name == "negexp" && args.size() == 2) {
+            auto l = args[0]->codegen(ctx);
+            auto u = seedPtr(args[1].get());
+            if (!l || !u) return nullptr;
+            auto fn = ctx.module->getOrInsertFunction("simula_negexp",
+                llvm::FunctionType::get(doubleTy, {doubleTy, ptrTyR}, false));
+            return ctx.builder->CreateCall(fn, {toD(l), u}, "negexp");
+        }
+        if (name == "poisson" && args.size() == 2) {
+            auto m = args[0]->codegen(ctx);
+            auto u = seedPtr(args[1].get());
+            if (!m || !u) return nullptr;
+            auto fn = ctx.module->getOrInsertFunction("simula_poisson",
+                llvm::FunctionType::get(i64Ty, {doubleTy, ptrTyR}, false));
+            return ctx.builder->CreateCall(fn, {toD(m), u}, "poisson");
+        }
+        if (name == "erlang" && args.size() == 3) {
+            auto a = args[0]->codegen(ctx); auto b = args[1]->codegen(ctx);
+            auto u = seedPtr(args[2].get());
+            if (!a || !b || !u) return nullptr;
+            auto fn = ctx.module->getOrInsertFunction("simula_erlang",
+                llvm::FunctionType::get(doubleTy, {doubleTy, doubleTy, ptrTyR}, false));
+            return ctx.builder->CreateCall(fn, {toD(a), toD(b), u}, "erlang");
+        }
+        if (name == "draw" && args.size() == 2) {
+            auto p = args[0]->codegen(ctx);
+            auto u = seedPtr(args[1].get());
+            if (!p || !u) return nullptr;
+            auto fn = ctx.module->getOrInsertFunction("simula_draw",
+                llvm::FunctionType::get(i64Ty, {doubleTy, ptrTyR}, false));
+            auto r = ctx.builder->CreateCall(fn, {toD(p), u}, "draw");
+            return ctx.builder->CreateICmpNE(r,
+                llvm::ConstantInt::get(i64Ty, 0), "draw_b");
+        }
+        if (name == "discrete" && args.size() == 2) {
+            ArrArg A;
+            auto u = seedPtr(args[1].get());
+            if (!arrArg(args[0].get(), A) || !u) {
+                (ctx.hadError = true, std::cerr) << "Error: DISCRETE needs a REAL ARRAY variable\n";
+                return nullptr;
+            }
+            auto fn = ctx.module->getOrInsertFunction("simula_discrete",
+                llvm::FunctionType::get(i64Ty, {ptrTyR, i64Ty, i64Ty, ptrTyR}, false));
+            return ctx.builder->CreateCall(fn, {A.base,
+                llvm::ConstantInt::get(i64Ty, A.lo),
+                llvm::ConstantInt::get(i64Ty, A.n), u}, "discrete");
+        }
+        if (name == "linear" && args.size() == 3) {
+            ArrArg A, B;
+            auto u = seedPtr(args[2].get());
+            if (!arrArg(args[0].get(), A) || !arrArg(args[1].get(), B) || !u) {
+                (ctx.hadError = true, std::cerr) << "Error: LINEAR needs REAL ARRAY variables\n";
+                return nullptr;
+            }
+            auto fn = ctx.module->getOrInsertFunction("simula_linear",
+                llvm::FunctionType::get(doubleTy, {ptrTyR, ptrTyR, i64Ty, ptrTyR}, false));
+            return ctx.builder->CreateCall(fn, {A.base, B.base,
+                llvm::ConstantInt::get(i64Ty, A.n), u}, "linear");
+        }
+        if (name == "histd" && args.size() == 2) {
+            ArrArg A;
+            auto u = seedPtr(args[1].get());
+            if (!arrArg(args[0].get(), A) || !u) {
+                (ctx.hadError = true, std::cerr) << "Error: HISTD needs a REAL ARRAY variable\n";
+                return nullptr;
+            }
+            auto fn = ctx.module->getOrInsertFunction("simula_histd",
+                llvm::FunctionType::get(i64Ty, {ptrTyR, i64Ty, i64Ty, ptrTyR}, false));
+            return ctx.builder->CreateCall(fn, {A.base,
+                llvm::ConstantInt::get(i64Ty, A.lo),
+                llvm::ConstantInt::get(i64Ty, A.n), u}, "histd");
+        }
+        if (name == "histo" && args.size() == 4) {
+            ArrArg A, B;
+            if (!arrArg(args[0].get(), A) || !arrArg(args[1].get(), B)) {
+                (ctx.hadError = true, std::cerr) << "Error: HISTO needs REAL ARRAY variables\n";
+                return nullptr;
+            }
+            auto c = args[2]->codegen(ctx); auto w = args[3]->codegen(ctx);
+            if (!c || !w) return nullptr;
+            auto voidTyR = llvm::Type::getVoidTy(*ctx.llvmContext);
+            auto fn = ctx.module->getOrInsertFunction("simula_histo",
+                llvm::FunctionType::get(voidTyR,
+                    {ptrTyR, i64Ty, ptrTyR, i64Ty, doubleTy, doubleTy}, false));
+            return ctx.builder->CreateCall(fn, {A.base,
+                llvm::ConstantInt::get(i64Ty, A.n), B.base,
+                llvm::ConstantInt::get(i64Ty, B.n), toD(c), toD(w)});
+        }
     }
 
     if (name == "outchar") {

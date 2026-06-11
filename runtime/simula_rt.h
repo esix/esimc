@@ -46,6 +46,20 @@ void simula_outreal(double v, int64_t d, int64_t w);
 void simula_outfrac(int64_t v, int64_t d, int64_t w);
 int64_t simula_infrac(void);
 
+/* Random drawing procedures (seed passed by reference, advanced per draw) */
+int64_t simula_randint(int64_t a, int64_t b, int64_t* u);
+double simula_uniform(double a, double b, int64_t* u);
+double simula_normal(double m, double s, int64_t* u);
+double simula_negexp(double lambda, int64_t* u);
+int64_t simula_poisson(double m, int64_t* u);
+double simula_erlang(double a, double b, int64_t* u);
+int64_t simula_draw(double p, int64_t* u);
+int64_t simula_discrete(const double* a, int64_t lo, int64_t n, int64_t* u);
+double simula_linear(const double* a, const double* b, int64_t n, int64_t* u);
+int64_t simula_histd(const double* a, int64_t lo, int64_t n, int64_t* u);
+void simula_histo(double* a, int64_t an, const double* b, int64_t bn,
+                  double c, double w);
+
 /* TEXT editing / de-editing */
 int64_t simula_text_getint(const char* t);
 double simula_text_getreal(const char* t);

@@ -573,3 +573,119 @@ int64_t simula_infrac(void) {
     if (c != EOF) ungetc(c, stdin);
     return neg ? -v : v;
 }
+
+/* ================================================================
+ * Random drawing procedures (Simula 67 ch. 9.9)
+ * The INTEGER seed is passed by reference (call-by-name in source)
+ * and advanced on every basic draw, so streams are reproducible and
+ * independent per seed variable.
+ * ================================================================ */
+
+#include <math.h>
+
+/* Basic draw: 64-bit LCG (Knuth), uniform in (0,1). */
+static double simula_basicdraw(int64_t* u) {
+    uint64_t x = (uint64_t)*u;
+    if (x == 0) x = 0x9E3779B97F4A7C15ULL;
+    x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+    *u = (int64_t)x;
+    double v = (double)((x >> 11) & ((1ULL << 53) - 1)) / 9007199254740992.0;
+    return v > 0.0 ? v : 5e-324;
+}
+
+int64_t simula_randint(int64_t a, int64_t b, int64_t* u) {
+    double d = simula_basicdraw(u);
+    int64_t span = b - a + 1;
+    if (span <= 0) return a;
+    int64_t r = a + (int64_t)(d * (double)span);
+    return r > b ? b : r;
+}
+
+double simula_uniform(double a, double b, int64_t* u) {
+    return a + simula_basicdraw(u) * (b - a);
+}
+
+double simula_normal(double m, double s, int64_t* u) {
+    double u1 = simula_basicdraw(u);
+    double u2 = simula_basicdraw(u);
+    return m + s * sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+}
+
+double simula_negexp(double lambda, int64_t* u) {
+    if (lambda <= 0.0) return 0.0;
+    return -log(simula_basicdraw(u)) / lambda;
+}
+
+int64_t simula_poisson(double m, int64_t* u) {
+    if (m <= 0.0) return 0;
+    double limit = exp(-m), prod = simula_basicdraw(u);
+    int64_t n = 0;
+    while (prod >= limit) { n++; prod *= simula_basicdraw(u); }
+    return n;
+}
+
+/* ERLANG(a,b,U): mean 1/a, b phases (b need not be integral; the
+ * fractional phase contributes proportionally). */
+double simula_erlang(double a, double b, int64_t* u) {
+    if (a <= 0.0 || b <= 0.0) return 0.0;
+    int64_t k = (int64_t)b;
+    double frac = b - (double)k;
+    double sum = 0.0;
+    for (int64_t i = 0; i < k; i++)
+        sum -= log(simula_basicdraw(u));
+    if (frac > 0.0)
+        sum -= frac * log(simula_basicdraw(u));
+    return sum / (a * b);
+}
+
+int64_t simula_draw(double p, int64_t* u) {
+    return simula_basicdraw(u) < p ? 1 : 0;
+}
+
+/* DISCRETE(A,U): A(lo:hi) is a cumulative distribution; result is the
+ * smallest index i with A(i) > basic draw, or hi+1 if none. */
+int64_t simula_discrete(const double* a, int64_t lo, int64_t n, int64_t* u) {
+    double d = simula_basicdraw(u);
+    for (int64_t i = 0; i < n; i++)
+        if (a[i] > d) return lo + i;
+    return lo + n;
+}
+
+/* LINEAR(A,B,U): inverse linear interpolation. A = function values,
+ * B = nondecreasing cumulative probabilities (B(lo)=0, B(hi)=1). */
+double simula_linear(const double* a, const double* b, int64_t n, int64_t* u) {
+    double d = simula_basicdraw(u);
+    for (int64_t i = 1; i < n; i++) {
+        if (d <= b[i]) {
+            double db = b[i] - b[i - 1];
+            if (db <= 0.0) return a[i];
+            return a[i - 1] + (a[i] - a[i - 1]) * (d - b[i - 1]) / db;
+        }
+    }
+    return n > 0 ? a[n - 1] : 0.0;
+}
+
+/* HISTD(A,U): A(lo:hi) holds nonnegative frequencies; pick an index
+ * with probability proportional to its frequency. */
+int64_t simula_histd(const double* a, int64_t lo, int64_t n, int64_t* u) {
+    double total = 0.0;
+    for (int64_t i = 0; i < n; i++) total += a[i];
+    if (total <= 0.0) return lo;
+    double d = simula_basicdraw(u) * total;
+    double run = 0.0;
+    for (int64_t i = 0; i < n; i++) {
+        run += a[i];
+        if (d < run) return lo + i;
+    }
+    return lo + n - 1;
+}
+
+/* HISTO(A,B,c,w): histogram update. B(lo:hi) are ascending interval
+ * limits; add w to the A entry for the interval containing c
+ * (A needs one more element than B; the last catches c > all limits). */
+void simula_histo(double* a, int64_t an, const double* b, int64_t bn,
+                  double c, double w) {
+    int64_t i = 0;
+    while (i < bn && c > b[i]) i++;
+    if (i < an) a[i] += w;
+}
