@@ -31,6 +31,15 @@ int64_t simula_lastitem(void);
 int64_t simula_ipow(int64_t base, int64_t exp);
 void simula_outint(int64_t v, int64_t w);
 
+/* TEXT editing / de-editing */
+int64_t simula_text_getint(const char* t);
+double simula_text_getreal(const char* t);
+int64_t simula_text_getfrac(const char* t);
+void simula_text_putint(char* t, int64_t v);
+void simula_text_putfix(char* t, double r, int64_t d);
+void simula_text_putreal(char* t, double r, int64_t d);
+void simula_text_putfrac(char* t, int64_t v, int64_t d);
+
 /* Coroutine management */
 SimulaCoro* simula_coro_create(void);
 void simula_coro_start(SimulaCoro* coro, void (*func)(void*), void* arg);

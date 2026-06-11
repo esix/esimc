@@ -348,3 +348,111 @@ void simula_outint(int64_t v, int64_t w) {
     }
     printf("%*s", (int)w, buf);
 }
+
+/* ================================================================
+ * TEXT editing / de-editing procedures (Simula 67 ch. 8)
+ * ================================================================ */
+
+/* GETINT: interpret the text as an integer item (leading blanks allowed). */
+int64_t simula_text_getint(const char* t) {
+    if (t == NULL) return 0;
+    while (*t == ' ' || *t == '\t') t++;
+    return strtoll(t, NULL, 10);
+}
+
+/* GETREAL: interpret the text as a real item; accepts the Simula '&'
+ * exponent marker as well as 'e'/'E'. */
+double simula_text_getreal(const char* t) {
+    if (t == NULL) return 0.0;
+    char buf[64]; size_t j = 0;
+    for (const char* p = t; *p && j < 62; p++)
+        buf[j++] = (*p == '&') ? 'e' : *p;
+    buf[j] = '\0';
+    return strtod(buf, NULL);
+}
+
+/* GETFRAC: interpret as a grouped item — digits with embedded spaces and an
+ * optional decimal point; returns the integer formed by all the digits. */
+int64_t simula_text_getfrac(const char* t) {
+    if (t == NULL) return 0;
+    int64_t v = 0; int neg = 0; const char* p = t;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '-') { neg = 1; p++; } else if (*p == '+') p++;
+    for (; *p; p++) {
+        if (*p >= '0' && *p <= '9') v = v * 10 + (*p - '0');
+        else if (*p == ' ' || *p == '.') continue;
+        else break;
+    }
+    return neg ? -v : v;
+}
+
+/* Right-justify `src` into the full frame of `t` (blank fill); if it does
+ * not fit, fill the frame with asterisks (standard editing overflow rule). */
+static void simula_edit_into(char* t, const char* src) {
+    size_t flen = strlen(t);
+    size_t slen = strlen(src);
+    if (slen > flen) {
+        memset(t, '*', flen);
+        return;
+    }
+    memset(t, ' ', flen - slen);
+    memcpy(t + (flen - slen), src, slen);
+}
+
+/* PUTINT: edit v right-justified into the whole frame of t. */
+void simula_text_putint(char* t, int64_t v) {
+    if (t == NULL) return;
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lld", (long long)v);
+    simula_edit_into(t, buf);
+}
+
+/* PUTFIX: fixed-point with d digits after the point. */
+void simula_text_putfix(char* t, double r, int64_t d) {
+    if (t == NULL) return;
+    char buf[64];
+    if (d < 0) d = 0;
+    snprintf(buf, sizeof buf, "%.*f", (int)d, r);
+    simula_edit_into(t, buf);
+}
+
+/* PUTREAL: scientific form with d significant digits, '&' exponent marker. */
+void simula_text_putreal(char* t, double r, int64_t d) {
+    if (t == NULL) return;
+    char buf[64];
+    int prec = (int)(d > 0 ? d - 1 : 0);
+    snprintf(buf, sizeof buf, "%.*e", prec, r);
+    for (char* p = buf; *p; p++)
+        if (*p == 'e' || *p == 'E') *p = '&';
+    simula_edit_into(t, buf);
+}
+
+/* PUTFRAC: grouped item — digit groups of three separated by blanks, the
+ * last d digits after a decimal point. E.g. v=1234567, d=2 -> "12 345.67". */
+void simula_text_putfrac(char* t, int64_t v, int64_t d) {
+    if (t == NULL) return;
+    char digits[32];
+    int neg = v < 0;
+    unsigned long long uv = neg ? (unsigned long long)(-v) : (unsigned long long)v;
+    int n = snprintf(digits, sizeof digits, "%llu", uv);
+    if (d < 0) d = 0;
+    /* Pad with leading zeros so there are more than d digits */
+    while (n <= (int)d && n < 30) {
+        memmove(digits + 1, digits, (size_t)n + 1);
+        digits[0] = '0';
+        n++;
+    }
+    int intDigits = n - (int)d;
+    char out[64]; int j = 0;
+    if (neg) out[j++] = '-';
+    for (int i = 0; i < intDigits && j < 60; i++) {
+        if (i > 0 && (intDigits - i) % 3 == 0) out[j++] = ' ';
+        out[j++] = digits[i];
+    }
+    if (d > 0 && j < 60) {
+        out[j++] = '.';
+        for (int i = intDigits; i < n && j < 62; i++) out[j++] = digits[i];
+    }
+    out[j] = '\0';
+    simula_edit_into(t, out);
+}

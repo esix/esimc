@@ -1989,6 +1989,29 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
             if (member == "main") {
                 return dataPtr;
             }
+            if (member == "getint") {
+                auto fn = ctx.module->getOrInsertFunction("simula_text_getint",
+                    llvm::FunctionType::get(i64Ty, {ptrTy}, false));
+                return ctx.builder->CreateCall(fn, {dataPtr}, "getint");
+            }
+            if (member == "getreal") {
+                auto dblTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
+                auto fn = ctx.module->getOrInsertFunction("simula_text_getreal",
+                    llvm::FunctionType::get(dblTy, {ptrTy}, false));
+                return ctx.builder->CreateCall(fn, {dataPtr}, "getreal");
+            }
+            if (member == "getfrac") {
+                auto fn = ctx.module->getOrInsertFunction("simula_text_getfrac",
+                    llvm::FunctionType::get(i64Ty, {ptrTy}, false));
+                return ctx.builder->CreateCall(fn, {dataPtr}, "getfrac");
+            }
+            if (member == "constant") {
+                // Texts in this implementation are always writable
+                return ctx.builder->getFalse();
+            }
+            if (member == "start") {
+                return llvm::ConstantInt::get(i64Ty, 1);
+            }
             (ctx.hadError = true, std::cerr) << "Error: unknown TEXT member '." << member << "'\n";
             return nullptr;
         }
@@ -2227,6 +2250,40 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
             }
             if (method == "strip") {
                 return ctx.builder->CreateCall(ctx.textStripFunc, {dataPtr}, "stripped");
+            }
+            if (method == "putint" && args.size() == 1) {
+                auto v = args[0]->codegen(ctx);
+                if (!v) return nullptr;
+                if (v->getType()->isDoubleTy()) v = simulaRealToInt(ctx, v, i64Ty);
+                auto voidTy = llvm::Type::getVoidTy(*ctx.llvmContext);
+                auto fn = ctx.module->getOrInsertFunction("simula_text_putint",
+                    llvm::FunctionType::get(voidTy, {ptrTy, i64Ty}, false));
+                return ctx.builder->CreateCall(fn, {dataPtr, v});
+            }
+            if ((method == "putfix" || method == "putreal") && args.size() == 2) {
+                auto dblTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
+                auto r = args[0]->codegen(ctx);
+                auto d = args[1]->codegen(ctx);
+                if (!r || !d) return nullptr;
+                if (r->getType()->isIntegerTy())
+                    r = ctx.builder->CreateSIToFP(r, dblTy, "tofp");
+                if (d->getType()->isDoubleTy()) d = simulaRealToInt(ctx, d, i64Ty);
+                auto voidTy = llvm::Type::getVoidTy(*ctx.llvmContext);
+                auto fn = ctx.module->getOrInsertFunction(
+                    method == "putfix" ? "simula_text_putfix" : "simula_text_putreal",
+                    llvm::FunctionType::get(voidTy, {ptrTy, dblTy, i64Ty}, false));
+                return ctx.builder->CreateCall(fn, {dataPtr, r, d});
+            }
+            if (method == "putfrac" && args.size() == 2) {
+                auto v = args[0]->codegen(ctx);
+                auto d = args[1]->codegen(ctx);
+                if (!v || !d) return nullptr;
+                if (v->getType()->isDoubleTy()) v = simulaRealToInt(ctx, v, i64Ty);
+                if (d->getType()->isDoubleTy()) d = simulaRealToInt(ctx, d, i64Ty);
+                auto voidTy = llvm::Type::getVoidTy(*ctx.llvmContext);
+                auto fn = ctx.module->getOrInsertFunction("simula_text_putfrac",
+                    llvm::FunctionType::get(voidTy, {ptrTy, i64Ty, i64Ty}, false));
+                return ctx.builder->CreateCall(fn, {dataPtr, v, d});
             }
             (ctx.hadError = true, std::cerr) << "Error: unknown TEXT method '." << method << "'\n";
             return nullptr;
