@@ -114,6 +114,11 @@ public:
     // SWITCH declarations: name -> ordered list of label names
     std::map<std::string, std::vector<std::string>> switches;
 
+    // Active INSPECT connections enclosing the current code (outermost first).
+    // Identifier lookup falls back to these so nested INSPECT bodies still see
+    // the outer connected object's attributes.
+    std::vector<std::pair<llvm::Value*, std::string>> inspectStack;
+
     // REF type info: variable name -> class name
     std::map<std::string, std::string> refTypes;
 
@@ -174,6 +179,8 @@ public:
     llvm::Type* getFieldLLVMType(const std::string& className, const std::string& fieldName);
     std::string resolveRefType(const std::string& varName);
     std::set<int> getClassIdSet(const std::string& className);
+    // IDs of className and every class derived from it (for IN / WHEN matching)
+    std::set<int> getDescendantIdSet(const std::string& className);
 
     // Label helpers
     llvm::BasicBlock* getOrCreateLabel(const std::string& name);

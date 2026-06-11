@@ -779,13 +779,20 @@ inspect_stmt
         delete $3;
       }
     | T_INSPECT expr when_clauses T_OTHERWISE statement {
-        $$ = new InspectStatement(ExprPtr($2), std::move(*$3), StmtPtr($5));
+        $$ = new InspectStatement(ExprPtr($2), std::move(*$3), nullptr, StmtPtr($5));
         delete $3;
       }
     | T_INSPECT expr T_DO statement {
-        /* INSPECT ref DO stmt — execute stmt with ref in scope */
+        /* INSPECT ref DO stmt — connected statement, skipped when ref is NONE */
         auto clauses = new std::vector<InspectStatement::WhenClause>();
         $$ = new InspectStatement(ExprPtr($2), std::move(*clauses), StmtPtr($4));
+        delete clauses;
+      }
+    | T_INSPECT expr T_DO statement T_OTHERWISE statement {
+        /* OTHERWISE runs (unconnected) when ref is NONE */
+        auto clauses = new std::vector<InspectStatement::WhenClause>();
+        $$ = new InspectStatement(ExprPtr($2), std::move(*clauses), StmtPtr($4),
+                                  StmtPtr($6));
         delete clauses;
       }
     ;

@@ -245,6 +245,17 @@ std::pair<llvm::Value*, llvm::Type*> CodeGenContext::getVarPtr(const std::string
             return {gep, fieldTy};
         }
     }
+    // Nested INSPECT: outer connected objects (innermost first)
+    for (auto it = inspectStack.rbegin(); it != inspectStack.rend(); ++it) {
+        if (it->first == currentThis) continue;
+        int idx = getFieldIndex(it->second, name);
+        if (idx >= 0) {
+            auto& ci = classes[it->second];
+            auto gep = builder->CreateStructGEP(ci.structType, it->first, idx, name + "_fptr");
+            auto fieldTy = ci.structType->getElementType(idx);
+            return {gep, fieldTy};
+        }
+    }
     // Check global variables (from outermost block)
     auto git = globals.find(name);
     if (git != globals.end()) {
@@ -317,6 +328,22 @@ std::set<int> CodeGenContext::getClassIdSet(const std::string& className) {
         ids.insert(it->second.classId);
         if (it->second.parentName.empty()) break;
         it = classes.find(it->second.parentName);
+    }
+    return ids;
+}
+
+std::set<int> CodeGenContext::getDescendantIdSet(const std::string& className) {
+    std::set<int> ids;
+    if (!classes.count(className)) return ids;
+    // A class is included if walking its prefix chain reaches className.
+    for (auto& [name, info] : classes) {
+        std::string cur = name;
+        while (!cur.empty()) {
+            if (cur == className) { ids.insert(info.classId); break; }
+            auto it = classes.find(cur);
+            if (it == classes.end()) break;
+            cur = it->second.parentName;
+        }
     }
     return ids;
 }
@@ -575,6 +602,18 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
         if (idx >= 0) {
             auto& ci = ctx.classes[ctx.methodThisClassName];
             auto gep = ctx.builder->CreateStructGEP(ci.structType, ctx.methodThis, idx, name);
+            auto fieldTy = ci.structType->getElementType(idx);
+            return ctx.builder->CreateLoad(fieldTy, gep, name);
+        }
+    }
+
+    // Nested INSPECT: outer connected objects (innermost first)
+    for (auto sit = ctx.inspectStack.rbegin(); sit != ctx.inspectStack.rend(); ++sit) {
+        if (sit->first == ctx.currentThis) continue;
+        int idx = ctx.getFieldIndex(sit->second, name);
+        if (idx >= 0) {
+            auto& ci = ctx.classes[sit->second];
+            auto gep = ctx.builder->CreateStructGEP(ci.structType, sit->first, idx, name);
             auto fieldTy = ci.structType->getElementType(idx);
             return ctx.builder->CreateLoad(fieldTy, gep, name);
         }
@@ -2432,7 +2471,8 @@ llvm::Value* InExpression::codegen(CodeGenContext& ctx) {
     auto obj = object->codegen(ctx);
     if (!obj) return nullptr;
 
-    auto ids = ctx.getClassIdSet(className);
+    // X IN C is true when X's class is C or any class prefixed by C.
+    auto ids = ctx.getDescendantIdSet(className);
     if (ids.empty()) {
         (ctx.hadError = true, std::cerr) << "Error: unknown class '" << className << "' in IN expression\n";
         return nullptr;
@@ -4487,6 +4527,23 @@ llvm::Value* InspectStatement::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // The inspected object may be a field of the enclosing connected/class
+    // scope (e.g. INSPECT OUTER DO INSPECT INNERFIELD DO ...); resolve its
+    // declared REF class through the current class chain too.
+    if (inspectClass.empty()) {
+        if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
+            std::string sc = ctx.currentClassName;
+            while (!sc.empty() && inspectClass.empty()) {
+                auto cit = ctx.classes.find(sc);
+                if (cit == ctx.classes.end()) break;
+                for (auto& fi : cit->second.fields)
+                    if (fi.name == ident->name && !fi.refClassName.empty())
+                        { inspectClass = fi.refClassName; break; }
+                sc = cit->second.parentName;
+            }
+        }
+    }
+
     auto func = ctx.builder->GetInsertBlock()->getParent();
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
     auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
@@ -4495,65 +4552,98 @@ llvm::Value* InspectStatement::codegen(CodeGenContext& ctx) {
     auto savedThis = ctx.currentThis;
     auto savedClassName = ctx.currentClassName;
 
-    // INSPECT ref DO stmt (no WHEN clauses) — make fields accessible
-    if (whenClauses.empty() && otherwiseBody) {
-        if (!inspectClass.empty()) {
-            ctx.currentThis = obj;
-            ctx.currentClassName = inspectClass;
-        }
-        otherwiseBody->codegen(ctx);
+    // Connect: set THIS to the inspected object and remember the enclosing
+    // connection so nested INSPECT bodies can still reach outer attributes.
+    auto connect = [&](const std::string& cls) {
+        if (savedThis && !savedClassName.empty())
+            ctx.inspectStack.push_back({savedThis, savedClassName});
+        ctx.currentThis = obj;
+        ctx.currentClassName = cls;
+    };
+    auto disconnect = [&]() {
+        if (savedThis && !savedClassName.empty())
+            ctx.inspectStack.pop_back();
         ctx.currentThis = savedThis;
         ctx.currentClassName = savedClassName;
-        return nullptr;
-    }
+    };
 
-    // Load class ID for WHEN dispatch
-    auto classId = ctx.loadClassId(obj);
+    // INSPECT is a runtime NONE test: NONE skips the connected bodies and runs
+    // OTHERWISE (unconnected), per the Simula 67 connection statement rules.
+    auto isNone = ctx.builder->CreateICmpEQ(
+        obj, llvm::ConstantPointerNull::get(ptrTy), "inspect_none");
 
     auto mergeBB = llvm::BasicBlock::Create(*ctx.llvmContext, "inspect_end");
+    auto otherBB = otherwiseBody
+        ? llvm::BasicBlock::Create(*ctx.llvmContext, "inspect_otherwise")
+        : nullptr;
+    auto noneTarget = otherBB ? otherBB : mergeBB;
 
-    for (size_t i = 0; i < whenClauses.size(); i++) {
-        auto& wc = whenClauses[i];
-        auto cit = ctx.classes.find(wc.className);
-        if (cit == ctx.classes.end()) {
-            (ctx.hadError = true, std::cerr) << "Error: unknown class '" << wc.className << "' in WHEN clause\n";
-            continue;
+    // INSPECT ref DO stmt (no WHEN clauses)
+    if (whenClauses.empty()) {
+        auto bodyBB = llvm::BasicBlock::Create(*ctx.llvmContext, "inspect_do", func);
+        ctx.builder->CreateCondBr(isNone, noneTarget, bodyBB);
+        ctx.builder->SetInsertPoint(bodyBB);
+        if (doBody) {
+            if (!inspectClass.empty()) {
+                connect(inspectClass);
+                doBody->codegen(ctx);
+                disconnect();
+            } else {
+                doBody->codegen(ctx);
+            }
         }
-
-        auto cmpV = ctx.builder->CreateICmpEQ(classId,
-            llvm::ConstantInt::get(i64Ty, cit->second.classId), "when_cmp");
-
-        auto whenBB = llvm::BasicBlock::Create(*ctx.llvmContext, "when_" + wc.className, func);
-        auto nextBB = llvm::BasicBlock::Create(*ctx.llvmContext, "when_next");
-
-        ctx.builder->CreateCondBr(cmpV, whenBB, nextBB);
-
-        ctx.builder->SetInsertPoint(whenBB);
-        // Set THIS context for the WHEN body
-        ctx.currentThis = obj;
-        ctx.currentClassName = wc.className;
-        wc.body->codegen(ctx);
-        ctx.currentThis = savedThis;
-        ctx.currentClassName = savedClassName;
         if (!ctx.builder->GetInsertBlock()->getTerminator())
             ctx.builder->CreateBr(mergeBB);
+    } else {
+        // WHEN dispatch: guard against NONE before touching the class id.
+        auto dispatchBB = llvm::BasicBlock::Create(*ctx.llvmContext, "inspect_dispatch", func);
+        ctx.builder->CreateCondBr(isNone, noneTarget, dispatchBB);
+        ctx.builder->SetInsertPoint(dispatchBB);
+        auto classId = ctx.loadClassId(obj);
 
-        func->insert(func->end(), nextBB);
-        ctx.builder->SetInsertPoint(nextBB);
-    }
+        for (size_t i = 0; i < whenClauses.size(); i++) {
+            auto& wc = whenClauses[i];
+            // WHEN C matches when the object's class is C or a subclass of C.
+            auto ids = ctx.getDescendantIdSet(wc.className);
+            if (ids.empty()) {
+                (ctx.hadError = true, std::cerr) << "Error: unknown class '" << wc.className << "' in WHEN clause\n";
+                continue;
+            }
+            llvm::Value* cmpV = ctx.builder->getFalse();
+            for (int id : ids) {
+                auto c = ctx.builder->CreateICmpEQ(classId,
+                    llvm::ConstantInt::get(i64Ty, id), "when_cmp");
+                cmpV = ctx.builder->CreateOr(cmpV, c, "when_or");
+            }
 
-    // OTHERWISE
-    if (otherwiseBody) {
-        if (!inspectClass.empty()) {
-            ctx.currentThis = obj;
-            ctx.currentClassName = inspectClass;
+            auto whenBB = llvm::BasicBlock::Create(*ctx.llvmContext, "when_" + wc.className, func);
+            auto nextBB = llvm::BasicBlock::Create(*ctx.llvmContext, "when_next");
+
+            ctx.builder->CreateCondBr(cmpV, whenBB, nextBB);
+
+            ctx.builder->SetInsertPoint(whenBB);
+            connect(wc.className);
+            wc.body->codegen(ctx);
+            disconnect();
+            if (!ctx.builder->GetInsertBlock()->getTerminator())
+                ctx.builder->CreateBr(mergeBB);
+
+            func->insert(func->end(), nextBB);
+            ctx.builder->SetInsertPoint(nextBB);
         }
-        otherwiseBody->codegen(ctx);
-        ctx.currentThis = savedThis;
-        ctx.currentClassName = savedClassName;
+        // No WHEN matched: fall through to OTHERWISE (or merge).
+        if (!ctx.builder->GetInsertBlock()->getTerminator())
+            ctx.builder->CreateBr(noneTarget);
     }
-    if (!ctx.builder->GetInsertBlock()->getTerminator())
-        ctx.builder->CreateBr(mergeBB);
+
+    // OTHERWISE runs unconnected (the object may be NONE here).
+    if (otherBB) {
+        func->insert(func->end(), otherBB);
+        ctx.builder->SetInsertPoint(otherBB);
+        otherwiseBody->codegen(ctx);
+        if (!ctx.builder->GetInsertBlock()->getTerminator())
+            ctx.builder->CreateBr(mergeBB);
+    }
 
     func->insert(func->end(), mergeBB);
     ctx.builder->SetInsertPoint(mergeBB);

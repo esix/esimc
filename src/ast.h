@@ -478,10 +478,12 @@ public:
     };
     ExprPtr object;
     std::vector<WhenClause> whenClauses;
-    StmtPtr otherwiseBody;
-    InspectStatement(ExprPtr o, std::vector<WhenClause> w, StmtPtr ow = nullptr)
+    StmtPtr doBody;        // INSPECT e DO s — connected body (NONE skips it)
+    StmtPtr otherwiseBody; // OTHERWISE s — unconnected, runs on NONE / no match
+    InspectStatement(ExprPtr o, std::vector<WhenClause> w, StmtPtr db = nullptr,
+                     StmtPtr ow = nullptr)
         : object(std::move(o)), whenClauses(std::move(w)),
-          otherwiseBody(std::move(ow)) {}
+          doBody(std::move(db)), otherwiseBody(std::move(ow)) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
