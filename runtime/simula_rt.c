@@ -313,3 +313,38 @@ void simula_inclose(int64_t handle) {
     FILE* f = (FILE*)(intptr_t)handle;
     if (f != NULL) fclose(f);
 }
+
+/* ================================================================
+ * Numeric helpers
+ * ================================================================ */
+
+/* Exact integer exponentiation for INTEGER ** INTEGER.
+ * Negative exponents are a runtime error in Simula; we return 0
+ * (except 1**n and (-1)**n which stay exact). */
+int64_t simula_ipow(int64_t base, int64_t exp) {
+    if (exp < 0) {
+        if (base == 1) return 1;
+        if (base == -1) return (exp & 1) ? -1 : 1;
+        return 0;
+    }
+    int64_t result = 1;
+    while (exp > 0) {
+        if (exp & 1) result *= base;
+        base *= base;
+        exp >>= 1;
+    }
+    return result;
+}
+
+/* OUTINT with standard editing: if the number does not fit in the
+ * field, fill the field with asterisks. w <= 0 prints minimal width. */
+void simula_outint(int64_t v, int64_t w) {
+    char buf[32];
+    int n = snprintf(buf, sizeof buf, "%lld", (long long)v);
+    if (w <= 0) { fputs(buf, stdout); return; }
+    if (n > w) {
+        for (int64_t i = 0; i < w; i++) putchar('*');
+        return;
+    }
+    printf("%*s", (int)w, buf);
+}

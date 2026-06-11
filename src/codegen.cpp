@@ -689,8 +689,32 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
         return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), 0);
     }
 
+    // Environment constants (standard bare-identifier form)
+    {
+        auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+        auto doubleTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
+        if (name == "maxint")  return llvm::ConstantInt::get(i64Ty, INT64_MAX);
+        if (name == "minint")  return llvm::ConstantInt::get(i64Ty, INT64_MIN);
+        if (name == "maxreal") return llvm::ConstantFP::get(doubleTy, DBL_MAX);
+        if (name == "minreal") return llvm::ConstantFP::get(doubleTy, DBL_MIN);
+        if (name == "pi")      return llvm::ConstantFP::get(doubleTy, M_PI);
+    }
+
     (ctx.hadError = true, std::cerr) << "Error: unknown variable '" << name << "'\n";
     return nullptr;
+}
+
+// Implicit real-to-integer conversion: Simula rounds (ENTIER(r + 0.5)), unlike
+// C's truncation. Used at every assignment/parameter/array-store coercion site;
+// explicit ENTIER/TRUNCATE keep their own semantics.
+static llvm::Value* simulaRealToInt(CodeGenContext& ctx, llvm::Value* v,
+                                    llvm::Type* destTy) {
+    auto half = llvm::ConstantFP::get(v->getType(), 0.5);
+    auto shifted = ctx.builder->CreateFAdd(v, half, "rnd_shift");
+    auto floorF = llvm::Intrinsic::getOrInsertDeclaration(ctx.module.get(),
+        llvm::Intrinsic::floor, {v->getType()});
+    auto floored = ctx.builder->CreateCall(floorF, {shifted}, "rnd_floor");
+    return ctx.builder->CreateFPToSI(floored, destTy, "rnd_toint");
 }
 
 llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
@@ -739,9 +763,16 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
         return ctx.builder->CreateCall(ctx.textConcatFunc, {L, R}, "concat");
     }
 
-    // POWER: use pow() from libm
+    // POWER: integer**integer is exact integer exponentiation (i64); any real
+    // operand falls back to pow() from libm.
     if (op == POWER) {
         auto doubleTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
+        if (L->getType()->isIntegerTy(64) && R->getType()->isIntegerTy(64)) {
+            auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+            auto ipowFunc = ctx.module->getOrInsertFunction("simula_ipow",
+                llvm::FunctionType::get(i64Ty, {i64Ty, i64Ty}, false));
+            return ctx.builder->CreateCall(ipowFunc, {L, R}, "ipow");
+        }
         auto Lf = L, Rf = R;
         if (!Lf->getType()->isDoubleTy())
             Lf = ctx.builder->CreateSIToFP(L, doubleTy, "tofp");
@@ -970,17 +1001,22 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
     }
 
     if (name == "mod") {
-        // Simula 67: MOD(a,b) = a - b*ENTIER(a/b), always non-negative when b>0.
-        // C SRem truncates toward zero (can give negative result); add b to fix.
+        // Simula 67: MOD(a,b) = a - b*ENTIER(a/b) — floor-mod, result takes the
+        // divisor's sign. C SRem truncates toward zero; adjust by b whenever the
+        // remainder is nonzero and its sign differs from b's.
         if (args.size() < 2) return nullptr;
         auto a = args[0]->codegen(ctx);
         auto b = args[1]->codegen(ctx);
         if (!a || !b) return nullptr;
         auto rem = ctx.builder->CreateSRem(a, b, "srem");
         auto zero = llvm::ConstantInt::get(rem->getType(), 0);
-        auto isNeg = ctx.builder->CreateICmpSLT(rem, zero, "rem_neg");
+        auto remNeg = ctx.builder->CreateICmpSLT(rem, zero, "rem_neg");
+        auto bNeg = ctx.builder->CreateICmpSLT(b, zero, "b_neg");
+        auto signMismatch = ctx.builder->CreateICmpNE(remNeg, bNeg, "sign_mismatch");
+        auto remNonzero = ctx.builder->CreateICmpNE(rem, zero, "rem_nz");
+        auto needAdj = ctx.builder->CreateAnd(signMismatch, remNonzero, "need_adj");
         auto adj = ctx.builder->CreateAdd(rem, b, "rem_adj");
-        return ctx.builder->CreateSelect(isNeg, adj, rem, "mod");
+        return ctx.builder->CreateSelect(needAdj, adj, rem, "mod");
     }
 
     if (name == "entier") {
@@ -1180,13 +1216,20 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         if (args.empty()) return nullptr;
         auto val = args[0]->codegen(ctx);
         if (!val) return nullptr;
-        // return -1, 0, or 1
-        auto zero = llvm::ConstantInt::get(i64Ty, 0);
+        // return -1, 0, or 1 (integer result for both integer and real args)
         auto one = llvm::ConstantInt::get(i64Ty, 1);
         auto neg1 = llvm::ConstantInt::getSigned(i64Ty, -1);
-        auto isNeg = ctx.builder->CreateICmpSLT(val, zero, "isneg");
-        auto isPos = ctx.builder->CreateICmpSGT(val, zero, "ispos");
-        auto sel1 = ctx.builder->CreateSelect(isPos, one, zero, "sel1");
+        auto izero = llvm::ConstantInt::get(i64Ty, 0);
+        llvm::Value *isNeg, *isPos;
+        if (val->getType()->isDoubleTy()) {
+            auto fzero = llvm::ConstantFP::get(val->getType(), 0.0);
+            isNeg = ctx.builder->CreateFCmpOLT(val, fzero, "isneg");
+            isPos = ctx.builder->CreateFCmpOGT(val, fzero, "ispos");
+        } else {
+            isNeg = ctx.builder->CreateICmpSLT(val, izero, "isneg");
+            isPos = ctx.builder->CreateICmpSGT(val, izero, "ispos");
+        }
+        auto sel1 = ctx.builder->CreateSelect(isPos, one, izero, "sel1");
         return ctx.builder->CreateSelect(isNeg, neg1, sel1, "sign");
     }
 
@@ -1393,7 +1436,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                         if (v->getType()->isIntegerTy() && destTy->isDoubleTy())
                             v = ctx.builder->CreateSIToFP(v, destTy, "tofp");
                         else if (v->getType()->isDoubleTy() && destTy->isIntegerTy())
-                            v = ctx.builder->CreateFPToSI(v, destTy, "tosi");
+                            v = simulaRealToInt(ctx, v, destTy);
                         else if (v->getType()->isIntegerTy() && destTy->isIntegerTy()) {
                             if (v->getType()->getIntegerBitWidth() < destTy->getIntegerBitWidth())
                                 v = ctx.builder->CreateZExt(v, destTy);
@@ -1416,7 +1459,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         if (v->getType()->isIntegerTy() && destTy->isDoubleTy())
             return ctx.builder->CreateSIToFP(v, destTy, "tofp");
         if (v->getType()->isDoubleTy() && destTy->isIntegerTy())
-            return ctx.builder->CreateFPToSI(v, destTy, "tosi");
+            return simulaRealToInt(ctx, v, destTy);
         if (v->getType()->isIntegerTy() && destTy->isIntegerTy()) {
             if (v->getType()->getIntegerBitWidth() < destTy->getIntegerBitWidth())
                 return ctx.builder->CreateZExt(v, destTy);
@@ -1620,7 +1663,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                 if (expectedTy->isDoubleTy() && v->getType()->isIntegerTy())
                     v = ctx.builder->CreateSIToFP(v, expectedTy, "tofp");
                 else if (expectedTy->isIntegerTy(64) && v->getType()->isDoubleTy())
-                    v = ctx.builder->CreateFPToSI(v, expectedTy, "toint");
+                    v = simulaRealToInt(ctx, v, expectedTy);
                 else if (expectedTy->isIntegerTy() && v->getType()->isIntegerTy()) {
                     if (expectedTy->getIntegerBitWidth() > v->getType()->getIntegerBitWidth())
                         v = ctx.builder->CreateZExt(v, expectedTy, "zext");
@@ -1751,7 +1794,7 @@ llvm::Value* NewExpression::codegen(CodeGenContext& ctx) {
                     if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
                         val = ctx.builder->CreateSIToFP(val, destTy);
                     else if (destTy->isIntegerTy(64) && val->getType()->isDoubleTy())
-                        val = ctx.builder->CreateFPToSI(val, destTy);
+                        val = simulaRealToInt(ctx, val, destTy);
                 }
                 ctx.builder->CreateStore(val, fieldPtr);
             }
@@ -2258,7 +2301,7 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
                             if (v->getType()->isIntegerTy() && destTy->isDoubleTy())
                                 v = ctx.builder->CreateSIToFP(v, destTy, "tofp");
                             else if (v->getType()->isDoubleTy() && destTy->isIntegerTy())
-                                v = ctx.builder->CreateFPToSI(v, destTy, "tosi");
+                                v = simulaRealToInt(ctx, v, destTy);
                             else if (v->getType()->isIntegerTy() && destTy->isIntegerTy()) {
                                 if (v->getType()->getIntegerBitWidth() < destTy->getIntegerBitWidth())
                                     v = ctx.builder->CreateZExt(v, destTy);
@@ -2344,7 +2387,7 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
                 if (v->getType()->isIntegerTy() && destTy->isDoubleTy())
                     v = ctx.builder->CreateSIToFP(v, destTy, "tofp");
                 else if (v->getType()->isDoubleTy() && destTy->isIntegerTy())
-                    v = ctx.builder->CreateFPToSI(v, destTy, "tosi");
+                    v = simulaRealToInt(ctx, v, destTy);
                 else if (v->getType()->isIntegerTy() && destTy->isIntegerTy()) {
                     if (v->getType()->getIntegerBitWidth() < destTy->getIntegerBitWidth())
                         v = ctx.builder->CreateZExt(v, destTy);
@@ -2608,7 +2651,7 @@ llvm::Value* VarDeclaration::codegen(CodeGenContext& ctx) {
                         if (varTy->isDoubleTy() && val->getType()->isIntegerTy())
                             val = ctx.builder->CreateSIToFP(val, varTy);
                         else if (varTy->isIntegerTy(64) && val->getType()->isDoubleTy())
-                            val = ctx.builder->CreateFPToSI(val, varTy);
+                            val = simulaRealToInt(ctx, val, varTy);
                     }
                     ctx.builder->CreateStore(val, varPtr);
                 }
@@ -2638,7 +2681,7 @@ llvm::Value* VarDeclaration::codegen(CodeGenContext& ctx) {
                     if (ty->isDoubleTy() && val->getType()->isIntegerTy())
                         val = ctx.builder->CreateSIToFP(val, ty);
                     else if (ty->isIntegerTy(64) && val->getType()->isDoubleTy())
-                        val = ctx.builder->CreateFPToSI(val, ty);
+                        val = simulaRealToInt(ctx, val, ty);
                 }
                 ctx.builder->CreateStore(val, gv);
             }
@@ -2666,7 +2709,7 @@ llvm::Value* VarDeclaration::codegen(CodeGenContext& ctx) {
                 if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
                     val = ctx.builder->CreateSIToFP(val, destTy);
                 else if (destTy->isIntegerTy(64) && val->getType()->isDoubleTy())
-                    val = ctx.builder->CreateFPToSI(val, destTy);
+                    val = simulaRealToInt(ctx, val, destTy);
             }
             ctx.builder->CreateStore(val, alloca);
         }
@@ -2907,7 +2950,7 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
         if (info.elementType->isDoubleTy() && val->getType()->isIntegerTy())
             val = ctx.builder->CreateSIToFP(val, info.elementType);
         else if (info.elementType->isIntegerTy(64) && val->getType()->isDoubleTy())
-            val = ctx.builder->CreateFPToSI(val, info.elementType);
+            val = simulaRealToInt(ctx, val, info.elementType);
     }
 
     ctx.builder->CreateStore(val, gep);
@@ -2951,7 +2994,7 @@ llvm::Value* Assignment::codegen(CodeGenContext& ctx) {
             if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
                 val = ctx.builder->CreateSIToFP(val, destTy);
             else if (destTy->isIntegerTy(64) && val->getType()->isDoubleTy())
-                val = ctx.builder->CreateFPToSI(val, destTy);
+                val = simulaRealToInt(ctx, val, destTy);
         }
         ctx.builder->CreateStore(val, ctx.returnValueAlloca);
         return val;
@@ -2965,7 +3008,7 @@ llvm::Value* Assignment::codegen(CodeGenContext& ctx) {
             if (varTy->isDoubleTy() && val->getType()->isIntegerTy())
                 val = ctx.builder->CreateSIToFP(val, varTy);
             else if (varTy->isIntegerTy(64) && val->getType()->isDoubleTy())
-                val = ctx.builder->CreateFPToSI(val, varTy);
+                val = simulaRealToInt(ctx, val, varTy);
             else if (varTy->isIntegerTy(8) && val->getType()->isIntegerTy())
                 val = ctx.builder->CreateTrunc(val, varTy);
         }
@@ -3064,7 +3107,7 @@ llvm::Value* MemberAssignment::codegen(CodeGenContext& ctx) {
         if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
             val = ctx.builder->CreateSIToFP(val, destTy);
         else if (destTy->isIntegerTy(64) && val->getType()->isDoubleTy())
-            val = ctx.builder->CreateFPToSI(val, destTy);
+            val = simulaRealToInt(ctx, val, destTy);
     }
     ctx.builder->CreateStore(val, gep);
     return val;
@@ -3150,7 +3193,7 @@ llvm::Value* MemberArrayAssignment::codegen(CodeGenContext& ctx) {
         if (elemTy->isDoubleTy() && val->getType()->isIntegerTy())
             val = ctx.builder->CreateSIToFP(val, elemTy);
         else if (elemTy->isIntegerTy(64) && val->getType()->isDoubleTy())
-            val = ctx.builder->CreateFPToSI(val, elemTy);
+            val = simulaRealToInt(ctx, val, elemTy);
     }
     ctx.builder->CreateStore(val, gep);
     return val;
@@ -4572,15 +4615,28 @@ llvm::Value* CallStatement::codegen(CodeGenContext& ctx) {
 llvm::Value* OutIntStatement::codegen(CodeGenContext& ctx) {
     auto val = value->codegen(ctx);
     if (!val) return nullptr;
-    // OUTINT(i, w): right-justify in a field of width w. printf's "%*lld" treats
-    // the width as a minimum, so w==0 prints the number with no padding (matching
-    // the common Simula idiom OUTINT(i, 0)).
-    auto i32Ty = llvm::Type::getInt32Ty(*ctx.llvmContext);
-    llvm::Value* w = width ? width->codegen(ctx) : llvm::ConstantInt::get(i32Ty, 0);
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    // A REAL argument converts with Simula rounding; smaller ints widen. This
+    // also fixes ** results (double) being reinterpreted as integer bits.
+    if (val->getType()->isDoubleTy())
+        val = simulaRealToInt(ctx, val, i64Ty);
+    else if (val->getType()->isIntegerTy(1))
+        val = ctx.builder->CreateZExt(val, i64Ty, "widen");
+    else if (!val->getType()->isIntegerTy(64))
+        val = ctx.builder->CreateSExt(val, i64Ty, "widen");
+    // OUTINT(i, w): right-justify in a field of width w; the runtime fills the
+    // field with asterisks when the number doesn't fit (standard editing rule).
+    // w == 0 prints with no padding (common Simula idiom).
+    llvm::Value* w = width ? width->codegen(ctx) : llvm::ConstantInt::get(i64Ty, 0);
     if (!w) return nullptr;
-    auto widthI32 = ctx.builder->CreateTrunc(w, i32Ty, "width32");
-    auto fmt = ctx.builder->CreateGlobalString("%*lld", "intfmt");
-    return ctx.builder->CreateCall(ctx.printfFunc, {fmt, widthI32, val});
+    if (w->getType()->isDoubleTy())
+        w = simulaRealToInt(ctx, w, i64Ty);
+    else if (!w->getType()->isIntegerTy(64))
+        w = ctx.builder->CreateSExt(w, i64Ty, "widen");
+    auto voidTy = llvm::Type::getVoidTy(*ctx.llvmContext);
+    auto fn = ctx.module->getOrInsertFunction("simula_outint",
+        llvm::FunctionType::get(voidTy, {i64Ty, i64Ty}, false));
+    return ctx.builder->CreateCall(fn, {val, w});
 }
 
 llvm::Value* OutRealStatement::codegen(CodeGenContext& ctx) {

@@ -27,6 +27,10 @@ int64_t simula_text_eq(const char* a, const char* b);
  * (look-ahead; the next non-blank char is pushed back so a later read sees it). */
 int64_t simula_lastitem(void);
 
+/* Numeric helpers */
+int64_t simula_ipow(int64_t base, int64_t exp);
+void simula_outint(int64_t v, int64_t w);
+
 /* Coroutine management */
 SimulaCoro* simula_coro_create(void);
 void simula_coro_start(SimulaCoro* coro, void (*func)(void*), void* arg);

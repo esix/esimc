@@ -104,6 +104,20 @@
 [a-zA-Z_][a-zA-Z0-9_]*         { for (char* p = yytext; *p; p++) *p = tolower(*p);
                                   yylval.sval = strdup(yytext);
                                   return T_IDENT; }
+[0-9]+(\.[0-9]+)?(&&|&|[eE])[+-]?[0-9]+ {
+                                  /* Simula exponent forms: 1.5&6, 2&&10 (long
+                                     real), and the E spelling. Normalize the
+                                     exponent marker to 'e' for strtod. */
+                                  char buf[64]; size_t j = 0;
+                                  for (char* p = yytext; *p && j < 62; p++) {
+                                      if (*p == '&') {
+                                          if (j == 0 || buf[j-1] != 'e') buf[j++] = 'e';
+                                      } else if (*p == 'E') {
+                                          buf[j++] = 'e';
+                                      } else buf[j++] = *p;
+                                  }
+                                  buf[j] = 0;
+                                  yylval.dval = atof(buf); return T_REALLIT; }
 [0-9]+\.[0-9]+                  { yylval.dval = atof(yytext); return T_REALLIT; }
 [0-9]+                          { yylval.ival = atoll(yytext); return T_INTLIT; }
 \"([^"\\]|\\.)*\"               { yytext[yyleng-1] = '\0';
