@@ -191,22 +191,44 @@ static std::string preprocessExternals(const std::string& source,
 
 // Build the INFILE standard class as an AST (bypassing the lexer, since names
 // like LASTITEM/IMAGE/INIMAGE are reserved keywords and can't be declared in
-// Simula source). Backed by the inopen/inreadline/inclose runtime primitives.
+// Simula source). Backed by the inopen/inreadline/inclose/finint/finreal/
+// flastitem runtime primitives. Standard semantics: OPEN does not read;
+// the first INIMAGE loads line 1; reading past EOF sets ENDFILE.
 //
 //   CLASS INFILE(FILENAME); TEXT FILENAME;
 //   BEGIN
-//     INTEGER FH; TEXT IMAGE; BOOLEAN LASTITEM;
+//     INTEGER FH; TEXT IMAGE; BOOLEAN ENDFILE;
+//     PROCEDURE OPEN(BUF); TEXT BUF;
+//     BEGIN FH := INOPEN(FILENAME); IF FH = 0 THEN ENDFILE := TRUE; END;
 //     PROCEDURE INIMAGE;
 //     BEGIN IMAGE :- INREADLINE(FH, 132);
-//           IF IMAGE == NOTEXT THEN LASTITEM := TRUE; END;
-//     PROCEDURE OPEN(BUF); TEXT BUF; BEGIN FH := INOPEN(FILENAME); INIMAGE; END;
-//     TEXT PROCEDURE INTEXT(N); INTEGER N; BEGIN INTEXT :- IMAGE; INIMAGE; END;
+//           IF IMAGE == NOTEXT THEN ENDFILE := TRUE; END;
+//     INTEGER PROCEDURE ININT;    ININT  := FININT(FH);
+//     REAL    PROCEDURE INREAL;   INREAL := FINREAL(FH);
+//     BOOLEAN PROCEDURE LASTITEM; LASTITEM := FLASTITEM(FH);
+//     TEXT PROCEDURE INTEXT(N); INTEGER N;
+//     BEGIN IF N < IMAGE.LENGTH THEN INTEXT :- IMAGE.SUB(1, N)
+//                               ELSE INTEXT :- IMAGE;
+//           INIMAGE; END;
 //     PROCEDURE CLOSE; INCLOSE(FH);
 //   END;
 static StmtPtr buildInfileClass() {
     auto id = [](const std::string& n) -> ExprPtr {
         return ExprPtr(new Identifier(n));
     };
+    // OPEN body
+    StmtList openBody;
+    {
+        ExprList opArgs; opArgs.push_back(id("filename"));
+        openBody.push_back(StmtPtr(new Assignment(
+            "fh", ExprPtr(new ProcedureCall("inopen", std::move(opArgs))))));
+        auto cond = ExprPtr(new BinaryOp(BinaryOp::EQ, id("fh"),
+                                         ExprPtr(new IntegerLiteral(0))));
+        auto thenS = StmtPtr(new Assignment("endfile",
+                                            ExprPtr(new BooleanLiteral(true))));
+        openBody.push_back(StmtPtr(new IfStatement(std::move(cond),
+                                                   std::move(thenS))));
+    }
     // INIMAGE body
     StmtList inimageBody;
     {
@@ -217,24 +239,35 @@ static StmtPtr buildInfileClass() {
             "image", ExprPtr(new ProcedureCall("inreadline", std::move(rlArgs))))));
         auto cond = ExprPtr(new BinaryOp(BinaryOp::EQ, id("image"),
                                          ExprPtr(new NoneLiteral())));
-        auto thenS = StmtPtr(new Assignment("lastitem",
+        auto thenS = StmtPtr(new Assignment("endfile",
                                             ExprPtr(new BooleanLiteral(true))));
         inimageBody.push_back(StmtPtr(new IfStatement(std::move(cond),
                                                       std::move(thenS))));
     }
-    // OPEN body
-    StmtList openBody;
-    {
-        ExprList opArgs; opArgs.push_back(id("filename"));
-        openBody.push_back(StmtPtr(new Assignment(
-            "fh", ExprPtr(new ProcedureCall("inopen", std::move(opArgs))))));
-        openBody.push_back(StmtPtr(new ExprStatement(
-            ExprPtr(new ProcedureCall("inimage", ExprList())))));
-    }
+    // ININT / INREAL / LASTITEM bodies (single assignment each)
+    auto oneCallBody = [&](const char* retName, const char* prim) {
+        StmtList b;
+        ExprList a; a.push_back(ExprPtr(new Identifier("fh")));
+        b.push_back(StmtPtr(new Assignment(retName,
+            ExprPtr(new ProcedureCall(prim, std::move(a))))));
+        return b;
+    };
+    auto inintBody = oneCallBody("inint", "finint");
+    auto inrealBody = oneCallBody("inreal", "finreal");
+    auto lastitemBody = oneCallBody("lastitem", "flastitem");
     // INTEXT body
     StmtList intextBody;
     {
-        intextBody.push_back(StmtPtr(new RefAssignment("intext", id("image"))));
+        auto imageLen = ExprPtr(new MemberAccess(id("image"), "length"));
+        auto cond = ExprPtr(new BinaryOp(BinaryOp::LT, id("n"), std::move(imageLen)));
+        ExprList subArgs;
+        subArgs.push_back(ExprPtr(new IntegerLiteral(1)));
+        subArgs.push_back(id("n"));
+        auto thenS = StmtPtr(new RefAssignment("intext",
+            ExprPtr(new MethodCall(id("image"), "sub", std::move(subArgs)))));
+        auto elseS = StmtPtr(new RefAssignment("intext", id("image")));
+        intextBody.push_back(StmtPtr(new IfStatement(std::move(cond),
+            std::move(thenS), std::move(elseS))));
         intextBody.push_back(StmtPtr(new ExprStatement(
             ExprPtr(new ProcedureCall("inimage", ExprList())))));
     }
@@ -249,15 +282,21 @@ static StmtPtr buildInfileClass() {
     StmtList body;
     body.push_back(StmtPtr(new VarDeclaration(VarDeclaration::INTEGER, "fh")));
     body.push_back(StmtPtr(new VarDeclaration(VarDeclaration::TEXT, "image")));
-    body.push_back(StmtPtr(new VarDeclaration(VarDeclaration::BOOLEAN, "lastitem")));
-    body.push_back(StmtPtr(new ProcedureDecl("inimage", false, VarDeclaration::INTEGER,
-        {}, StmtPtr(new Block(std::move(inimageBody))))));
+    body.push_back(StmtPtr(new VarDeclaration(VarDeclaration::BOOLEAN, "endfile")));
     {
         std::vector<ParamSpec> ps; ParamSpec p; p.name = "buf"; p.type = VarDeclaration::TEXT;
         ps.push_back(p);
         body.push_back(StmtPtr(new ProcedureDecl("open", false, VarDeclaration::INTEGER,
             std::move(ps), StmtPtr(new Block(std::move(openBody))))));
     }
+    body.push_back(StmtPtr(new ProcedureDecl("inimage", false, VarDeclaration::INTEGER,
+        {}, StmtPtr(new Block(std::move(inimageBody))))));
+    body.push_back(StmtPtr(new ProcedureDecl("inint", true, VarDeclaration::INTEGER,
+        {}, StmtPtr(new Block(std::move(inintBody))))));
+    body.push_back(StmtPtr(new ProcedureDecl("inreal", true, VarDeclaration::REAL,
+        {}, StmtPtr(new Block(std::move(inrealBody))))));
+    body.push_back(StmtPtr(new ProcedureDecl("lastitem", true, VarDeclaration::BOOLEAN,
+        {}, StmtPtr(new Block(std::move(lastitemBody))))));
     {
         std::vector<ParamSpec> ps; ParamSpec p; p.name = "n"; p.type = VarDeclaration::INTEGER;
         ps.push_back(p);
@@ -272,15 +311,98 @@ static StmtPtr buildInfileClass() {
     return StmtPtr(new ClassDecl("infile", "", std::move(classParams), std::move(body)));
 }
 
-// If the source uses INFILE (and doesn't define its own), prepend the built-in
-// INFILE class to the program's outermost block.
+// Build the OUTFILE standard class as an AST, backed by outopen/fouttext/
+// foutint/foutimage/outclose runtime primitives.
+//
+//   CLASS OUTFILE(FILENAME); TEXT FILENAME;
+//   BEGIN
+//     INTEGER FH;
+//     PROCEDURE OPEN(BUF); TEXT BUF;        FH := OUTOPEN(FILENAME);
+//     PROCEDURE OUTTEXT(T); TEXT T;         FOUTTEXT(FH, T);
+//     PROCEDURE OUTINT(V, W); INTEGER V, W; FOUTINT(FH, V, W);
+//     PROCEDURE OUTIMAGE;                   FOUTIMAGE(FH);
+//     PROCEDURE CLOSE;                      OUTCLOSE(FH);
+//   END;
+static StmtPtr buildOutfileClass() {
+    auto id = [](const std::string& n) -> ExprPtr {
+        return ExprPtr(new Identifier(n));
+    };
+    StmtList openBody;
+    {
+        ExprList a; a.push_back(id("filename"));
+        openBody.push_back(StmtPtr(new Assignment(
+            "fh", ExprPtr(new ProcedureCall("outopen", std::move(a))))));
+    }
+    StmtList outtextBody;
+    {
+        ExprList a; a.push_back(id("fh")); a.push_back(id("t"));
+        outtextBody.push_back(StmtPtr(new ExprStatement(
+            ExprPtr(new ProcedureCall("fouttext", std::move(a))))));
+    }
+    StmtList outintBody;
+    {
+        ExprList a; a.push_back(id("fh")); a.push_back(id("v")); a.push_back(id("w"));
+        outintBody.push_back(StmtPtr(new ExprStatement(
+            ExprPtr(new ProcedureCall("foutint", std::move(a))))));
+    }
+    StmtList outimageBody;
+    {
+        ExprList a; a.push_back(id("fh"));
+        outimageBody.push_back(StmtPtr(new ExprStatement(
+            ExprPtr(new ProcedureCall("foutimage", std::move(a))))));
+    }
+    StmtList closeBody;
+    {
+        ExprList a; a.push_back(id("fh"));
+        closeBody.push_back(StmtPtr(new ExprStatement(
+            ExprPtr(new ProcedureCall("outclose", std::move(a))))));
+    }
+
+    StmtList body;
+    body.push_back(StmtPtr(new VarDeclaration(VarDeclaration::INTEGER, "fh")));
+    {
+        std::vector<ParamSpec> ps; ParamSpec p; p.name = "buf"; p.type = VarDeclaration::TEXT;
+        ps.push_back(p);
+        body.push_back(StmtPtr(new ProcedureDecl("open", false, VarDeclaration::INTEGER,
+            std::move(ps), StmtPtr(new Block(std::move(openBody))))));
+    }
+    {
+        std::vector<ParamSpec> ps; ParamSpec p; p.name = "t"; p.type = VarDeclaration::TEXT;
+        ps.push_back(p);
+        body.push_back(StmtPtr(new ProcedureDecl("outtext", false, VarDeclaration::INTEGER,
+            std::move(ps), StmtPtr(new Block(std::move(outtextBody))))));
+    }
+    {
+        std::vector<ParamSpec> ps;
+        ParamSpec p; p.name = "v"; p.type = VarDeclaration::INTEGER; ps.push_back(p);
+        ParamSpec q; q.name = "w"; q.type = VarDeclaration::INTEGER; ps.push_back(q);
+        body.push_back(StmtPtr(new ProcedureDecl("outint", false, VarDeclaration::INTEGER,
+            std::move(ps), StmtPtr(new Block(std::move(outintBody))))));
+    }
+    body.push_back(StmtPtr(new ProcedureDecl("outimage", false, VarDeclaration::INTEGER,
+        {}, StmtPtr(new Block(std::move(outimageBody))))));
+    body.push_back(StmtPtr(new ProcedureDecl("close", false, VarDeclaration::INTEGER,
+        {}, StmtPtr(new Block(std::move(closeBody))))));
+
+    std::vector<ParamSpec> classParams;
+    { ParamSpec p; p.name = "filename"; p.type = VarDeclaration::TEXT; classParams.push_back(p); }
+    return StmtPtr(new ClassDecl("outfile", "", std::move(classParams), std::move(body)));
+}
+
+// If the source uses INFILE/OUTFILE (and doesn't define its own), prepend the
+// built-in class to the program's outermost block.
 static void maybeInjectInfile(Program* prog, const std::string& source) {
     auto lc = toLower(source);
-    if (lc.find("infile") == std::string::npos) return;
-    if (lc.find("class infile") != std::string::npos) return;
     auto* blk = dynamic_cast<Block*>(prog->block.get());
     if (!blk) return;
-    blk->statements.insert(blk->statements.begin(), buildInfileClass());
+    if (lc.find("infile") != std::string::npos &&
+        lc.find("class infile") == std::string::npos) {
+        blk->statements.insert(blk->statements.begin(), buildInfileClass());
+    }
+    if (lc.find("outfile") != std::string::npos &&
+        lc.find("class outfile") == std::string::npos) {
+        blk->statements.insert(blk->statements.begin(), buildOutfileClass());
+    }
 }
 
 // SIMSET prelude source: defines LINK and HEAD doubly-linked-list classes.

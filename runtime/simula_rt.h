@@ -31,6 +31,21 @@ int64_t simula_lastitem(void);
 int64_t simula_ipow(int64_t base, int64_t exp);
 void simula_outint(int64_t v, int64_t w);
 
+/* File output (OUTFILE) and item-level file input */
+int64_t simula_outopen(const char* name);
+void simula_outclose(int64_t handle);
+void simula_file_outtext(int64_t handle, const char* t);
+void simula_file_outint(int64_t handle, int64_t v, int64_t w);
+void simula_file_outimage(int64_t handle);
+int64_t simula_file_inint(int64_t handle);
+double simula_file_inreal(int64_t handle);
+int64_t simula_file_lastitem(int64_t handle);
+
+/* SYSOUT/SYSIN editing-style I/O */
+void simula_outreal(double v, int64_t d, int64_t w);
+void simula_outfrac(int64_t v, int64_t d, int64_t w);
+int64_t simula_infrac(void);
+
 /* TEXT editing / de-editing */
 int64_t simula_text_getint(const char* t);
 double simula_text_getreal(const char* t);

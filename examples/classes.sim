@@ -4,9 +4,9 @@ BEGIN
         PROCEDURE show;
         BEGIN
             OutText("(");
-            OutReal(x, 1, 1);
+            OutFix(x, 1, 0);
             OutText(", ");
-            OutReal(y, 1, 1);
+            OutFix(y, 1, 0);
             OutText(")")
         END;
     END;
@@ -37,7 +37,7 @@ BEGIN
     OutImage;
 
     OutText("p.x = ");
-    OutReal(p.x, 1, 1);
+    OutFix(p.x, 1, 0);
     OutImage;
 
     IF cp IS ColorPoint THEN

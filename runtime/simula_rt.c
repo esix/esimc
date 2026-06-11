@@ -456,3 +456,120 @@ void simula_text_putfrac(char* t, int64_t v, int64_t d) {
     out[j] = '\0';
     simula_edit_into(t, out);
 }
+
+/* ================================================================
+ * File output (OUTFILE support) and item-level file input
+ * ================================================================ */
+
+int64_t simula_outopen(const char* name) {
+    if (name == NULL) return 0;
+    FILE* f = fopen(name, "w");
+    return (int64_t)(intptr_t)f;
+}
+
+void simula_outclose(int64_t handle) {
+    FILE* f = (FILE*)(intptr_t)handle;
+    if (f != NULL) fclose(f);
+}
+
+void simula_file_outtext(int64_t handle, const char* t) {
+    FILE* f = (FILE*)(intptr_t)handle;
+    if (f != NULL && t != NULL) fputs(t, f);
+}
+
+void simula_file_outint(int64_t handle, int64_t v, int64_t w) {
+    FILE* f = (FILE*)(intptr_t)handle;
+    if (f == NULL) return;
+    char buf[32];
+    int n = snprintf(buf, sizeof buf, "%lld", (long long)v);
+    if (w <= 0) { fputs(buf, f); return; }
+    if (n > w) { for (int64_t i = 0; i < w; i++) fputc('*', f); return; }
+    fprintf(f, "%*s", (int)w, buf);
+}
+
+void simula_file_outimage(int64_t handle) {
+    FILE* f = (FILE*)(intptr_t)handle;
+    if (f != NULL) fputc('\n', f);
+}
+
+/* Item-level input: skip whitespace, read an integer / real. */
+int64_t simula_file_inint(int64_t handle) {
+    FILE* f = (FILE*)(intptr_t)handle;
+    long long v = 0;
+    if (f != NULL) { if (fscanf(f, "%lld", &v) != 1) v = 0; }
+    return (int64_t)v;
+}
+
+double simula_file_inreal(int64_t handle) {
+    FILE* f = (FILE*)(intptr_t)handle;
+    double v = 0.0;
+    if (f != NULL) { if (fscanf(f, "%lf", &v) != 1) v = 0.0; }
+    return v;
+}
+
+/* Look-ahead: skip blanks; true when only EOF remains. */
+int64_t simula_file_lastitem(int64_t handle) {
+    FILE* f = (FILE*)(intptr_t)handle;
+    if (f == NULL) return 1;
+    int c;
+    while ((c = fgetc(f)) != EOF) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v')
+            continue;
+        ungetc(c, f);
+        return 0;
+    }
+    return 1;
+}
+
+/* ================================================================
+ * SYSOUT editing-style output and SYSIN INFRAC
+ * ================================================================ */
+
+/* OUTREAL(v, d, w): d significant digits, '&' exponent, width w
+ * (asterisk fill on overflow, like the editing procedures). */
+void simula_outreal(double v, int64_t d, int64_t w) {
+    char buf[64];
+    int prec = (int)(d > 0 ? d - 1 : 0);
+    snprintf(buf, sizeof buf, "%.*e", prec, v);
+    for (char* p = buf; *p; p++)
+        if (*p == 'e' || *p == 'E') *p = '&';
+    int n = (int)strlen(buf);
+    if (w <= 0) { fputs(buf, stdout); return; }
+    if (n > w) { for (int64_t i = 0; i < w; i++) putchar('*'); return; }
+    printf("%*s", (int)w, buf);
+}
+
+/* OUTFRAC(v, d, w): grouped item, like PUTFRAC, in a width-w field. */
+void simula_outfrac(int64_t v, int64_t d, int64_t w) {
+    char frame[64];
+    int width = (int)(w > 0 && w < 60 ? w : 0);
+    if (width == 0) {
+        /* No field: edit into a generous frame and print stripped */
+        memset(frame, ' ', 40); frame[40] = '\0';
+        simula_text_putfrac(frame, v, d);
+        char* p = frame; while (*p == ' ') p++;
+        fputs(p, stdout);
+        return;
+    }
+    memset(frame, ' ', (size_t)width); frame[width] = '\0';
+    simula_text_putfrac(frame, v, d);
+    fputs(frame, stdout);
+}
+
+/* INFRAC: read a grouped item from stdin (digits with embedded blanks
+ * and an optional decimal point). */
+int64_t simula_infrac(void) {
+    int c; int64_t v = 0; int neg = 0; int seen = 0;
+    while ((c = getchar()) != EOF &&
+           (c == ' ' || c == '\t' || c == '\n' || c == '\r')) ;
+    if (c == '-') { neg = 1; c = getchar(); }
+    else if (c == '+') c = getchar();
+    while (c != EOF) {
+        if (c >= '0' && c <= '9') { v = v * 10 + (c - '0'); seen = 1; }
+        else if ((c == ' ' || c == '.') && seen) { /* grouping */ }
+        else break;
+        c = getchar();
+    }
+    if (c != EOF) ungetc(c, stdin);
+    return neg ? -v : v;
+}
