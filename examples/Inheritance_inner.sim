@@ -1,0 +1,36 @@
+! INNER ordering: a 3-level prefix chain ROOT <- MID <- LEAF whose bodies
+! log construction phases. NEW LEAF must print, in order:
+!   Root-pre, Mid-pre, Leaf-body, Mid-post, Root-post
+BEGIN
+    CLASS ROOT;
+    BEGIN
+        OUTTEXT("Root-pre");
+        OUTIMAGE;
+        INNER;
+        OUTTEXT("Root-post");
+        OUTIMAGE;
+    END;
+
+    ROOT CLASS MID;
+    BEGIN
+        OUTTEXT("Mid-pre");
+        OUTIMAGE;
+        INNER;
+        OUTTEXT("Mid-post");
+        OUTIMAGE;
+    END;
+
+    MID CLASS LEAF;
+    BEGIN
+        OUTTEXT("Leaf-body");
+        OUTIMAGE;
+    END;
+
+    REF(LEAF) L;
+
+    OUTTEXT("Creating a LEAF:");
+    OUTIMAGE;
+    L :- NEW LEAF;
+    OUTTEXT("Done.");
+    OUTIMAGE;
+END

@@ -1,0 +1,45 @@
+! Binary search - search a sorted array for several keys;
+! Prints the found index or NOT FOUND for each key;
+BEGIN
+    INTEGER ARRAY A(1:11);
+    INTEGER ARRAY KEYS(1:6);
+    INTEGER I, K;
+
+    INTEGER PROCEDURE BINSEARCH(KEY); INTEGER KEY;
+    BEGIN
+        INTEGER LO, HI, MID, RESULT;
+        LO := 1; HI := 11; RESULT := -1;
+        WHILE LO <= HI AND RESULT = -1 DO BEGIN
+            MID := (LO + HI) // 2;
+            IF A(MID) = KEY THEN
+                RESULT := MID
+            ELSE IF A(MID) < KEY THEN
+                LO := MID + 1
+            ELSE
+                HI := MID - 1;
+        END;
+        BINSEARCH := RESULT;
+    END;
+
+    A(1) := 2;   A(2) := 5;   A(3) := 11;  A(4) := 17;
+    A(5) := 23;  A(6) := 31;  A(7) := 44;  A(8) := 59;
+    A(9) := 67;  A(10) := 73; A(11) := 90;
+
+    KEYS(1) := 23; KEYS(2) := 2;  KEYS(3) := 90;
+    KEYS(4) := 50; KEYS(5) := 67; KEYS(6) := 1;
+
+    OUTTEXT("SORTED ARRAY:");
+    FOR I := 1 STEP 1 UNTIL 11 DO OUTINT(A(I), 3);
+    OUTIMAGE;
+
+    FOR I := 1 STEP 1 UNTIL 6 DO BEGIN
+        K := BINSEARCH(KEYS(I));
+        OUTTEXT("KEY "); OUTINT(KEYS(I), 2); OUTTEXT(": ");
+        IF K = -1 THEN
+            OUTTEXT("NOT FOUND")
+        ELSE BEGIN
+            OUTTEXT("FOUND AT INDEX "); OUTINT(K, 0);
+        END;
+        OUTIMAGE;
+    END;
+END.

@@ -1,0 +1,37 @@
+COMMENT Caesar cipher: encode then decode "THE QUICK BROWN FOX"
+        with shift 3 using CHAR/RANK arithmetic, verify roundtrip;
+BEGIN
+
+    TEXT PROCEDURE SHIFTTEXT(T, K); TEXT T; INTEGER K;
+    BEGIN
+        TEXT R;
+        CHARACTER C;
+        R :- BLANKS(T.LENGTH);
+        T.SETPOS(1);
+        R.SETPOS(1);
+        WHILE T.MORE DO
+        BEGIN
+            C := T.GETCHAR;
+            IF LETTER(C) THEN
+                C := CHAR(RANK('A') + MOD(RANK(C) - RANK('A') + K, 26));
+            R.PUTCHAR(C);
+        END;
+        SHIFTTEXT :- R;
+    END SHIFTTEXT;
+
+    TEXT PLAIN, ENCODED, DECODED;
+
+    PLAIN :- COPY("THE QUICK BROWN FOX");
+    ENCODED :- SHIFTTEXT(PLAIN, 3);
+    DECODED :- SHIFTTEXT(ENCODED, -3);
+
+    OUTTEXT("PLAIN:   "); OUTTEXT(PLAIN); OUTIMAGE;
+    OUTTEXT("ENCODED: "); OUTTEXT(ENCODED); OUTIMAGE;
+    OUTTEXT("DECODED: "); OUTTEXT(DECODED); OUTIMAGE;
+
+    IF DECODED = PLAIN THEN
+        OUTTEXT("ROUNDTRIP OK")
+    ELSE
+        OUTTEXT("ROUNDTRIP FAILED");
+    OUTIMAGE;
+END.

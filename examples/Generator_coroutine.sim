@@ -1,0 +1,35 @@
+! Generator coroutine: a Fibonacci generator object that DETACHes in its
+! class body; the main program RESUMEs it 10 times, printing each value.
+BEGIN
+    CLASS FIBGEN;
+    BEGIN
+        INTEGER VALUE;
+        INTEGER A, B, T;
+        A := 0;
+        B := 1;
+        VALUE := A;
+        DETACH;
+        WHILE TRUE DO
+        BEGIN
+            T := A + B;
+            A := B;
+            B := T;
+            VALUE := A;
+            DETACH;
+        END;
+    END;
+
+    REF(FIBGEN) GEN;
+    INTEGER I;
+
+    GEN :- NEW FIBGEN;
+
+    OUTTEXT("First 10 Fibonacci numbers:");
+    OUTIMAGE;
+    FOR I := 1 STEP 1 UNTIL 10 DO
+    BEGIN
+        RESUME(GEN);
+        OUTINT(GEN.VALUE, 5);
+    END;
+    OUTIMAGE;
+END

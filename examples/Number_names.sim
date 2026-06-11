@@ -1,0 +1,67 @@
+COMMENT Number names: spell out integers up to 999,
+        e.g. 175 -> ONE HUNDRED SEVENTY-FIVE;
+BEGIN
+
+    TEXT ARRAY SMALLS(1:19);
+    TEXT ARRAY TENS(2:9);
+
+    TEXT PROCEDURE SPELL(N); INTEGER N;
+    BEGIN
+        TEXT R;
+        INTEGER REST;
+        IF N = 0 THEN
+            R :- COPY("ZERO")
+        ELSE BEGIN
+            R :- COPY("");
+            IF N >= 100 THEN
+            BEGIN
+                R :- R & SMALLS(N // 100) & " HUNDRED";
+                N := MOD(N, 100);
+                IF N > 0 THEN R :- R & " ";
+            END;
+            IF N >= 20 THEN
+            BEGIN
+                R :- R & TENS(N // 10);
+                REST := MOD(N, 10);
+                IF REST > 0 THEN R :- R & "-" & SMALLS(REST);
+            END
+            ELSE IF N > 0 THEN
+                R :- R & SMALLS(N);
+        END;
+        SPELL :- R;
+    END SPELL;
+
+    PROCEDURE SHOW(N); INTEGER N;
+    BEGIN
+        OUTINT(N, 3);
+        OUTTEXT(" -> ");
+        OUTTEXT(SPELL(N));
+        OUTIMAGE;
+    END SHOW;
+
+    SMALLS(1) :- COPY("ONE");       SMALLS(2) :- COPY("TWO");
+    SMALLS(3) :- COPY("THREE");     SMALLS(4) :- COPY("FOUR");
+    SMALLS(5) :- COPY("FIVE");      SMALLS(6) :- COPY("SIX");
+    SMALLS(7) :- COPY("SEVEN");     SMALLS(8) :- COPY("EIGHT");
+    SMALLS(9) :- COPY("NINE");      SMALLS(10) :- COPY("TEN");
+    SMALLS(11) :- COPY("ELEVEN");   SMALLS(12) :- COPY("TWELVE");
+    SMALLS(13) :- COPY("THIRTEEN"); SMALLS(14) :- COPY("FOURTEEN");
+    SMALLS(15) :- COPY("FIFTEEN");  SMALLS(16) :- COPY("SIXTEEN");
+    SMALLS(17) :- COPY("SEVENTEEN");SMALLS(18) :- COPY("EIGHTEEN");
+    SMALLS(19) :- COPY("NINETEEN");
+
+    TENS(2) :- COPY("TWENTY");  TENS(3) :- COPY("THIRTY");
+    TENS(4) :- COPY("FORTY");   TENS(5) :- COPY("FIFTY");
+    TENS(6) :- COPY("SIXTY");   TENS(7) :- COPY("SEVENTY");
+    TENS(8) :- COPY("EIGHTY");  TENS(9) :- COPY("NINETY");
+
+    SHOW(0);
+    SHOW(7);
+    SHOW(13);
+    SHOW(42);
+    SHOW(100);
+    SHOW(175);
+    SHOW(308);
+    SHOW(620);
+    SHOW(999);
+END.

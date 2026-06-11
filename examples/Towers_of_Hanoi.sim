@@ -1,0 +1,23 @@
+! Towers of Hanoi - recursive solver, prints each move for N=4
+! and the total move count (expected 2**4 - 1 = 15);
+BEGIN
+    INTEGER MOVES;
+
+    PROCEDURE HANOI(N, FROMPEG, TOPEG, VIAPEG);
+        INTEGER N, FROMPEG, TOPEG, VIAPEG;
+    BEGIN
+        IF N > 0 THEN BEGIN
+            HANOI(N-1, FROMPEG, VIAPEG, TOPEG);
+            MOVES := MOVES + 1;
+            OUTTEXT("MOVE DISK "); OUTINT(N, 0);
+            OUTTEXT(" FROM PEG "); OUTINT(FROMPEG, 0);
+            OUTTEXT(" TO PEG ");   OUTINT(TOPEG, 0);
+            OUTIMAGE;
+            HANOI(N-1, VIAPEG, TOPEG, FROMPEG);
+        END;
+    END;
+
+    MOVES := 0;
+    HANOI(4, 1, 3, 2);
+    OUTTEXT("TOTAL MOVES: "); OUTINT(MOVES, 0); OUTIMAGE;
+END.

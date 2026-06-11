@@ -1,0 +1,50 @@
+! Polymorphism: a SHAPE hierarchy (CIRCLE, RECTANGLE, TRIANGLE) with a
+! VIRTUAL AREA procedure, dispatched through a REF(SHAPE) array.
+BEGIN
+    CLASS SHAPE;
+    VIRTUAL: REAL PROCEDURE AREA;
+    BEGIN
+        REAL PROCEDURE AREA;
+            AREA := 0.0;
+    END;
+
+    SHAPE CLASS CIRCLE(R); REAL R;
+    BEGIN
+        REAL PROCEDURE AREA;
+            AREA := PI * R * R;
+    END;
+
+    SHAPE CLASS RECTANGLE(W, H); REAL W, H;
+    BEGIN
+        REAL PROCEDURE AREA;
+            AREA := W * H;
+    END;
+
+    SHAPE CLASS TRIANGLE(B, H); REAL B, H;
+    BEGIN
+        REAL PROCEDURE AREA;
+            AREA := 0.5 * B * H;
+    END;
+
+    REF(SHAPE) ARRAY SHAPES(1:3);
+    TEXT ARRAY NAMES(1:3);
+    INTEGER I;
+    REAL TOTAL;
+
+    SHAPES(1) :- NEW CIRCLE(2.0);      NAMES(1) :- COPY("Circle   ");
+    SHAPES(2) :- NEW RECTANGLE(3.0, 4.0); NAMES(2) :- COPY("Rectangle");
+    SHAPES(3) :- NEW TRIANGLE(5.0, 6.0);  NAMES(3) :- COPY("Triangle ");
+
+    FOR I := 1 STEP 1 UNTIL 3 DO
+    BEGIN
+        OUTTEXT(NAMES(I));
+        OUTTEXT(" area = ");
+        OUTFIX(SHAPES(I).AREA, 2, 8);
+        OUTIMAGE;
+        TOTAL := TOTAL + SHAPES(I).AREA;
+    END;
+
+    OUTTEXT("Total area = ");
+    OUTFIX(TOTAL, 2, 0);
+    OUTIMAGE;
+END

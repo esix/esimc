@@ -1,0 +1,22 @@
+! PASCALS TRIANGLE - FIRST 10 ROWS BUILT IN A 2D ARRAY,
+! EACH ENTRY RIGHT-ALIGNED WITH OUTINT ;
+BEGIN
+    INTEGER N = 10;
+    INTEGER ARRAY P(0:N-1, 0:N-1);
+    INTEGER I, J;
+
+    FOR I := 0 STEP 1 UNTIL N-1 DO
+    BEGIN
+        P(I, 0) := 1;
+        P(I, I) := 1;
+        FOR J := 1 STEP 1 UNTIL I-1 DO
+            P(I, J) := P(I-1, J-1) + P(I-1, J)
+    END;
+
+    FOR I := 0 STEP 1 UNTIL N-1 DO
+    BEGIN
+        FOR J := 0 STEP 1 UNTIL I DO
+            OUTINT(P(I, J), 5);
+        OUTIMAGE
+    END
+END.

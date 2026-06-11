@@ -1,0 +1,39 @@
+! Quicksort - recursive quicksort of a fixed 12-element array;
+! Prints the array before and after sorting;
+BEGIN
+    INTEGER ARRAY A(1:12);
+    INTEGER I;
+
+    PROCEDURE QUICKSORT(LO, HI); INTEGER LO, HI;
+    BEGIN
+        INTEGER PIVOT, L, R, T;
+        IF LO < HI THEN BEGIN
+            PIVOT := A((LO + HI) // 2);
+            L := LO; R := HI;
+            WHILE L <= R DO BEGIN
+                WHILE A(L) < PIVOT DO L := L + 1;
+                WHILE A(R) > PIVOT DO R := R - 1;
+                IF L <= R THEN BEGIN
+                    T := A(L); A(L) := A(R); A(R) := T;
+                    L := L + 1; R := R - 1;
+                END;
+            END;
+            QUICKSORT(LO, R);
+            QUICKSORT(L, HI);
+        END;
+    END;
+
+    A(1) := 38;  A(2) := -5;  A(3) := 71;  A(4) := 4;
+    A(5) := 19;  A(6) := 0;   A(7) := 56;  A(8) := -23;
+    A(9) := 12;  A(10) := 88; A(11) := 7;  A(12) := 42;
+
+    OUTTEXT("BEFORE:");
+    FOR I := 1 STEP 1 UNTIL 12 DO OUTINT(A(I), 4);
+    OUTIMAGE;
+
+    QUICKSORT(1, 12);
+
+    OUTTEXT("AFTER: ");
+    FOR I := 1 STEP 1 UNTIL 12 DO OUTINT(A(I), 4);
+    OUTIMAGE;
+END.

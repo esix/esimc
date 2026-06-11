@@ -1,0 +1,41 @@
+! GREATEST COMMON DIVISOR - EUCLID'S ALGORITHM, BOTH RECURSIVE
+! AND ITERATIVE, ON SEVERAL PAIRS; PRINT BOTH AND WHETHER THEY AGREE ;
+BEGIN
+    INTEGER ARRAY AS(1:6), BS(1:6);
+    INTEGER K, G1, G2;
+
+    INTEGER PROCEDURE GCDREC(A, B); INTEGER A, B;
+        GCDREC := IF B = 0 THEN A ELSE GCDREC(B, MOD(A, B));
+
+    INTEGER PROCEDURE GCDITER(A, B); INTEGER A, B;
+    BEGIN
+        INTEGER T;
+        WHILE B <> 0 DO
+        BEGIN
+            T := MOD(A, B);
+            A := B;
+            B := T
+        END;
+        GCDITER := A
+    END GCDITER;
+
+    AS(1) := 49865;  BS(1) := 69811;
+    AS(2) := 1071;   BS(2) := 462;
+    AS(3) := 270;    BS(3) := 192;
+    AS(4) := 100;    BS(4) := 75;
+    AS(5) := 17;     BS(5) := 31;
+    AS(6) := 144;    BS(6) := 60;
+
+    FOR K := 1 STEP 1 UNTIL 6 DO
+    BEGIN
+        G1 := GCDREC(AS(K), BS(K));
+        G2 := GCDITER(AS(K), BS(K));
+        OUTTEXT("GCD(");
+        OUTINT(AS(K), 0); OUTTEXT(", "); OUTINT(BS(K), 0);
+        OUTTEXT(") = RECURSIVE "); OUTINT(G1, 0);
+        OUTTEXT(", ITERATIVE "); OUTINT(G2, 0);
+        IF G1 = G2 THEN OUTTEXT(" -- AGREE")
+        ELSE OUTTEXT(" -- DISAGREE!");
+        OUTIMAGE
+    END
+END.

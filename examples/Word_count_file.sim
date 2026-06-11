@@ -1,0 +1,57 @@
+COMMENT Word count file: write lines to /tmp/wc_test.txt with OUTFILE,
+        read them back with INFILE, count lines and words;
+BEGIN
+
+    INTEGER PROCEDURE COUNTWORDS(T); TEXT T;
+    BEGIN
+        INTEGER N;
+        BOOLEAN INWORD;
+        CHARACTER C;
+        T.SETPOS(1);
+        WHILE T.MORE DO
+        BEGIN
+            C := T.GETCHAR;
+            IF C = ' ' THEN
+                INWORD := FALSE
+            ELSE BEGIN
+                IF NOT INWORD THEN N := N + 1;
+                INWORD := TRUE;
+            END;
+        END;
+        COUNTWORDS := N;
+    END COUNTWORDS;
+
+    REF(OUTFILE) OUTF;
+    REF(INFILE) INF;
+    TEXT LINE;
+    INTEGER NLINES, NWORDS;
+
+    COMMENT --- WRITE THE TEST FILE (4 + 5 + 3 = 12 WORDS) ---;
+    OUTF :- NEW OUTFILE("/tmp/wc_test.txt");
+    OUTF.OPEN(BLANKS(132));
+    OUTF.OUTTEXT("THE QUICK BROWN FOX");      OUTF.OUTIMAGE;
+    OUTF.OUTTEXT("JUMPS OVER THE LAZY DOG");  OUTF.OUTIMAGE;
+    OUTF.OUTTEXT("SIMULA LIVES ON");          OUTF.OUTIMAGE;
+    OUTF.CLOSE;
+
+    COMMENT --- READ IT BACK, COUNTING LINES AND WORDS ---;
+    INF :- NEW INFILE("/tmp/wc_test.txt");
+    INF.OPEN(BLANKS(132));
+    INF.INIMAGE;
+    WHILE NOT INF.ENDFILE DO
+    BEGIN
+        LINE :- COPY(INF.IMAGE).STRIP;
+        NLINES := NLINES + 1;
+        NWORDS := NWORDS + COUNTWORDS(LINE);
+        INF.INIMAGE;
+    END;
+    INF.CLOSE;
+
+    OUTTEXT("LINES: "); OUTINT(NLINES, 0); OUTIMAGE;
+    OUTTEXT("WORDS: "); OUTINT(NWORDS, 0); OUTIMAGE;
+    IF NLINES = 3 AND NWORDS = 12 THEN
+        OUTTEXT("COUNTS CORRECT")
+    ELSE
+        OUTTEXT("COUNTS WRONG");
+    OUTIMAGE;
+END.

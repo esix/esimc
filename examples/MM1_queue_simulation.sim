@@ -1,0 +1,71 @@
+! M/M/1-style queue: one server, exponential interarrivals via
+! NEGEXP(0.5, SEED) with SEED := 2026, fixed service time HOLD(1.5).
+! 8 customers WAIT in a FIFO queue; deterministic because the
+! drawing-library stream is seeded.
+SIMULATION
+BEGIN
+    REF(HEAD) QUEUE;
+    INTEGER SEED, NSERVED;
+    REAL TOTALWAIT;
+
+    PROCESS CLASS CUSTOMER(ID); INTEGER ID;
+    BEGIN
+        REAL ARRIVED;
+        ARRIVED := TIME;
+        WAIT(QUEUE);
+        ! the server takes us OUT and reactivates us when service starts;
+        TOTALWAIT := TOTALWAIT + (TIME - ARRIVED);
+        NSERVED := NSERVED + 1;
+        OUTTEXT("Customer ");
+        OUTINT(ID, 0);
+        OUTTEXT(" began service at t=");
+        OUTFIX(TIME, 2, 0);
+        OUTTEXT(" after waiting ");
+        OUTFIX(TIME - ARRIVED, 2, 0);
+        OUTIMAGE;
+    END;
+
+    PROCESS CLASS SERVER;
+    BEGIN
+        REF(CUSTOMER) C;
+        WHILE TRUE DO
+        BEGIN
+            IF QUEUE.EMPTY THEN PASSIVATE;
+            C :- QUEUE.FIRST QUA CUSTOMER;
+            C.OUT;
+            ACTIVATE C;          ! customer logs its waiting time;
+            HOLD(1.5);           ! fixed service time;
+        END;
+    END;
+
+    PROCESS CLASS GENERATOR;
+    BEGIN
+        REF(CUSTOMER) C;
+        INTEGER I;
+        FOR I := 1 STEP 1 UNTIL 8 DO
+        BEGIN
+            C :- NEW CUSTOMER(I);
+            ACTIVATE C;
+            ACTIVATE SRV;        ! wake the server if it is idle;
+            HOLD(NEGEXP(0.5, SEED));   ! mean 2.0 between arrivals;
+        END;
+    END;
+
+    REF(SERVER) SRV;
+    REF(GENERATOR) GEN;
+
+    SEED := 2026;
+    QUEUE :- NEW HEAD;
+    SRV :- NEW SERVER;
+    GEN :- NEW GENERATOR;
+
+    ACTIVATE GEN;
+    HOLD(500.0);
+
+    OUTTEXT("Customers served: ");
+    OUTINT(NSERVED, 0);
+    OUTIMAGE;
+    OUTTEXT("Average wait: ");
+    OUTFIX(TOTALWAIT / NSERVED, 2, 0);
+    OUTIMAGE;
+END.

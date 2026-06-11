@@ -1,0 +1,39 @@
+! N-queens problem - backtracking count of solutions;
+! Expected: N=6 gives 4 solutions, N=8 gives 92 solutions;
+BEGIN
+    INTEGER PROCEDURE COUNTQUEENS(N); INTEGER N;
+    BEGIN
+        INTEGER ARRAY COLUSED(1:N);
+        INTEGER ARRAY DIAG1(2:2*N);      ! ROW + COL;
+        INTEGER ARRAY DIAG2(1-N:N-1);    ! ROW - COL;
+        INTEGER SOLUTIONS;
+
+        PROCEDURE PLACE(ROW); INTEGER ROW;
+        BEGIN
+            INTEGER COL;
+            IF ROW > N THEN
+                SOLUTIONS := SOLUTIONS + 1
+            ELSE
+                FOR COL := 1 STEP 1 UNTIL N DO
+                    IF COLUSED(COL) = 0 AND
+                       DIAG1(ROW+COL) = 0 AND
+                       DIAG2(ROW-COL) = 0 THEN
+                    BEGIN
+                        COLUSED(COL) := 1;
+                        DIAG1(ROW+COL) := 1;
+                        DIAG2(ROW-COL) := 1;
+                        PLACE(ROW+1);
+                        COLUSED(COL) := 0;
+                        DIAG1(ROW+COL) := 0;
+                        DIAG2(ROW-COL) := 0;
+                    END;
+        END;
+
+        SOLUTIONS := 0;
+        PLACE(1);
+        COUNTQUEENS := SOLUTIONS;
+    END;
+
+    OUTTEXT("N=6 SOLUTIONS: "); OUTINT(COUNTQUEENS(6), 0); OUTIMAGE;
+    OUTTEXT("N=8 SOLUTIONS: "); OUTINT(COUNTQUEENS(8), 0); OUTIMAGE;
+END.

@@ -1,0 +1,48 @@
+COMMENT Roman numerals encode: 1990, 2008, 1666, 3999
+        built as TEXTs with concatenation;
+BEGIN
+
+    TEXT PROCEDURE TOROMAN(N); INTEGER N;
+    BEGIN
+        INTEGER ARRAY VALS(1:13);
+        TEXT ARRAY SYMS(1:13);
+        TEXT R;
+        INTEGER I;
+
+        VALS(1) := 1000; SYMS(1) :- COPY("M");
+        VALS(2) :=  900; SYMS(2) :- COPY("CM");
+        VALS(3) :=  500; SYMS(3) :- COPY("D");
+        VALS(4) :=  400; SYMS(4) :- COPY("CD");
+        VALS(5) :=  100; SYMS(5) :- COPY("C");
+        VALS(6) :=   90; SYMS(6) :- COPY("XC");
+        VALS(7) :=   50; SYMS(7) :- COPY("L");
+        VALS(8) :=   40; SYMS(8) :- COPY("XL");
+        VALS(9) :=   10; SYMS(9) :- COPY("X");
+        VALS(10) :=   9; SYMS(10) :- COPY("IX");
+        VALS(11) :=   5; SYMS(11) :- COPY("V");
+        VALS(12) :=   4; SYMS(12) :- COPY("IV");
+        VALS(13) :=   1; SYMS(13) :- COPY("I");
+
+        R :- COPY("");
+        FOR I := 1 STEP 1 UNTIL 13 DO
+            WHILE N >= VALS(I) DO
+            BEGIN
+                R :- R & SYMS(I);
+                N := N - VALS(I);
+            END;
+        TOROMAN :- R;
+    END TOROMAN;
+
+    PROCEDURE SHOW(N); INTEGER N;
+    BEGIN
+        OUTINT(N, 4);
+        OUTTEXT(" = ");
+        OUTTEXT(TOROMAN(N));
+        OUTIMAGE;
+    END SHOW;
+
+    SHOW(1990);
+    SHOW(2008);
+    SHOW(1666);
+    SHOW(3999);
+END.
