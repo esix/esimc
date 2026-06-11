@@ -353,6 +353,14 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
+// INNER — marks where a subclass's body runs inside the prefix class's body.
+// Acts as a split point during class-body emission; a bare INNER reached in
+// codegen (leaf class) is a no-op.
+class InnerStatement : public Statement {
+public:
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
 // SWITCH S := L1, L2, ..., Ln  (computed goto declaration)
 class SwitchDeclaration : public Statement {
 public:

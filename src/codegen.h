@@ -13,6 +13,7 @@
 
 class Program;
 class VarDeclaration;
+class ClassDecl;
 
 struct ClassInfo {
     std::string name;
@@ -45,6 +46,10 @@ struct ClassInfo {
     // Index of the first field that belongs to THIS class (not inherited from parent).
     // Constructor args are stored starting at this index. Set during declareSkeleton.
     int firstOwnFieldIndex = 2;
+
+    // AST node, so subclasses can re-emit the prefix chain's body statements
+    // around their own (INNER semantics). Set during declareSkeleton.
+    ClassDecl* decl = nullptr;
 };
 
 struct ArrayInfo {

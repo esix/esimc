@@ -165,7 +165,7 @@ static std::vector<ParamSpec> mergeParams(
 %token T_REF T_NONE T_IS T_IN
 %token T_VIRTUAL
 %token T_INSPECT T_WHEN T_OTHERWISE
-%token T_DETACH T_RESUME T_CALL
+%token T_DETACH T_RESUME T_CALL T_INNER
 %token T_ARRAY T_LABEL T_GOTO T_SWITCH
 %token T_NOTEXT T_EXTERNAL
 /* T_VALUE and T_NAME removed — handled as identifiers contextually */
@@ -812,6 +812,7 @@ when_clauses
 
 detach_stmt
     : T_DETACH { $$ = new DetachStatement(); }
+    | T_INNER  { $$ = new InnerStatement(); }
     ;
 
 resume_stmt

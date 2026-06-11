@@ -56,6 +56,7 @@
 "INSPECT"                       return T_INSPECT;
 "WHEN"                          return T_WHEN;
 "OTHERWISE"                     return T_OTHERWISE;
+"INNER"                         return T_INNER;
 "DETACH"                        return T_DETACH;
 "RESUME"                        return T_RESUME;
 "CALL"                          return T_CALL;

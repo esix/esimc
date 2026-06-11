@@ -3302,6 +3302,12 @@ llvm::Value* LabeledStatement::codegen(CodeGenContext& ctx) {
     return nullptr;
 }
 
+llvm::Value* InnerStatement::codegen(CodeGenContext& ctx) {
+    // Split marker consumed during class-body chain emission; a leaf class's
+    // own INNER point is empty, so reaching one directly is a no-op.
+    return nullptr;
+}
+
 llvm::Value* SwitchDeclaration::codegen(CodeGenContext& ctx) {
     // Store label list; basic blocks will be resolved at GO TO S(I) time.
     ctx.switches[name] = labels;
@@ -4116,6 +4122,7 @@ void ClassDecl::declareSkeleton(CodeGenContext& ctx) {
     ci.parentName = parentName;
     ci.classId = ctx.nextClassId++;
     ci.coroFieldIndex = 1;
+    ci.decl = this;
 
     // Build struct fields: [vtablePtr (ptr), coroPtr (ptr), inherited fields..., own fields...]
     std::vector<llvm::Type*> fieldTypes;
@@ -4428,43 +4435,74 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
     // Set up TEXT field position tracking
     ctx.setupTextFieldTracking(bodyFunc);
 
-    // Execute body statements
-    // Skip: ProcedureDecls (compiled above), VarDeclarations/RefDeclarations (struct fields),
-    //        CompoundStmt of all VarDecls (multi-var decls as struct fields)
-    // DO execute: ArrayDeclarations (allocate and store pointer in struct field),
-    //             LabelDeclarations, executable statements
-    for (auto& stmt : bodyStmts) {
-        if (dynamic_cast<ProcedureDecl*>(stmt.get())) continue;
-        if (dynamic_cast<ClassDecl*>(stmt.get())) continue;
-        if (dynamic_cast<VarDeclaration*>(stmt.get())) continue;
-        if (dynamic_cast<RefDeclaration*>(stmt.get())) continue;
-        if (auto* cs = dynamic_cast<CompoundStmt*>(stmt.get())) {
-            bool allVarDecl = true;
-            for (auto& s : cs->statements) {
-                if (!dynamic_cast<VarDeclaration*>(s.get())) { allVarDecl = false; break; }
+    // Execute body statements with INNER semantics: the prefix chain's bodies
+    // wrap this class's own body. Emission order for chain Root -> ... -> this:
+    // Root_pre, ..., this_pre, this_post, ..., Root_post, where pre/post split
+    // at the first top-level INNER (no INNER = whole body is pre, per the
+    // implicit-INNER-at-end rule).
+    //
+    // Per statement: skip ProcedureDecls (compiled separately), nested
+    // ClassDecls, Var/RefDeclarations (struct fields); execute
+    // ArrayDeclarations (allocate + store pointer into the struct field),
+    // LabelDeclarations, and ordinary statements.
+    auto emitClassStmts = [&](const StmtList& stmts, size_t from, size_t to) {
+        for (size_t si = from; si < to && si < stmts.size(); si++) {
+            auto& stmt = stmts[si];
+            if (dynamic_cast<ProcedureDecl*>(stmt.get())) continue;
+            if (dynamic_cast<ClassDecl*>(stmt.get())) continue;
+            if (dynamic_cast<VarDeclaration*>(stmt.get())) continue;
+            if (dynamic_cast<RefDeclaration*>(stmt.get())) continue;
+            if (dynamic_cast<InnerStatement*>(stmt.get())) continue;
+            if (auto* cs = dynamic_cast<CompoundStmt*>(stmt.get())) {
+                bool allVarDecl = true;
+                for (auto& s : cs->statements) {
+                    if (!dynamic_cast<VarDeclaration*>(s.get())) { allVarDecl = false; break; }
+                }
+                if (allVarDecl) continue;
             }
-            if (allVarDecl) continue;
-        }
-        if (auto* ad = dynamic_cast<ArrayDeclaration*>(stmt.get())) {
-            // Execute the array declaration (creates local alloca + ctx.arrays entry)
-            ad->codegen(ctx);
-            // Store the array pointer in the struct field so methods can find it
-            int idx = ctx.getFieldIndex(name, ad->name);
-            if (idx >= 0) {
-                auto& info = ctx.arrays[ad->name];
-                auto gep = ctx.builder->CreateStructGEP(ctx.classes[name].structType,
-                    ctx.currentThis, idx, ad->name + "_fptr");
-                ctx.builder->CreateStore(info.basePtr, gep);
-                // Save array metadata for methods. Preserve the pre-populated static
-                // lower bound from the AST (info.lowerBound is 0 for dynamic-bound arrays).
-                long long preservedLo = ctx.classes[name].arrayMeta.count(ad->name)
-                    ? ctx.classes[name].arrayMeta[ad->name].first
-                    : info.lowerBound;
-                ctx.classes[name].arrayMeta[ad->name] = {preservedLo, info.size};
+            if (auto* ad = dynamic_cast<ArrayDeclaration*>(stmt.get())) {
+                ad->codegen(ctx);
+                int idx = ctx.getFieldIndex(name, ad->name);
+                if (idx >= 0) {
+                    auto& info = ctx.arrays[ad->name];
+                    auto gep = ctx.builder->CreateStructGEP(ctx.classes[name].structType,
+                        ctx.currentThis, idx, ad->name + "_fptr");
+                    ctx.builder->CreateStore(info.basePtr, gep);
+                    // Preserve the pre-populated static lower bound from the AST
+                    // (info.lowerBound is 0 for dynamic-bound arrays).
+                    long long preservedLo = ctx.classes[name].arrayMeta.count(ad->name)
+                        ? ctx.classes[name].arrayMeta[ad->name].first
+                        : info.lowerBound;
+                    ctx.classes[name].arrayMeta[ad->name] = {preservedLo, info.size};
+                }
+                continue;
             }
-            continue;
+            stmt->codegen(ctx);
         }
-        stmt->codegen(ctx);
+    };
+
+    // Prefix chain, outermost first.
+    std::vector<ClassDecl*> chain;
+    for (ClassDecl* cd = this; cd; ) {
+        chain.insert(chain.begin(), cd);
+        if (cd->parentName.empty()) break;
+        auto pit = ctx.classes.find(cd->parentName);
+        cd = (pit != ctx.classes.end()) ? pit->second.decl : nullptr;
+    }
+    auto innerSplit = [](ClassDecl* cd) -> size_t {
+        for (size_t i = 0; i < cd->bodyStmts.size(); i++)
+            if (dynamic_cast<InnerStatement*>(cd->bodyStmts[i].get())) return i;
+        return cd->bodyStmts.size();
+    };
+    std::vector<size_t> splits;
+    for (auto* cd : chain) {
+        splits.push_back(innerSplit(cd));
+        emitClassStmts(cd->bodyStmts, 0, splits.back());
+    }
+    for (size_t i = chain.size(); i-- > 0; ) {
+        size_t postFrom = splits[i] < chain[i]->bodyStmts.size() ? splits[i] + 1
+                                                                 : splits[i];
+        emitClassStmts(chain[i]->bodyStmts, postFrom, chain[i]->bodyStmts.size());
     }
 
     if (!ctx.builder->GetInsertBlock()->getTerminator()) {
