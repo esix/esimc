@@ -460,6 +460,11 @@ int main(int argc, char** argv) {
 
     CodeGenContext context;
     context.generateCode(*programRoot);
+    if (context.hadError) {
+        std::cerr << "Compilation failed with errors; no output written.\n";
+        delete programRoot;
+        return 1;
+    }
     context.writeIR(outputFile);
 
     std::cout << "Wrote LLVM IR to " << outputFile << "\n";

@@ -121,6 +121,10 @@ public:
     std::map<std::string, llvm::GlobalVariable*> globals;
     bool inMainBlock = false; // true when generating the outermost block
 
+    // Set whenever a codegen diagnostic is emitted; main exits 1 if set so a
+    // dropped statement can never become a silently-wrong binary.
+    bool hadError = false;
+
     // TEXT variables (have an associated __pos alloca)
     std::set<std::string> textVars;
 
