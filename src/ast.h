@@ -302,17 +302,21 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// obj.field(idx) := expr — assign to a member array element
+// obj.field(idx) := expr — assign to a member array element.
+// Also handles write-through TEXT views: obj.SUB(i,len) := expr (index2 = len).
 class MemberArrayAssignment : public Statement {
 public:
     ExprPtr object;
     std::string member;
     ExprPtr index;
+    ExprPtr index2;   // second argument (e.g. length for .SUB(start,len)); may be null
     ExprPtr value;
     bool isRef;
-    MemberArrayAssignment(ExprPtr o, std::string m, ExprPtr i, ExprPtr v, bool ref)
+    MemberArrayAssignment(ExprPtr o, std::string m, ExprPtr i, ExprPtr v, bool ref,
+                          ExprPtr i2 = nullptr)
         : object(std::move(o)), member(std::move(m)),
-          index(std::move(i)), value(std::move(v)), isRef(ref) {}
+          index(std::move(i)), index2(std::move(i2)),
+          value(std::move(v)), isRef(ref) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 

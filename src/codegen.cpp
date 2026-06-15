@@ -3755,6 +3755,24 @@ llvm::Value* MemberAssignment::codegen(CodeGenContext& ctx) {
 llvm::Value* MemberArrayAssignment::codegen(CodeGenContext& ctx) {
     auto obj = object->codegen(ctx);
     if (!obj) return nullptr;
+    // Write-through TEXT view: T.SUB(start,len) := expr (and STRIP/MAIN).
+    // The view descriptor shares the parent's frame, so an in-place value
+    // assignment into the view writes straight through to the underlying text.
+    // (Reference :- onto a view window is not meaningful, so only := applies.)
+    if (!isRef && obj->getType()->isPointerTy() && exprIsText(object.get(), ctx) &&
+        (member == "sub" || member == "strip" || member == "main")) {
+        std::vector<llvm::Value*> argv;
+        if (index)  { auto v = index->codegen(ctx);  if (!v) return nullptr; argv.push_back(v); }
+        if (index2) { auto v = index2->codegen(ctx); if (!v) return nullptr; argv.push_back(v); }
+        auto view = emitTextOp(ctx, obj, member, argv);
+        if (!view) return nullptr;
+        auto rhs = value->codegen(ctx);
+        if (!rhs) return nullptr;
+        auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+        auto fn = ctx.module->getOrInsertFunction("simula_text_assign",
+            llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false));
+        return ctx.builder->CreateCall(fn, {view, rhs}, "subasg");
+    }
     std::string clsName;
     if (auto* qua = dynamic_cast<QuaExpression*>(object.get())) {
         clsName = qua->className;

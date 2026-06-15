@@ -974,11 +974,13 @@ expr_stmt
                 } else {
                     MethodCall* mc = dynamic_cast<MethodCall*>($1);
                     if (mc) {
-                        /* obj.data(i) := expr — member array assignment */
+                        /* obj.data(i) := expr — member array assignment;
+                           also obj.SUB(start,len) := expr — write-through view */
                         ExprPtr idx(mc->args.empty() ? nullptr : mc->args[0].release());
+                        ExprPtr idx2(mc->args.size() >= 2 ? mc->args[1].release() : nullptr);
                         $$ = new MemberArrayAssignment(ExprPtr(mc->object.release()),
                                                        mc->method, std::move(idx),
-                                                       ExprPtr($3), false);
+                                                       ExprPtr($3), false, std::move(idx2));
                         delete $1;
                     } else {
                         yyerror("invalid left-hand side of assignment");
@@ -1013,9 +1015,10 @@ expr_stmt
                     if (mc) {
                         /* obj.data(i) :- expr — member array element ref-assignment */
                         ExprPtr idx(mc->args.empty() ? nullptr : mc->args[0].release());
+                        ExprPtr idx2(mc->args.size() >= 2 ? mc->args[1].release() : nullptr);
                         $$ = new MemberArrayAssignment(ExprPtr(mc->object.release()),
                                                        mc->method, std::move(idx),
-                                                       ExprPtr($3), true);
+                                                       ExprPtr($3), true, std::move(idx2));
                         delete $1;
                     } else {
                         yyerror("invalid left-hand side of reference assignment");
