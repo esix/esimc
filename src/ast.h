@@ -89,7 +89,11 @@ public:
 class BinaryOp : public Expression {
 public:
     enum Op { ADD, SUB, MUL, DIV, IDIV, EQ, NE, LT, LE, GT, GE, AND, OR, CONCAT, POWER,
-              ANDTHEN, ORELSE };
+              ANDTHEN, ORELSE,
+              // Reference identity (Simula == / =/=): pointer identity for REF
+              // objects; frame+start+length identity for TEXT. Distinct from
+              // EQ/NE which are value/content comparisons.
+              REF_EQ, REF_NE };
     Op op;
     ExprPtr lhs, rhs;
     BinaryOp(Op o, ExprPtr l, ExprPtr r)
@@ -259,8 +263,10 @@ public:
     ExprPtr index;
     ExprPtr index2; // second dimension index (nullptr = 1D)
     ExprPtr value;
-    ArrayAssignment(std::string n, ExprPtr i, ExprPtr v, ExprPtr i2 = nullptr)
-        : name(std::move(n)), index(std::move(i)), index2(std::move(i2)), value(std::move(v)) {}
+    bool isRef;     // true for :- (rebind), false for := (in-place for TEXT)
+    ArrayAssignment(std::string n, ExprPtr i, ExprPtr v, bool ref, ExprPtr i2 = nullptr)
+        : name(std::move(n)), index(std::move(i)), index2(std::move(i2)),
+          value(std::move(v)), isRef(ref) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
@@ -290,8 +296,9 @@ public:
     ExprPtr object;
     std::string member;
     ExprPtr value;
-    MemberAssignment(ExprPtr o, std::string m, ExprPtr v)
-        : object(std::move(o)), member(std::move(m)), value(std::move(v)) {}
+    bool isRef;
+    MemberAssignment(ExprPtr o, std::string m, ExprPtr v, bool ref)
+        : object(std::move(o)), member(std::move(m)), value(std::move(v)), isRef(ref) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
@@ -302,9 +309,10 @@ public:
     std::string member;
     ExprPtr index;
     ExprPtr value;
-    MemberArrayAssignment(ExprPtr o, std::string m, ExprPtr i, ExprPtr v)
+    bool isRef;
+    MemberArrayAssignment(ExprPtr o, std::string m, ExprPtr i, ExprPtr v, bool ref)
         : object(std::move(o)), member(std::move(m)),
-          index(std::move(i)), value(std::move(v)) {}
+          index(std::move(i)), value(std::move(v)), isRef(ref) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 

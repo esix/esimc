@@ -539,7 +539,12 @@ llvm::Value* RealLiteral::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* TextLiteral::codegen(CodeGenContext& ctx) {
-    return ctx.builder->CreateGlobalString(value, "str");
+    // Wrap the (read-only) string constant in a fresh TEXT descriptor.
+    auto cstr = ctx.builder->CreateGlobalString(value, "str");
+    auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+    auto fn = ctx.module->getOrInsertFunction("simula_text_lit",
+        llvm::FunctionType::get(ptrTy, {ptrTy}, false));
+    return ctx.builder->CreateCall(fn, {cstr}, "txtlit");
 }
 
 llvm::Value* CharLiteral::codegen(CodeGenContext& ctx) {
@@ -799,6 +804,137 @@ static llvm::Value* simulaRealToInt(CodeGenContext& ctx, llvm::Value* v,
     return ctx.builder->CreateFPToSI(floored, destTy, "rnd_toint");
 }
 
+// Heuristically decide whether an expression yields a TEXT value (descriptor),
+// as opposed to a REF object pointer. Used to pick content/identity comparison
+// and in-place vs rebind assignment. Conservative: only returns true for
+// clearly-TEXT producers.
+static bool exprIsText(Expression* e, CodeGenContext& ctx) {
+    if (!e) return false;
+    if (dynamic_cast<TextLiteral*>(e)) return true;
+    if (auto* id = dynamic_cast<Identifier*>(e))
+        return ctx.textVars.count(id->name) > 0;
+    if (auto* b = dynamic_cast<BinaryOp*>(e))
+        return b->op == BinaryOp::CONCAT;
+    if (auto* pc = dynamic_cast<ProcedureCall*>(e)) {
+        return pc->name == "copy" || pc->name == "blanks" || pc->name == "sub" ||
+               pc->name == "strip" || pc->name == "main";
+    }
+    if (auto* mc = dynamic_cast<MethodCall*>(e)) {
+        // intext is the INFILE TEXT-returning method (chains like
+        // FILE.INTEXT(n).STRIP); sub/strip/main/copy are TEXT producers.
+        return mc->method == "sub" || mc->method == "strip" ||
+               mc->method == "main" || mc->method == "copy" ||
+               mc->method == "intext";
+    }
+    if (auto* ma = dynamic_cast<MemberAccess*>(e)) {
+        if (ma->member == "sub" || ma->member == "strip" || ma->member == "main")
+            return true;
+        // SYSIN.IMAGE is a TEXT line buffer.
+        if (ma->member == "image") {
+            if (auto* bid = dynamic_cast<Identifier*>(ma->object.get()))
+                if (bid->name == "sysin") return true;
+        }
+        // A TEXT field of the object's class.
+        std::string cls;
+        if (auto* bid = dynamic_cast<Identifier*>(ma->object.get()))
+            cls = ctx.resolveRefType(bid->name);
+        else if (dynamic_cast<ThisExpression*>(ma->object.get()))
+            cls = ctx.currentClassName;
+        std::string sc = cls;
+        while (!sc.empty()) {
+            auto cit = ctx.classes.find(sc);
+            if (cit == ctx.classes.end()) break;
+            for (auto& fi : cit->second.fields)
+                if (fi.name == ma->member)
+                    return fi.type == VarDeclaration::TEXT && fi.refClassName.empty();
+            sc = cit->second.parentName;
+        }
+    }
+    return false;
+}
+
+// Emit a TEXT member/method operation on a descriptor value. `args` are already
+// codegen'd. Returns nullptr if the op name isn't a known TEXT operation. The
+// descriptor carries its own cursor (pos), so this works uniformly for named
+// variables, fields, array elements, and temporaries.
+static llvm::Value* emitTextOp(CodeGenContext& ctx, llvm::Value* desc,
+                               const std::string& op,
+                               std::vector<llvm::Value*>& args) {
+    auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    auto i8Ty = llvm::Type::getInt8Ty(*ctx.llvmContext);
+    auto dblTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
+    auto voidTy = llvm::Type::getVoidTy(*ctx.llvmContext);
+    auto call0 = [&](const char* fn, llvm::Type* ret) {
+        auto f = ctx.module->getOrInsertFunction(fn,
+            llvm::FunctionType::get(ret, {ptrTy}, false));
+        return ctx.builder->CreateCall(f, {desc}, op);
+    };
+    auto toI = [&](llvm::Value* v) {
+        return v->getType()->isDoubleTy() ? simulaRealToInt(ctx, v, i64Ty) : v;
+    };
+    auto toD = [&](llvm::Value* v) {
+        return v->getType()->isIntegerTy()
+            ? ctx.builder->CreateSIToFP(v, dblTy, "tofp") : v;
+    };
+
+    if (op == "length") return call0("simula_text_length", i64Ty);
+    if (op == "more") {
+        auto r = call0("simula_text_more", i64Ty);
+        return ctx.builder->CreateICmpNE(r, llvm::ConstantInt::get(i64Ty, 0), "moreb");
+    }
+    if (op == "pos")     return call0("simula_text_pos", i64Ty);
+    if (op == "getchar") return call0("simula_text_getchar", i8Ty);
+    if (op == "strip")   return call0("simula_text_strip", ptrTy);
+    if (op == "main")    return call0("simula_text_main", ptrTy);
+    if (op == "getint")  return call0("simula_text_getint", i64Ty);
+    if (op == "getreal") return call0("simula_text_getreal", dblTy);
+    if (op == "getfrac") return call0("simula_text_getfrac", i64Ty);
+    if (op == "constant") return ctx.builder->getFalse();
+    if (op == "start")    return llvm::ConstantInt::get(i64Ty, 1);
+    if (op == "setpos" && args.size() == 1) {
+        auto f = ctx.module->getOrInsertFunction("simula_text_setpos",
+            llvm::FunctionType::get(voidTy, {ptrTy, i64Ty}, false));
+        ctx.builder->CreateCall(f, {desc, toI(args[0])});
+        return llvm::ConstantInt::get(i64Ty, 0);
+    }
+    if (op == "getchar" ) return call0("simula_text_getchar", i8Ty);
+    if (op == "putchar" && args.size() == 1) {
+        auto f = ctx.module->getOrInsertFunction("simula_text_putchar",
+            llvm::FunctionType::get(voidTy, {ptrTy, i8Ty}, false));
+        auto ch = args[0];
+        if (!ch->getType()->isIntegerTy(8))
+            ch = ctx.builder->CreateTrunc(ch, i8Ty, "ch8");
+        ctx.builder->CreateCall(f, {desc, ch});
+        return llvm::ConstantInt::get(i64Ty, 0);
+    }
+    if (op == "sub" && args.size() == 2) {
+        auto f = ctx.module->getOrInsertFunction("simula_text_sub",
+            llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty, i64Ty}, false));
+        return ctx.builder->CreateCall(f, {desc, toI(args[0]), toI(args[1])}, "sub");
+    }
+    if (op == "putint" && args.size() == 1) {
+        auto f = ctx.module->getOrInsertFunction("simula_text_putint",
+            llvm::FunctionType::get(voidTy, {ptrTy, i64Ty}, false));
+        ctx.builder->CreateCall(f, {desc, toI(args[0])});
+        return llvm::ConstantInt::get(i64Ty, 0);
+    }
+    if ((op == "putfix" || op == "putreal") && args.size() == 2) {
+        auto f = ctx.module->getOrInsertFunction(
+            op == "putfix" ? "simula_text_putfix" : "simula_text_putreal",
+            llvm::FunctionType::get(voidTy, {ptrTy, dblTy, i64Ty}, false));
+        ctx.builder->CreateCall(f, {desc, toD(args[0]), toI(args[1])});
+        return llvm::ConstantInt::get(i64Ty, 0);
+    }
+    if (op == "putfrac" && args.size() == 2) {
+        auto f = ctx.module->getOrInsertFunction("simula_text_putfrac",
+            llvm::FunctionType::get(voidTy, {ptrTy, i64Ty, i64Ty}, false));
+        ctx.builder->CreateCall(f, {desc, toI(args[0]), toI(args[1])});
+        return llvm::ConstantInt::get(i64Ty, 0);
+    }
+    return nullptr;
+}
+
 llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
     // Short-circuit operators (Simula AND THEN / OR ELSE): evaluate the right
     // operand only when needed, so a guard like `X == NONE OR ELSE X.M(..)`
@@ -925,13 +1061,38 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
         }
     }
 
-    // Pointer (TEXT) comparison: use runtime string comparison
+    auto i64TyC = llvm::Type::getInt64Ty(*ctx.llvmContext);
     bool isPtr = L->getType()->isPointerTy() && R->getType()->isPointerTy();
-    if (isPtr && (op == EQ || op == NE)) {
+    bool anyText = exprIsText(lhs.get(), ctx) || exprIsText(rhs.get(), ctx);
+
+    // Reference identity (== / =/=): pointer identity for REF objects; for TEXT,
+    // same frame+start+length (NOT content).
+    if (op == REF_EQ || op == REF_NE) {
+        llvm::Value* eq;
+        if (isPtr && anyText) {
+            auto fn = ctx.module->getOrInsertFunction("simula_text_ref_eq",
+                llvm::FunctionType::get(i64TyC,
+                    {ctx.getRefType(), ctx.getRefType()}, false));
+            auto r = ctx.builder->CreateCall(fn, {L, R}, "refeq");
+            eq = ctx.builder->CreateICmpNE(r, llvm::ConstantInt::get(i64TyC, 0), "refeqb");
+        } else {
+            eq = ctx.builder->CreateICmpEQ(L, R, "ptr_eq");
+        }
+        return (op == REF_NE) ? ctx.builder->CreateNot(eq, "ref_ne") : eq;
+    }
+
+    // Content equality (= / <>) on TEXT operands -> window compare.
+    if (isPtr && anyText && (op == EQ || op == NE)) {
         auto eqVal = ctx.builder->CreateCall(ctx.textEqFunc, {L, R}, "texteq");
         auto cmp = ctx.builder->CreateICmpNE(eqVal,
-            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), 0), "txtcmp");
+            llvm::ConstantInt::get(i64TyC, 0), "txtcmp");
         if (op == NE) cmp = ctx.builder->CreateNot(cmp, "txtne");
+        return cmp;
+    }
+    // Equality on two non-TEXT pointers (rare; nonstandard REF =) -> pointer cmp.
+    if (isPtr && (op == EQ || op == NE)) {
+        auto cmp = ctx.builder->CreateICmpEQ(L, R, "ptr_eq");
+        if (op == NE) cmp = ctx.builder->CreateNot(cmp, "ptr_ne");
         return cmp;
     }
 
@@ -949,7 +1110,7 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
         case GE:  return ctx.builder->CreateICmpSGE(L, R, "getmp");
         case AND: return ctx.builder->CreateAnd(L, R, "andtmp");
         case OR:  return ctx.builder->CreateOr(L, R, "ortmp");
-        case CONCAT: case POWER: break; // handled above
+        case CONCAT: case POWER: case REF_EQ: case REF_NE: break; // handled above
     }
     return nullptr;
 }
@@ -1343,12 +1504,16 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         if (!v) return nullptr;
         return ctx.builder->CreateCall(ctx.inopenFunc, {v}, "inopen");
     }
-    if (name == "inreadline") {
+    if (name == "inreadline" || name == "inreadtext") {
+        // INFILE INIMAGE: read a line and wrap it as a TEXT descriptor.
         if (args.size() < 2) return nullptr;
         auto fh = args[0]->codegen(ctx);
         auto n = args[1]->codegen(ctx);
         if (!fh || !n) return nullptr;
-        return ctx.builder->CreateCall(ctx.inreadlineFunc, {fh, n}, "inreadline");
+        auto ptrTyR = llvm::PointerType::getUnqual(*ctx.llvmContext);
+        auto fn = ctx.module->getOrInsertFunction("simula_inreadtext",
+            llvm::FunctionType::get(ptrTyR, {i64Ty, i64Ty}, false));
+        return ctx.builder->CreateCall(fn, {fh, n}, "inreadtext");
     }
     if (name == "inclose") {
         if (args.empty()) return nullptr;
@@ -2270,7 +2435,10 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
             auto stdinPtr = ctx.builder->CreateLoad(ptrTy, stdinGv, "stdin");
             ctx.builder->CreateCall(fgetsFunc,
                 {buf, llvm::ConstantInt::get(i32Ty, 1024), stdinPtr});
-            return buf;
+            // Wrap the NUL-terminated line buffer as a TEXT descriptor.
+            auto litFn = ctx.module->getOrInsertFunction("simula_text_lit",
+                llvm::FunctionType::get(ptrTy, {ptrTy}, false));
+            return ctx.builder->CreateCall(litFn, {buf}, "sysin_img");
         }
     }
 
@@ -2278,77 +2446,15 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
     if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
         if (ctx.textVars.count(ident->name)) {
             auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
-            auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
-            auto i8Ty = llvm::Type::getInt8Ty(*ctx.llvmContext);
             auto [varPtr, varTy] = ctx.getVarPtr(ident->name);
-            auto [posPtr, posTy] = ctx.getVarPtr(ident->name + "__pos");
             if (!varPtr) {
                 (ctx.hadError = true, std::cerr) << "Error: TEXT variable '" << ident->name << "' not accessible\n";
                 return nullptr;
             }
-            // If no __pos field found, create a temp (for non-class TEXT vars without tracking)
-            llvm::Value* posStorage = posPtr;
-            if (!posStorage) {
-                auto it2 = ctx.locals.find(ident->name + "__pos");
-                if (it2 != ctx.locals.end()) posStorage = it2->second;
-            }
-            auto dataPtr = ctx.builder->CreateLoad(ptrTy, varPtr, "txtdata");
-
-            if (member == "more") {
-                if (!posStorage) return ctx.builder->getFalse();
-                auto pos = ctx.builder->CreateLoad(i64Ty, posStorage, "pos");
-                auto len = ctx.builder->CreateCall(ctx.textLengthFunc, {dataPtr}, "len");
-                return ctx.builder->CreateICmpSLT(pos, len, "more");
-            }
-            if (member == "length") {
-                return ctx.builder->CreateCall(ctx.textLengthFunc, {dataPtr}, "len");
-            }
-            if (member == "pos") {
-                if (!posStorage) return llvm::ConstantInt::get(i64Ty, 1);
-                auto pos = ctx.builder->CreateLoad(i64Ty, posStorage, "pos0");
-                return ctx.builder->CreateAdd(pos,
-                    llvm::ConstantInt::get(i64Ty, 1), "pos1");
-            }
-            if (member == "getchar") {
-                if (!posStorage) return llvm::ConstantInt::get(i8Ty, 0);
-                auto pos = ctx.builder->CreateLoad(i64Ty, posStorage, "pos");
-                auto charPtr = ctx.builder->CreateGEP(i8Ty, dataPtr, pos, "chptr");
-                auto ch = ctx.builder->CreateLoad(i8Ty, charPtr, "ch");
-                auto newPos = ctx.builder->CreateAdd(pos,
-                    llvm::ConstantInt::get(i64Ty, 1), "newpos");
-                ctx.builder->CreateStore(newPos, posStorage);
-                return ch;
-            }
-            if (member == "strip") {
-                return ctx.builder->CreateCall(ctx.textStripFunc, {dataPtr}, "stripped");
-            }
-            if (member == "main") {
-                return dataPtr;
-            }
-            if (member == "getint" || member == "getreal" || member == "getfrac") {
-                // De-editing advances POS past the item, so sequential calls
-                // walk through the text. Falls back to scan-from-start when no
-                // position slot exists.
-                auto dblTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
-                llvm::Type* retTy = (member == "getreal") ? (llvm::Type*)dblTy
-                                                          : (llvm::Type*)i64Ty;
-                if (posStorage) {
-                    auto fn = ctx.module->getOrInsertFunction(
-                        "simula_text_" + member + "_at",
-                        llvm::FunctionType::get(retTy, {ptrTy, ptrTy}, false));
-                    return ctx.builder->CreateCall(fn, {dataPtr, posStorage}, member);
-                }
-                auto fn = ctx.module->getOrInsertFunction("simula_text_" + member,
-                    llvm::FunctionType::get(retTy, {ptrTy}, false));
-                return ctx.builder->CreateCall(fn, {dataPtr}, member);
-            }
-            if (member == "constant") {
-                // Texts in this implementation are always writable
-                return ctx.builder->getFalse();
-            }
-            if (member == "start") {
-                return llvm::ConstantInt::get(i64Ty, 1);
-            }
+            auto desc = ctx.builder->CreateLoad(ptrTy, varPtr, "txtdesc");
+            std::vector<llvm::Value*> noArgs;
+            auto r = emitTextOp(ctx, desc, member, noArgs);
+            if (r) return r;
             (ctx.hadError = true, std::cerr) << "Error: unknown TEXT member '." << member << "'\n";
             return nullptr;
         }
@@ -2357,14 +2463,12 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
     auto obj = object->codegen(ctx);
     if (!obj) return nullptr;
 
-    // If the result is a pointer and member is a known TEXT operation, dispatch to it
-    if (obj->getType()->isPointerTy()) {
-        if (member == "strip") {
-            return ctx.builder->CreateCall(ctx.textStripFunc, {obj}, "stripped");
-        }
-        if (member == "length") {
-            return ctx.builder->CreateCall(ctx.textLengthFunc, {obj}, "len");
-        }
+    // TEXT temporary (e.g. COPY(X).STRIP, FILE.INTEXT(n).LENGTH): if the object
+    // is a TEXT-valued expression, dispatch the member through the descriptor.
+    if (obj->getType()->isPointerTy() && exprIsText(object.get(), ctx)) {
+        std::vector<llvm::Value*> noArgs;
+        auto r = emitTextOp(ctx, obj, member, noArgs);
+        if (r) return r;
     }
 
     std::string clsName;
@@ -2565,92 +2669,20 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
     if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
         if (ctx.textVars.count(ident->name)) {
             auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
-            auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
-            auto i8Ty = llvm::Type::getInt8Ty(*ctx.llvmContext);
             auto [varPtr, varTy] = ctx.getVarPtr(ident->name);
-            auto [posPtr, posTy] = ctx.getVarPtr(ident->name + "__pos");
             if (!varPtr) {
                 (ctx.hadError = true, std::cerr) << "Error: TEXT variable '" << ident->name << "' not accessible\n";
                 return nullptr;
             }
-            llvm::Value* posStorage = posPtr;
-            if (!posStorage) {
-                auto it2 = ctx.locals.find(ident->name + "__pos");
-                if (it2 != ctx.locals.end()) posStorage = it2->second;
-            }
-            auto dataPtr = ctx.builder->CreateLoad(ptrTy, varPtr, "txtdata");
-
-            if (method == "setpos") {
-                if (!posStorage) return llvm::ConstantInt::get(i64Ty, 0);
-                auto posArg = args[0]->codegen(ctx);
-                auto pos0 = ctx.builder->CreateSub(posArg,
-                    llvm::ConstantInt::get(i64Ty, 1), "pos0");
-                ctx.builder->CreateStore(pos0, posStorage);
-                return llvm::ConstantInt::get(i64Ty, 0);
-            }
-            if (method == "getchar") {
-                if (!posStorage) return llvm::ConstantInt::get(i8Ty, 0);
-                auto pos = ctx.builder->CreateLoad(i64Ty, posStorage, "pos");
-                auto charPtr = ctx.builder->CreateGEP(i8Ty, dataPtr, pos, "chptr");
-                auto ch = ctx.builder->CreateLoad(i8Ty, charPtr, "ch");
-                auto newPos = ctx.builder->CreateAdd(pos,
-                    llvm::ConstantInt::get(i64Ty, 1), "newpos");
-                ctx.builder->CreateStore(newPos, posStorage);
-                return ch;
-            }
-            if (method == "putchar") {
-                if (!posStorage) return llvm::ConstantInt::get(i64Ty, 0);
-                auto ch = args[0]->codegen(ctx);
-                auto pos = ctx.builder->CreateLoad(i64Ty, posStorage, "pos");
-                auto charPtr = ctx.builder->CreateGEP(i8Ty, dataPtr, pos, "chptr");
-                ctx.builder->CreateStore(ch, charPtr);
-                auto newPos = ctx.builder->CreateAdd(pos,
-                    llvm::ConstantInt::get(i64Ty, 1), "newpos");
-                ctx.builder->CreateStore(newPos, posStorage);
-                return llvm::ConstantInt::get(i64Ty, 0);
-            }
-            if (method == "sub") {
-                auto start = args[0]->codegen(ctx);
-                auto len = args[1]->codegen(ctx);
-                return ctx.builder->CreateCall(ctx.textSubFunc, {dataPtr, start, len}, "sub");
-            }
-            if (method == "strip") {
-                return ctx.builder->CreateCall(ctx.textStripFunc, {dataPtr}, "stripped");
-            }
-            if (method == "putint" && args.size() == 1) {
-                auto v = args[0]->codegen(ctx);
+            auto desc = ctx.builder->CreateLoad(ptrTy, varPtr, "txtdesc");
+            std::vector<llvm::Value*> argv;
+            for (auto& a : args) {
+                auto v = a->codegen(ctx);
                 if (!v) return nullptr;
-                if (v->getType()->isDoubleTy()) v = simulaRealToInt(ctx, v, i64Ty);
-                auto voidTy = llvm::Type::getVoidTy(*ctx.llvmContext);
-                auto fn = ctx.module->getOrInsertFunction("simula_text_putint",
-                    llvm::FunctionType::get(voidTy, {ptrTy, i64Ty}, false));
-                return ctx.builder->CreateCall(fn, {dataPtr, v});
+                argv.push_back(v);
             }
-            if ((method == "putfix" || method == "putreal") && args.size() == 2) {
-                auto dblTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
-                auto r = args[0]->codegen(ctx);
-                auto d = args[1]->codegen(ctx);
-                if (!r || !d) return nullptr;
-                if (r->getType()->isIntegerTy())
-                    r = ctx.builder->CreateSIToFP(r, dblTy, "tofp");
-                if (d->getType()->isDoubleTy()) d = simulaRealToInt(ctx, d, i64Ty);
-                auto voidTy = llvm::Type::getVoidTy(*ctx.llvmContext);
-                auto fn = ctx.module->getOrInsertFunction(
-                    method == "putfix" ? "simula_text_putfix" : "simula_text_putreal",
-                    llvm::FunctionType::get(voidTy, {ptrTy, dblTy, i64Ty}, false));
-                return ctx.builder->CreateCall(fn, {dataPtr, r, d});
-            }
-            if (method == "putfrac" && args.size() == 2) {
-                auto v = args[0]->codegen(ctx);
-                auto d = args[1]->codegen(ctx);
-                if (!v || !d) return nullptr;
-                if (v->getType()->isDoubleTy()) v = simulaRealToInt(ctx, v, i64Ty);
-                if (d->getType()->isDoubleTy()) d = simulaRealToInt(ctx, d, i64Ty);
-                auto voidTy = llvm::Type::getVoidTy(*ctx.llvmContext);
-                auto fn = ctx.module->getOrInsertFunction("simula_text_putfrac",
-                    llvm::FunctionType::get(voidTy, {ptrTy, i64Ty, i64Ty}, false));
-                return ctx.builder->CreateCall(fn, {dataPtr, v, d});
-            }
+            auto r = emitTextOp(ctx, desc, method, argv);
+            if (r) return r;
             (ctx.hadError = true, std::cerr) << "Error: unknown TEXT method '." << method << "'\n";
             return nullptr;
         }
@@ -3526,12 +3558,31 @@ llvm::Value* RefDeclaration::codegen(CodeGenContext& ctx) {
     return alloca;
 }
 
+// TEXT value assignment (:=): copy characters in place into the existing frame
+// at *slot, or COPY(src) when the slot is NOTEXT/frameless (first assignment).
+// simula_text_assign returns the descriptor to bind, so a single store covers
+// both cases.
+static void emitTextValueAssign(CodeGenContext& ctx, llvm::Value* slot,
+                                llvm::Value* rhsDesc) {
+    auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+    auto cur = ctx.builder->CreateLoad(ptrTy, slot, "txtcur");
+    auto fn = ctx.module->getOrInsertFunction("simula_text_assign",
+        llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false));
+    auto bound = ctx.builder->CreateCall(fn, {cur, rhsDesc}, "txtasg");
+    ctx.builder->CreateStore(bound, slot);
+}
+
 llvm::Value* Assignment::codegen(CodeGenContext& ctx) {
     // Check if assigning to procedure return variable
     if (name == ctx.currentProcName && ctx.returnValueAlloca) {
         auto val = value->codegen(ctx);
         if (!val) return nullptr;
         auto destTy = ctx.returnValueAlloca->getAllocatedType();
+        // TEXT-returning proc: := copies into the return frame (or COPY-binds).
+        if (destTy->isPointerTy() && exprIsText(value.get(), ctx)) {
+            emitTextValueAssign(ctx, ctx.returnValueAlloca, val);
+            return val;
+        }
         if (val->getType() != destTy) {
             if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
                 val = ctx.builder->CreateSIToFP(val, destTy);
@@ -3540,6 +3591,17 @@ llvm::Value* Assignment::codegen(CodeGenContext& ctx) {
         }
         ctx.builder->CreateStore(val, ctx.returnValueAlloca);
         return val;
+    }
+
+    // TEXT variable: := is an in-place character copy, not a pointer rebind.
+    if (ctx.textVars.count(name)) {
+        auto [slot, slotTy] = ctx.getVarPtr(name);
+        if (slot) {
+            auto val = value->codegen(ctx);
+            if (!val) return nullptr;
+            emitTextValueAssign(ctx, slot, val);
+            return val;
+        }
     }
 
     auto [varPtr, varTy] = ctx.getVarPtr(name);
@@ -3756,14 +3818,10 @@ llvm::Value* RefAssignment::codegen(CodeGenContext& ctx) {
     }
     auto val = value->codegen(ctx);
     if (!val) return nullptr;
+    // Reference assignment (T :- X): rebind to the same descriptor. The cursor
+    // now lives inside the descriptor, so producers (COPY/SUB/BLANKS) already
+    // hand back pos=0 — no separate reset needed.
     ctx.builder->CreateStore(val, varPtr);
-    // For TEXT variables, a reference assignment (e.g. T :- COPY(X)) resets the
-    // implicit read/write position to the start of the new text.
-    auto [posPtr, posTy] = ctx.getVarPtr(name + "__pos");
-    if (posPtr) {
-        ctx.builder->CreateStore(
-            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), 0), posPtr);
-    }
     return val;
 }
 
@@ -5360,8 +5418,13 @@ llvm::Value* OutFixStatement::codegen(CodeGenContext& ctx) {
 llvm::Value* OutTextStatement::codegen(CodeGenContext& ctx) {
     auto val = text->codegen(ctx);
     if (!val) return nullptr;
-    auto fmt = ctx.builder->CreateGlobalString("%s", "strfmt");
-    return ctx.builder->CreateCall(ctx.printfFunc, {fmt, val});
+    // TEXT is a descriptor whose frame is not NUL-terminated (subwindows), so
+    // print the exact window via the runtime rather than printf %s.
+    auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+    auto voidTy = llvm::Type::getVoidTy(*ctx.llvmContext);
+    auto fn = ctx.module->getOrInsertFunction("simula_outtext",
+        llvm::FunctionType::get(voidTy, {ptrTy}, false));
+    return ctx.builder->CreateCall(fn, {val});
 }
 
 llvm::Value* OutImageStatement::codegen(CodeGenContext& ctx) {

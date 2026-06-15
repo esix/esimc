@@ -963,13 +963,13 @@ expr_stmt
                 /* a(i) := expr or a(i,j) := expr -> ArrayAssignment */
                 ExprPtr idx(call->args.empty() ? nullptr : call->args[0].release());
                 ExprPtr idx2(call->args.size() >= 2 ? call->args[1].release() : nullptr);
-                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), std::move(idx2));
+                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), false, std::move(idx2));
                 delete $1;
             } else {
                 MemberAccess* ma = dynamic_cast<MemberAccess*>($1);
                 if (ma) {
                     $$ = new MemberAssignment(ExprPtr(ma->object.release()),
-                                              ma->member, ExprPtr($3));
+                                              ma->member, ExprPtr($3), false);
                     delete $1;
                 } else {
                     MethodCall* mc = dynamic_cast<MethodCall*>($1);
@@ -978,7 +978,7 @@ expr_stmt
                         ExprPtr idx(mc->args.empty() ? nullptr : mc->args[0].release());
                         $$ = new MemberArrayAssignment(ExprPtr(mc->object.release()),
                                                        mc->method, std::move(idx),
-                                                       ExprPtr($3));
+                                                       ExprPtr($3), false);
                         delete $1;
                     } else {
                         yyerror("invalid left-hand side of assignment");
@@ -1000,13 +1000,13 @@ expr_stmt
                 /* a(i) :- expr or a(i,j) :- expr -> ArrayAssignment (ref-assign) */
                 ExprPtr idx(call->args.empty() ? nullptr : call->args[0].release());
                 ExprPtr idx2(call->args.size() >= 2 ? call->args[1].release() : nullptr);
-                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), std::move(idx2));
+                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), true, std::move(idx2));
                 delete $1;
             } else {
                 MemberAccess* ma = dynamic_cast<MemberAccess*>($1);
                 if (ma) {
                     $$ = new MemberAssignment(ExprPtr(ma->object.release()),
-                                              ma->member, ExprPtr($3));
+                                              ma->member, ExprPtr($3), true);
                     delete $1;
                 } else {
                     MethodCall* mc = dynamic_cast<MethodCall*>($1);
@@ -1015,7 +1015,7 @@ expr_stmt
                         ExprPtr idx(mc->args.empty() ? nullptr : mc->args[0].release());
                         $$ = new MemberArrayAssignment(ExprPtr(mc->object.release()),
                                                        mc->method, std::move(idx),
-                                                       ExprPtr($3));
+                                                       ExprPtr($3), true);
                         delete $1;
                     } else {
                         yyerror("invalid left-hand side of reference assignment");
@@ -1078,12 +1078,13 @@ comparison
         $$ = new BinaryOp(BinaryOp::GE, ExprPtr($1), ExprPtr($3));
       }
     | additive T_REFEQ additive {
-        /* == reference identity (pointer comparison) */
-        $$ = new BinaryOp(BinaryOp::EQ, ExprPtr($1), ExprPtr($3));
+        /* == reference identity: pointer identity for REF, frame+start+length
+           identity for TEXT (distinct from = content comparison). */
+        $$ = new BinaryOp(BinaryOp::REF_EQ, ExprPtr($1), ExprPtr($3));
       }
     | additive T_REFNE additive {
         /* =/= reference non-identity */
-        $$ = new BinaryOp(BinaryOp::NE, ExprPtr($1), ExprPtr($3));
+        $$ = new BinaryOp(BinaryOp::REF_NE, ExprPtr($1), ExprPtr($3));
       }
     | additive T_IS T_IDENT {
         $$ = new IsExpression(ExprPtr($1), $3);

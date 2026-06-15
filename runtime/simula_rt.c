@@ -201,71 +201,142 @@ void* simula_alloc(int64_t size) {
  * Platform-independent: text operations
  * ================================================================ */
 
-char* simula_blanks(int64_t n) {
-    char* s = (char*)malloc((size_t)(n + 1));
-    if (!s) {
-        fprintf(stderr, "simula_blanks: out of memory\n");
-        exit(1);
-    }
-    memset(s, ' ', (size_t)n);
-    s[n] = '\0';
-    return s;
+/* Allocate a descriptor over a frame of total size `framelen`. */
+static SimulaText* st_new(char* frame, int64_t start, int64_t length,
+                          int64_t pos, int64_t framelen) {
+    SimulaText* t = (SimulaText*)malloc(sizeof(SimulaText));
+    if (!t) { fprintf(stderr, "simula text: out of memory\n"); exit(1); }
+    t->frame = frame; t->start = start; t->length = length; t->pos = pos;
+    t->framelen = framelen;
+    return t;
 }
 
-char* simula_text_copy(const char* s) {
-    if (s == NULL) return strdup("");
-    return strdup(s);
+/* Allocate a fresh, blank-filled frame of n chars wrapped in a descriptor. */
+static SimulaText* st_fresh(int64_t n) {
+    if (n < 0) n = 0;
+    char* f = (char*)malloc((size_t)(n > 0 ? n : 1));
+    if (!f) { fprintf(stderr, "simula text: out of memory\n"); exit(1); }
+    memset(f, ' ', (size_t)n);
+    return st_new(f, 0, n, 0, n);
 }
 
-char* simula_text_concat(const char* a, const char* b) {
-    if (a == NULL) a = "";
-    if (b == NULL) b = "";
-    size_t la = strlen(a);
-    size_t lb = strlen(b);
-    char* result = (char*)malloc(la + lb + 1);
-    if (!result) {
-        fprintf(stderr, "simula_text_concat: out of memory\n");
-        exit(1);
-    }
-    memcpy(result, a, la);
-    memcpy(result + la, b, lb);
-    result[la + lb] = '\0';
-    return result;
+/* Wrap a C literal/string as a read-only TEXT over its (shared) storage. */
+SimulaText* simula_text_lit(const char* cstr) {
+    if (cstr == NULL) return NULL;
+    int64_t n = (int64_t)strlen(cstr);
+    return st_new((char*)cstr, 0, n, 0, n);
 }
 
-int64_t simula_text_length(const char* s) {
-    if (s == NULL) return 0;
-    return (int64_t)strlen(s);
+SimulaText* simula_blanks(int64_t n) {
+    return st_fresh(n);
 }
 
-char* simula_text_strip(const char* s) {
-    if (s == NULL) return strdup("");
-    size_t len = strlen(s);
-    while (len > 0 && s[len - 1] == ' ') len--;
-    char* r = (char*)malloc(len + 1);
-    memcpy(r, s, len);
-    r[len] = '\0';
+SimulaText* simula_text_copy(SimulaText* s) {
+    if (s == NULL) return st_fresh(0);
+    SimulaText* r = st_fresh(s->length);
+    if (s->length > 0) memcpy(r->frame, s->frame + s->start, (size_t)s->length);
     return r;
 }
 
-char* simula_text_sub(const char* s, int64_t start, int64_t len) {
-    /* start is 1-based */
-    if (s == NULL) return strdup("");
-    size_t slen = strlen(s);
+SimulaText* simula_text_concat(SimulaText* a, SimulaText* b) {
+    int64_t la = a ? a->length : 0;
+    int64_t lb = b ? b->length : 0;
+    SimulaText* r = st_fresh(la + lb);
+    if (la > 0) memcpy(r->frame, a->frame + a->start, (size_t)la);
+    if (lb > 0) memcpy(r->frame + la, b->frame + b->start, (size_t)lb);
+    return r;
+}
+
+int64_t simula_text_length(SimulaText* s) {
+    return s ? s->length : 0;
+}
+
+/* STRIP returns a subtext (alias) with trailing blanks removed. */
+SimulaText* simula_text_strip(SimulaText* s) {
+    if (s == NULL) return st_fresh(0);
+    int64_t len = s->length;
+    while (len > 0 && s->frame[s->start + len - 1] == ' ') len--;
+    return st_new(s->frame, s->start, len, 0, s->framelen);
+}
+
+/* SUB(start,len) with 1-based start; aliases the parent frame (no copy). */
+SimulaText* simula_text_sub(SimulaText* s, int64_t start, int64_t len) {
+    if (s == NULL) return st_fresh(0);
     int64_t idx = start - 1;
     if (idx < 0) idx = 0;
-    if (idx >= (int64_t)slen) return strdup("");
-    if (idx + len > (int64_t)slen) len = (int64_t)slen - idx;
-    char* r = (char*)malloc((size_t)len + 1);
-    memcpy(r, s + idx, (size_t)len);
-    r[len] = '\0';
-    return r;
+    if (idx > s->length) idx = s->length;
+    if (len < 0) len = 0;
+    if (idx + len > s->length) len = s->length - idx;
+    return st_new(s->frame, s->start + idx, len, 0, s->framelen);
 }
 
-int64_t simula_text_eq(const char* a, const char* b) {
+/* MAIN: the whole underlying frame (per the standard, the main text). */
+SimulaText* simula_text_main(SimulaText* s) {
+    if (s == NULL) return NULL;
+    return st_new(s->frame, 0, s->framelen, 0, s->framelen);
+}
+
+/* Content equality (= operator): same length and same characters. NOTEXT
+ * equals only NOTEXT; an allocated "" (length 0) does NOT equal NOTEXT. */
+int64_t simula_text_eq(SimulaText* a, SimulaText* b) {
     if (a == NULL && b == NULL) return 1;
     if (a == NULL || b == NULL) return 0;
-    return strcmp(a, b) == 0 ? 1 : 0;
+    if (a->length != b->length) return 0;
+    if (a->length == 0) return 1;
+    return memcmp(a->frame + a->start, b->frame + b->start, (size_t)a->length) == 0 ? 1 : 0;
+}
+
+/* Reference identity (== operator): the same text object, i.e. same frame,
+ * start and length (cursor is not part of identity). Both NOTEXT => true. */
+int64_t simula_text_ref_eq(SimulaText* a, SimulaText* b) {
+    if (a == b) return 1;
+    if (a == NULL || b == NULL) return 0;
+    return (a->frame == b->frame && a->start == b->start && a->length == b->length) ? 1 : 0;
+}
+
+/* Value assignment (:=): copy characters from src into dst's frame window,
+ * blank-padding if src is shorter; if src is longer, copy what fits. Returns
+ * the descriptor that should be bound to the LHS: dst when it has a frame, or
+ * a fresh COPY of src when dst is NOTEXT/frameless (first-assignment case). */
+SimulaText* simula_text_assign(SimulaText* dst, SimulaText* src) {
+    if (dst == NULL || dst->frame == NULL) return simula_text_copy(src);
+    int64_t slen = src ? src->length : 0;
+    int64_t n = slen < dst->length ? slen : dst->length;
+    if (n > 0) memcpy(dst->frame + dst->start, src->frame + src->start, (size_t)n);
+    for (int64_t i = n; i < dst->length; i++) dst->frame[dst->start + i] = ' ';
+    return dst;
+}
+
+int64_t simula_text_more(SimulaText* s) {
+    if (s == NULL) return 0;
+    return s->pos < s->length ? 1 : 0;
+}
+
+int64_t simula_text_pos(SimulaText* s) {
+    return s ? s->pos + 1 : 1;
+}
+
+void simula_text_setpos(SimulaText* s, int64_t p) {
+    if (s == NULL) return;
+    int64_t z = p - 1;
+    if (z < 0) z = 0;
+    if (z > s->length) z = s->length;
+    s->pos = z;
+}
+
+int8_t simula_text_getchar(SimulaText* s) {
+    if (s == NULL || s->pos >= s->length) return 0;
+    return (int8_t)s->frame[s->start + s->pos++];
+}
+
+void simula_text_putchar(SimulaText* s, int8_t c) {
+    if (s == NULL || s->pos >= s->length) return;
+    s->frame[s->start + s->pos++] = (char)c;
+}
+
+void simula_outtext(SimulaText* s) {
+    if (s == NULL || s->length <= 0) return;
+    fwrite(s->frame + s->start, 1, (size_t)s->length, stdout);
 }
 
 /* Look-ahead end-of-file test for SYSIN. Skips leading whitespace; if EOF is
@@ -288,10 +359,22 @@ int64_t simula_lastitem(void) {
  * File input (INFILE support)
  * ================================================================ */
 
+/* Extract a TEXT descriptor's window into a NUL-terminated C string (filenames
+ * etc.). Returns a static buffer good until the next call — fine for fopen. */
+static const char* st_cstr(SimulaText* t) {
+    static char buf[1024];
+    if (t == NULL) { buf[0] = '\0'; return buf; }
+    int64_t n = t->length;
+    if (n > 1023) n = 1023;
+    if (n > 0) memcpy(buf, t->frame + t->start, (size_t)n);
+    buf[n] = '\0';
+    return buf;
+}
+
 /* Open a file for reading. Returns a FILE* cast to int64_t (0 on failure). */
-int64_t simula_inopen(const char* name) {
+int64_t simula_inopen(SimulaText* name) {
     if (name == NULL) return 0;
-    FILE* f = fopen(name, "r");
+    FILE* f = fopen(st_cstr(name), "r");
     return (int64_t)(intptr_t)f;
 }
 
@@ -353,97 +436,84 @@ void simula_outint(int64_t v, int64_t w) {
  * TEXT editing / de-editing procedures (Simula 67 ch. 8)
  * ================================================================ */
 
-/* GETINT: interpret the text as an integer item (leading blanks allowed). */
-int64_t simula_text_getint(const char* t) {
-    if (t == NULL) return 0;
-    while (*t == ' ' || *t == '\t') t++;
-    return strtoll(t, NULL, 10);
-}
+/* De-editing scans the descriptor window from its cursor and advances pos
+ * past the parsed item, so sequential GETINT/GETREAL/GETFRAC walk the text. */
 
-/* GETREAL: interpret the text as a real item; accepts the Simula '&'
- * exponent marker as well as 'e'/'E'. */
-double simula_text_getreal(const char* t) {
-    if (t == NULL) return 0.0;
-    char buf[64]; size_t j = 0;
-    for (const char* p = t; *p && j < 62; p++)
-        buf[j++] = (*p == '&') ? 'e' : *p;
-    buf[j] = '\0';
-    return strtod(buf, NULL);
-}
-
-/* GETFRAC: interpret as a grouped item — digits with embedded spaces and an
- * optional decimal point; returns the integer formed by all the digits. */
-int64_t simula_text_getfrac(const char* t) {
+int64_t simula_text_getint(SimulaText* t) {
     if (t == NULL) return 0;
-    int64_t v = 0; int neg = 0; const char* p = t;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p == '-') { neg = 1; p++; } else if (*p == '+') p++;
-    for (; *p; p++) {
-        if (*p >= '0' && *p <= '9') v = v * 10 + (*p - '0');
-        else if (*p == ' ' || *p == '.') continue;
-        else break;
-    }
+    int64_t i = t->pos;
+    const char* f = t->frame + t->start;
+    while (i < t->length && (f[i] == ' ' || f[i] == '\t')) i++;
+    int64_t v = 0, neg = 0, seen = 0;
+    if (i < t->length && (f[i] == '-' || f[i] == '+')) { neg = (f[i] == '-'); i++; }
+    while (i < t->length && f[i] >= '0' && f[i] <= '9') { v = v * 10 + (f[i] - '0'); i++; seen = 1; }
+    if (seen) t->pos = i;
     return neg ? -v : v;
 }
 
-/* Right-justify `src` into the full frame of `t` (blank fill); if it does
- * not fit, fill the frame with asterisks (standard editing overflow rule). */
-static void simula_edit_into(char* t, const char* src) {
-    size_t flen = strlen(t);
-    size_t slen = strlen(src);
-    if (slen > flen) {
-        memset(t, '*', flen);
-        return;
+double simula_text_getreal(SimulaText* t) {
+    if (t == NULL) return 0.0;
+    int64_t i = t->pos;
+    const char* f = t->frame + t->start;
+    while (i < t->length && (f[i] == ' ' || f[i] == '\t')) i++;
+    char buf[64]; size_t j = 0;
+    int64_t startScan = i;
+    while (i < t->length && j < 62) {
+        char c = f[i];
+        if ((c >= '0' && c <= '9') || c == '.' || c == '+' || c == '-' ||
+            c == 'e' || c == 'E' || c == '&') {
+            buf[j++] = (c == '&') ? 'e' : c;
+            i++;
+        } else break;
     }
-    memset(t, ' ', flen - slen);
-    memcpy(t + (flen - slen), src, slen);
+    buf[j] = '\0';
+    char* end = NULL;
+    double v = strtod(buf, &end);
+    if (end && end != buf) t->pos = startScan + (int64_t)(end - buf);
+    return v;
 }
 
-/* PUTINT: edit v right-justified into the whole frame of t. */
-void simula_text_putint(char* t, int64_t v) {
-    if (t == NULL) return;
-    char buf[32];
-    snprintf(buf, sizeof buf, "%lld", (long long)v);
-    simula_edit_into(t, buf);
+int64_t simula_text_getfrac(SimulaText* t) {
+    if (t == NULL) return 0;
+    int64_t i = t->pos;
+    const char* f = t->frame + t->start;
+    while (i < t->length && (f[i] == ' ' || f[i] == '\t')) i++;
+    int64_t v = 0, neg = 0, seen = 0;
+    if (i < t->length && (f[i] == '-' || f[i] == '+')) { neg = (f[i] == '-'); i++; }
+    while (i < t->length) {
+        char c = f[i];
+        if (c >= '0' && c <= '9') { v = v * 10 + (c - '0'); seen = 1; i++; }
+        else if ((c == ' ' || c == '.') && seen &&
+                 i + 1 < t->length && f[i+1] >= '0' && f[i+1] <= '9') i++;
+        else break;
+    }
+    if (seen) t->pos = i;
+    return neg ? -v : v;
 }
 
-/* PUTFIX: fixed-point with d digits after the point. */
-void simula_text_putfix(char* t, double r, int64_t d) {
-    if (t == NULL) return;
-    char buf[64];
-    if (d < 0) d = 0;
-    snprintf(buf, sizeof buf, "%.*f", (int)d, r);
-    simula_edit_into(t, buf);
+/* Right-justify `src` into a char window of `width` (blank fill); if it does
+ * not fit, fill the window with asterisks (standard editing overflow rule). */
+static void edit_into(char* base, int64_t width, const char* src) {
+    int64_t slen = (int64_t)strlen(src);
+    if (slen > width) { memset(base, '*', (size_t)width); return; }
+    memset(base, ' ', (size_t)(width - slen));
+    memcpy(base + (width - slen), src, (size_t)slen);
 }
 
-/* PUTREAL: scientific form with d significant digits, '&' exponent marker. */
-void simula_text_putreal(char* t, double r, int64_t d) {
-    if (t == NULL) return;
-    char buf[64];
-    int prec = (int)(d > 0 ? d - 1 : 0);
-    snprintf(buf, sizeof buf, "%.*e", prec, r);
-    for (char* p = buf; *p; p++)
-        if (*p == 'e' || *p == 'E') *p = '&';
-    simula_edit_into(t, buf);
-}
-
-/* PUTFRAC: grouped item — digit groups of three separated by blanks, the
- * last d digits after a decimal point. E.g. v=1234567, d=2 -> "12 345.67". */
-void simula_text_putfrac(char* t, int64_t v, int64_t d) {
-    if (t == NULL) return;
+/* Build the grouped PUTFRAC/OUTFRAC string into `out`. */
+static void frac_to_str(int64_t v, int64_t d, char* out) {
     char digits[32];
     int neg = v < 0;
     unsigned long long uv = neg ? (unsigned long long)(-v) : (unsigned long long)v;
     int n = snprintf(digits, sizeof digits, "%llu", uv);
     if (d < 0) d = 0;
-    /* Pad with leading zeros so there are more than d digits */
     while (n <= (int)d && n < 30) {
         memmove(digits + 1, digits, (size_t)n + 1);
         digits[0] = '0';
         n++;
     }
     int intDigits = n - (int)d;
-    char out[64]; int j = 0;
+    int j = 0;
     if (neg) out[j++] = '-';
     for (int i = 0; i < intDigits && j < 60; i++) {
         if (i > 0 && (intDigits - i) % 3 == 0) out[j++] = ' ';
@@ -454,16 +524,47 @@ void simula_text_putfrac(char* t, int64_t v, int64_t d) {
         for (int i = intDigits; i < n && j < 62; i++) out[j++] = digits[i];
     }
     out[j] = '\0';
-    simula_edit_into(t, out);
+}
+
+void simula_text_putint(SimulaText* t, int64_t v) {
+    if (t == NULL) return;
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lld", (long long)v);
+    edit_into(t->frame + t->start, t->length, buf);
+}
+
+void simula_text_putfix(SimulaText* t, double r, int64_t d) {
+    if (t == NULL) return;
+    char buf[64];
+    if (d < 0) d = 0;
+    snprintf(buf, sizeof buf, "%.*f", (int)d, r);
+    edit_into(t->frame + t->start, t->length, buf);
+}
+
+void simula_text_putreal(SimulaText* t, double r, int64_t d) {
+    if (t == NULL) return;
+    char buf[64];
+    int prec = (int)(d > 0 ? d - 1 : 0);
+    snprintf(buf, sizeof buf, "%.*e", prec, r);
+    for (char* p = buf; *p; p++)
+        if (*p == 'e' || *p == 'E') *p = '&';
+    edit_into(t->frame + t->start, t->length, buf);
+}
+
+void simula_text_putfrac(SimulaText* t, int64_t v, int64_t d) {
+    if (t == NULL) return;
+    char out[64];
+    frac_to_str(v, d, out);
+    edit_into(t->frame + t->start, t->length, out);
 }
 
 /* ================================================================
  * File output (OUTFILE support) and item-level file input
  * ================================================================ */
 
-int64_t simula_outopen(const char* name) {
+int64_t simula_outopen(SimulaText* name) {
     if (name == NULL) return 0;
-    FILE* f = fopen(name, "w");
+    FILE* f = fopen(st_cstr(name), "w");
     return (int64_t)(intptr_t)f;
 }
 
@@ -472,9 +573,18 @@ void simula_outclose(int64_t handle) {
     if (f != NULL) fclose(f);
 }
 
-void simula_file_outtext(int64_t handle, const char* t) {
+void simula_file_outtext(int64_t handle, SimulaText* t) {
     FILE* f = (FILE*)(intptr_t)handle;
-    if (f != NULL && t != NULL) fputs(t, f);
+    if (f != NULL && t != NULL && t->length > 0)
+        fwrite(t->frame + t->start, 1, (size_t)t->length, f);
+}
+
+/* INFILE INIMAGE/INTEXT support: read one line and wrap it as a TEXT. */
+SimulaText* simula_inreadtext(int64_t handle, int64_t maxlen) {
+    char* line = simula_inreadline(handle, maxlen);
+    if (line == NULL) return NULL;
+    int64_t n = (int64_t)strlen(line);
+    return st_new(line, 0, n, 0, n);
 }
 
 void simula_file_outint(int64_t handle, int64_t v, int64_t w) {
@@ -541,19 +651,13 @@ void simula_outreal(double v, int64_t d, int64_t w) {
 
 /* OUTFRAC(v, d, w): grouped item, like PUTFRAC, in a width-w field. */
 void simula_outfrac(int64_t v, int64_t d, int64_t w) {
-    char frame[64];
+    char out[64];
+    frac_to_str(v, d, out);
     int width = (int)(w > 0 && w < 60 ? w : 0);
-    if (width == 0) {
-        /* No field: edit into a generous frame and print stripped */
-        memset(frame, ' ', 40); frame[40] = '\0';
-        simula_text_putfrac(frame, v, d);
-        char* p = frame; while (*p == ' ') p++;
-        fputs(p, stdout);
-        return;
-    }
-    memset(frame, ' ', (size_t)width); frame[width] = '\0';
-    simula_text_putfrac(frame, v, d);
-    fputs(frame, stdout);
+    if (width == 0) { fputs(out, stdout); return; }
+    char frame[64];
+    edit_into(frame, width, out);
+    fwrite(frame, 1, (size_t)width, stdout);
 }
 
 /* INFRAC: read a grouped item from stdin (digits with embedded blanks
@@ -876,57 +980,6 @@ void simula_sim_terminate(void* obj) {
     sim_state_of(obj)->terminated = 1;
     sim_remove_notice(obj);
     for (;;) simula_coro_detach(sim_coro_of(obj));
-}
-
-/* Position-advancing de-editing: scan from *pos0 (0-based offset into t),
- * parse the item, and leave *pos0 just past it — so sequential GETINT /
- * GETREAL / GETFRAC walk through the text like the standard requires. */
-int64_t simula_text_getint_at(const char* t, int64_t* pos0) {
-    if (t == NULL) return 0;
-    int64_t len = (int64_t)strlen(t);
-    int64_t i = (pos0 && *pos0 > 0) ? *pos0 : 0;
-    if (i > len) i = len;
-    while (i < len && (t[i] == ' ' || t[i] == '\t')) i++;
-    char* end = NULL;
-    long long v = strtoll(t + i, &end, 10);
-    if (pos0) *pos0 = end ? (int64_t)(end - t) : i;
-    return (int64_t)v;
-}
-
-double simula_text_getreal_at(const char* t, int64_t* pos0) {
-    if (t == NULL) return 0.0;
-    int64_t len = (int64_t)strlen(t);
-    int64_t i = (pos0 && *pos0 > 0) ? *pos0 : 0;
-    if (i > len) i = len;
-    while (i < len && (t[i] == ' ' || t[i] == '\t')) i++;
-    /* normalize '&' exponent to 'e' in a bounded window */
-    char buf[64]; size_t j = 0;
-    int64_t k = i;
-    for (; t[k] && j < 62; k++)
-        buf[j++] = (t[k] == '&') ? 'e' : t[k];
-    buf[j] = '\0';
-    char* end = NULL;
-    double v = strtod(buf, &end);
-    if (pos0) *pos0 = i + (end ? (int64_t)(end - buf) : 0);
-    return v;
-}
-
-int64_t simula_text_getfrac_at(const char* t, int64_t* pos0) {
-    if (t == NULL) return 0;
-    int64_t len = (int64_t)strlen(t);
-    int64_t i = (pos0 && *pos0 > 0) ? *pos0 : 0;
-    if (i > len) i = len;
-    while (i < len && (t[i] == ' ' || t[i] == '\t')) i++;
-    int64_t v = 0; int neg = 0; int seen = 0;
-    if (i < len && (t[i] == '-' || t[i] == '+')) { neg = (t[i] == '-'); i++; }
-    while (i < len) {
-        if (t[i] >= '0' && t[i] <= '9') { v = v * 10 + (t[i] - '0'); seen = 1; i++; }
-        else if ((t[i] == ' ' || t[i] == '.') && seen &&
-                 i + 1 < len && t[i+1] >= '0' && t[i+1] <= '9') i++;
-        else break;
-    }
-    if (pos0) *pos0 = i;
-    return neg ? -v : v;
 }
 
 /* Direct activation (plain ACTIVATE X): per the standard X becomes current

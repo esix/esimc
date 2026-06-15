@@ -11,17 +11,41 @@ extern "C" {
 
 typedef struct SimulaCoro SimulaCoro;
 
+/* A Simula TEXT value: a reference to a shared character frame plus the
+ * subtext window (start, length) and the read/write cursor (pos). A TEXT
+ * variable holds a pointer to one of these; NOTEXT is the null pointer.
+ * SUB/STRIP/MAIN return descriptors that ALIAS the parent frame (no copy),
+ * so writes through a subtext reach the parent. */
+typedef struct SimulaText {
+    char*   frame;    /* shared character storage (not NUL-terminated in general) */
+    int64_t start;    /* 0-based offset of this text within the frame */
+    int64_t length;   /* number of characters in this text */
+    int64_t pos;      /* 0-based cursor, in [0, length] */
+    int64_t framelen; /* total size of frame (so MAIN recovers the whole text) */
+} SimulaText;
+
 /* Memory allocation */
 void* simula_alloc(int64_t size);
 
-/* Text operations */
-char* simula_blanks(int64_t n);
-char* simula_text_copy(const char* s);
-char* simula_text_concat(const char* a, const char* b);
-int64_t simula_text_length(const char* s);
-char* simula_text_strip(const char* s);
-char* simula_text_sub(const char* s, int64_t start, int64_t len);
-int64_t simula_text_eq(const char* a, const char* b);
+/* Text constructors / operations (all on SimulaText* descriptors; NULL = NOTEXT) */
+SimulaText* simula_text_lit(const char* cstr);            /* wrap a C literal */
+SimulaText* simula_blanks(int64_t n);
+SimulaText* simula_text_copy(SimulaText* s);
+SimulaText* simula_text_concat(SimulaText* a, SimulaText* b);
+int64_t     simula_text_length(SimulaText* s);
+SimulaText* simula_text_strip(SimulaText* s);            /* alias, trailing blanks trimmed */
+SimulaText* simula_text_sub(SimulaText* s, int64_t start, int64_t len); /* alias */
+SimulaText* simula_text_main(SimulaText* s);             /* alias of the whole frame span */
+int64_t     simula_text_eq(SimulaText* a, SimulaText* b);    /* content equality (=) */
+int64_t     simula_text_ref_eq(SimulaText* a, SimulaText* b);/* reference identity (==) */
+SimulaText* simula_text_assign(SimulaText* dst, SimulaText* src); /* := in place, returns binding */
+/* Cursor operations */
+int64_t simula_text_more(SimulaText* s);
+int64_t simula_text_pos(SimulaText* s);                  /* 1-based */
+void    simula_text_setpos(SimulaText* s, int64_t p);    /* 1-based */
+int8_t  simula_text_getchar(SimulaText* s);
+void    simula_text_putchar(SimulaText* s, int8_t c);
+void    simula_outtext(SimulaText* s);                   /* write window to stdout */
 
 /* SYSIN LASTITEM: skip whitespace and report whether end-of-file was reached
  * (look-ahead; the next non-blank char is pushed back so a later read sees it). */
@@ -32,9 +56,9 @@ int64_t simula_ipow(int64_t base, int64_t exp);
 void simula_outint(int64_t v, int64_t w);
 
 /* File output (OUTFILE) and item-level file input */
-int64_t simula_outopen(const char* name);
+int64_t simula_outopen(SimulaText* name);
 void simula_outclose(int64_t handle);
-void simula_file_outtext(int64_t handle, const char* t);
+void simula_file_outtext(int64_t handle, SimulaText* t);
 void simula_file_outint(int64_t handle, int64_t v, int64_t w);
 void simula_file_outimage(int64_t handle);
 int64_t simula_file_inint(int64_t handle);
@@ -74,17 +98,15 @@ int64_t simula_histd(const double* a, int64_t lo, int64_t n, int64_t* u);
 void simula_histo(double* a, int64_t an, const double* b, int64_t bn,
                   double c, double w);
 
-/* TEXT editing / de-editing */
-int64_t simula_text_getint(const char* t);
-double simula_text_getreal(const char* t);
-int64_t simula_text_getfrac(const char* t);
-int64_t simula_text_getint_at(const char* t, int64_t* pos0);
-double simula_text_getreal_at(const char* t, int64_t* pos0);
-int64_t simula_text_getfrac_at(const char* t, int64_t* pos0);
-void simula_text_putint(char* t, int64_t v);
-void simula_text_putfix(char* t, double r, int64_t d);
-void simula_text_putreal(char* t, double r, int64_t d);
-void simula_text_putfrac(char* t, int64_t v, int64_t d);
+/* TEXT editing / de-editing (de-editing advances the descriptor's cursor) */
+int64_t simula_text_getint(SimulaText* t);
+double simula_text_getreal(SimulaText* t);
+int64_t simula_text_getfrac(SimulaText* t);
+void simula_text_putint(SimulaText* t, int64_t v);
+void simula_text_putfix(SimulaText* t, double r, int64_t d);
+void simula_text_putreal(SimulaText* t, double r, int64_t d);
+void simula_text_putfrac(SimulaText* t, int64_t v, int64_t d);
+SimulaText* simula_inreadtext(int64_t handle, int64_t maxlen); /* returns a TEXT line */
 
 /* Coroutine management */
 SimulaCoro* simula_coro_create(void);

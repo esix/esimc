@@ -236,7 +236,7 @@ static StmtPtr buildInfileClass() {
         rlArgs.push_back(id("fh"));
         rlArgs.push_back(ExprPtr(new IntegerLiteral(132)));
         inimageBody.push_back(StmtPtr(new RefAssignment(
-            "image", ExprPtr(new ProcedureCall("inreadline", std::move(rlArgs))))));
+            "image", ExprPtr(new ProcedureCall("inreadtext", std::move(rlArgs))))));
         auto cond = ExprPtr(new BinaryOp(BinaryOp::EQ, id("image"),
                                          ExprPtr(new NoneLiteral())));
         auto thenS = StmtPtr(new Assignment("endfile",
