@@ -539,10 +539,12 @@ llvm::Value* RealLiteral::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* TextLiteral::codegen(CodeGenContext& ctx) {
-    // Wrap the (read-only) string constant in a fresh TEXT descriptor.
+    // Copy the string constant into a fresh writable TEXT frame (a Simula text
+    // constant is a writable text object; sharing read-only .rodata would crash
+    // on PUTCHAR/:=).
     auto cstr = ctx.builder->CreateGlobalString(value, "str");
     auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
-    auto fn = ctx.module->getOrInsertFunction("simula_text_lit",
+    auto fn = ctx.module->getOrInsertFunction("simula_text_dup",
         llvm::FunctionType::get(ptrTy, {ptrTy}, false));
     return ctx.builder->CreateCall(fn, {cstr}, "txtlit");
 }
@@ -804,6 +806,9 @@ static llvm::Value* simulaRealToInt(CodeGenContext& ctx, llvm::Value* v,
     return ctx.builder->CreateFPToSI(floored, destTy, "rnd_toint");
 }
 
+static void emitTextValueAssign(CodeGenContext& ctx, llvm::Value* slot,
+                                llvm::Value* rhsDesc);
+
 // Heuristically decide whether an expression yields a TEXT value (descriptor),
 // as opposed to a REF object pointer. Used to pick content/identity comparison
 // and in-place vs rebind assignment. Conservative: only returns true for
@@ -816,15 +821,20 @@ static bool exprIsText(Expression* e, CodeGenContext& ctx) {
     if (auto* b = dynamic_cast<BinaryOp*>(e))
         return b->op == BinaryOp::CONCAT;
     if (auto* pc = dynamic_cast<ProcedureCall*>(e)) {
-        return pc->name == "copy" || pc->name == "blanks" || pc->name == "sub" ||
-               pc->name == "strip" || pc->name == "main";
+        if (pc->name == "copy" || pc->name == "blanks" || pc->name == "sub" ||
+            pc->name == "strip" || pc->name == "main") return true;
+        // A TEXT array element, or a user procedure declared to return TEXT.
+        auto ait = ctx.arrays.find(pc->name);
+        if (ait != ctx.arrays.end()) return ait->second.isTextElem;
+        return ctx.textReturningProcs.count(pc->name) > 0;
     }
     if (auto* mc = dynamic_cast<MethodCall*>(e)) {
         // intext is the INFILE TEXT-returning method (chains like
         // FILE.INTEXT(n).STRIP); sub/strip/main/copy are TEXT producers.
         return mc->method == "sub" || mc->method == "strip" ||
                mc->method == "main" || mc->method == "copy" ||
-               mc->method == "intext";
+               mc->method == "intext" ||
+               ctx.textReturningProcs.count(mc->method) > 0;
     }
     if (auto* ma = dynamic_cast<MemberAccess*>(e)) {
         if (ma->member == "sub" || ma->member == "strip" || ma->member == "main")
@@ -1081,18 +1091,14 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
         return (op == REF_NE) ? ctx.builder->CreateNot(eq, "ref_ne") : eq;
     }
 
-    // Content equality (= / <>) on TEXT operands -> window compare.
-    if (isPtr && anyText && (op == EQ || op == NE)) {
+    // Content equality (= / <>) on two pointers -> TEXT window compare. This is
+    // always content for TEXT; REF objects use == / =/= (REF_EQ/REF_NE) for
+    // identity, so a plain = on pointers is a text comparison in practice.
+    if (isPtr && (op == EQ || op == NE)) {
         auto eqVal = ctx.builder->CreateCall(ctx.textEqFunc, {L, R}, "texteq");
         auto cmp = ctx.builder->CreateICmpNE(eqVal,
             llvm::ConstantInt::get(i64TyC, 0), "txtcmp");
         if (op == NE) cmp = ctx.builder->CreateNot(cmp, "txtne");
-        return cmp;
-    }
-    // Equality on two non-TEXT pointers (rare; nonstandard REF =) -> pointer cmp.
-    if (isPtr && (op == EQ || op == NE)) {
-        auto cmp = ctx.builder->CreateICmpEQ(L, R, "ptr_eq");
-        if (op == NE) cmp = ctx.builder->CreateNot(cmp, "ptr_ne");
         return cmp;
     }
 
@@ -2691,6 +2697,19 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
     auto obj = object->codegen(ctx);
     if (!obj) return nullptr;
 
+    // TEXT temporary as receiver (e.g. B.DATA.SUB(..), COPY(x).SUB(..)): the
+    // method is a TEXT op on the descriptor.
+    if (obj->getType()->isPointerTy() && exprIsText(object.get(), ctx)) {
+        std::vector<llvm::Value*> argv;
+        for (auto& a : args) {
+            auto v = a->codegen(ctx);
+            if (!v) return nullptr;
+            argv.push_back(v);
+        }
+        auto r = emitTextOp(ctx, obj, method, argv);
+        if (r) return r;
+    }
+
     std::string clsName;
     if (auto* qua = dynamic_cast<QuaExpression*>(object.get())) {
         clsName = qua->className;
@@ -3357,6 +3376,7 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
             ArrayInfo info;
             info.basePtr = basePtr;
             info.elementType = elemTy;
+            info.isTextElem = (elementType == VarDeclaration::TEXT);
             info.lowerBound = lo;
             info.size = size;
             info.isStackArray = isStack;
@@ -3431,6 +3451,7 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
         ArrayInfo info;
         info.basePtr = ptr;
         info.elementType = elemTy;
+        info.isTextElem = (elementType == VarDeclaration::TEXT);
         info.isStackArray = false;
         info.size = 0;
         info.hasDynLo2 = false;
@@ -3518,6 +3539,12 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
 
     auto val = value->codegen(ctx);
     if (!val) return nullptr;
+
+    // TEXT array element with := is an in-place character copy, not a rebind.
+    if (!isRef && info.isTextElem) {
+        emitTextValueAssign(ctx, gep, val);
+        return val;
+    }
 
     // Type convert if needed
     if (val->getType() != info.elementType) {
@@ -3707,6 +3734,14 @@ llvm::Value* MemberAssignment::codegen(CodeGenContext& ctx) {
     auto& ci = ctx.classes[clsName];
     auto gep = ctx.builder->CreateStructGEP(ci.structType, obj, idx, member + "_ptr");
     auto destTy = ci.structType->getElementType(idx);
+    // TEXT field with := is an in-place character copy, not a pointer rebind.
+    bool fieldIsText = false;
+    for (auto& fi : ci.fields)
+        if (fi.name == member) { fieldIsText = (fi.type == VarDeclaration::TEXT && fi.refClassName.empty()); break; }
+    if (!isRef && fieldIsText) {
+        emitTextValueAssign(ctx, gep, val);
+        return val;
+    }
     if (val->getType() != destTy) {
         if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
             val = ctx.builder->CreateSIToFP(val, destTy);
@@ -4192,6 +4227,9 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     if (!returnRefClass.empty()) {
         ctx.refTypes[name] = returnRefClass;
     }
+    // Record TEXT-returning procedures so call results are treated as TEXT.
+    if (hasReturnType && returnType == VarDeclaration::TEXT)
+        ctx.textReturningProcs.insert(name);
 
     // Determine return type
     llvm::Type* retTy;

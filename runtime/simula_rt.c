@@ -220,11 +220,22 @@ static SimulaText* st_fresh(int64_t n) {
     return st_new(f, 0, n, 0, n);
 }
 
-/* Wrap a C literal/string as a read-only TEXT over its (shared) storage. */
+/* Wrap a C string as a TEXT over its (shared) storage WITHOUT copying. Only
+ * for buffers that are already writable or never written (e.g. SYSIN.IMAGE). */
 SimulaText* simula_text_lit(const char* cstr) {
     if (cstr == NULL) return NULL;
     int64_t n = (int64_t)strlen(cstr);
     return st_new((char*)cstr, 0, n, 0, n);
+}
+
+/* A TEXT literal: copy into a fresh writable frame so PUTCHAR/:=/PUTINT into
+ * the literal (a writable text object in Simula) don't hit read-only .rodata. */
+SimulaText* simula_text_dup(const char* cstr) {
+    if (cstr == NULL) return NULL;
+    int64_t n = (int64_t)strlen(cstr);
+    SimulaText* r = st_fresh(n);
+    if (n > 0) memcpy(r->frame, cstr, (size_t)n);
+    return r;
 }
 
 SimulaText* simula_blanks(int64_t n) {
@@ -291,6 +302,8 @@ int64_t simula_text_eq(SimulaText* a, SimulaText* b) {
 int64_t simula_text_ref_eq(SimulaText* a, SimulaText* b) {
     if (a == b) return 1;
     if (a == NULL || b == NULL) return 0;
+    /* All empty (length 0) texts denote the same (empty) text object. */
+    if (a->length == 0 && b->length == 0) return 1;
     return (a->frame == b->frame && a->start == b->start && a->length == b->length) ? 1 : 0;
 }
 

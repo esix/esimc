@@ -64,6 +64,7 @@ struct ArrayInfo {
     // Dynamic second-dimension lower bound (runtime value stored in __lo2 alloca)
     bool hasDynLo2 = false;
     bool hasDynStride = false;
+    bool isTextElem = false;  // element type is TEXT (descriptor): := copies in place
 };
 
 class CodeGenContext {
@@ -135,8 +136,12 @@ public:
     // dropped statement can never become a silently-wrong binary.
     bool hadError = false;
 
-    // TEXT variables (have an associated __pos alloca)
+    // TEXT variables (named TEXT locals/params/fields in scope)
     std::set<std::string> textVars;
+
+    // Procedure/method names whose declared return type is TEXT, so TEXT-typed
+    // call results are recognized for == identity and member dispatch.
+    std::set<std::string> textReturningProcs;
 
     // Runtime functions (C library)
     llvm::Function* printfFunc = nullptr;

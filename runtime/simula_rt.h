@@ -28,7 +28,8 @@ typedef struct SimulaText {
 void* simula_alloc(int64_t size);
 
 /* Text constructors / operations (all on SimulaText* descriptors; NULL = NOTEXT) */
-SimulaText* simula_text_lit(const char* cstr);            /* wrap a C literal */
+SimulaText* simula_text_lit(const char* cstr);            /* wrap (no copy) */
+SimulaText* simula_text_dup(const char* cstr);            /* copy into writable frame */
 SimulaText* simula_blanks(int64_t n);
 SimulaText* simula_text_copy(SimulaText* s);
 SimulaText* simula_text_concat(SimulaText* a, SimulaText* b);
