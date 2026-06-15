@@ -1,0 +1,51 @@
+COMMENT Text processing: builds a fixed-width report by editing field
+        windows of a blank line IN PLACE via SUB (which aliases the
+        frame), then parses numbers back out by walking the text with
+        GETINT. Exercises the TEXT descriptor: SUB views, PUTINT/PUTTEXT
+        into sub-windows, content vs reference equality;
+BEGIN
+    TEXT LINE, NAMEFLD, QTYFLD, PRICEFLD;
+    TEXT A, B;
+    INTEGER I, TOTAL;
+
+    COMMENT --- build a 28-char report row, fields edited in place ---;
+    PROCEDURE PUTNAME(DST, S); TEXT DST, S;
+    BEGIN
+        INTEGER K;
+        DST.SETPOS(1);
+        S.SETPOS(1);
+        FOR K := 1 STEP 1 UNTIL S.LENGTH DO DST.PUTCHAR(S.GETCHAR);
+    END PUTNAME;
+
+    OUTTEXT("ITEM            QTY   PRICE"); OUTIMAGE;
+    OUTTEXT("--------------------------"); OUTIMAGE;
+
+    TOTAL := 0;
+    FOR I := 1 STEP 1 UNTIL 3 DO
+    BEGIN
+        LINE :- BLANKS(26);
+        NAMEFLD  :- LINE.SUB(1, 12);    COMMENT columns 1..12;
+        QTYFLD   :- LINE.SUB(14, 5);    COMMENT columns 14..18;
+        PRICEFLD :- LINE.SUB(20, 7);    COMMENT columns 20..26;
+
+        IF I = 1 THEN BEGIN PUTNAME(NAMEFLD, COPY("WIDGET"));   QTYFLD.PUTINT(4);  PRICEFLD.PUTFIX(2.50, 2); END;
+        IF I = 2 THEN BEGIN PUTNAME(NAMEFLD, COPY("GADGET"));   QTYFLD.PUTINT(12); PRICEFLD.PUTFIX(9.99, 2); END;
+        IF I = 3 THEN BEGIN PUTNAME(NAMEFLD, COPY("GIZMO"));    QTYFLD.PUTINT(7);  PRICEFLD.PUTFIX(0.75, 2); END;
+
+        COMMENT edits through the SUB views land in LINE's frame;
+        OUTTEXT(LINE); OUTIMAGE;
+
+        COMMENT parse the quantity back out by walking the field;
+        QTYFLD.SETPOS(1);
+        TOTAL := TOTAL + QTYFLD.GETINT;
+    END;
+
+    OUTTEXT("--------------------------"); OUTIMAGE;
+    OUTTEXT("TOTAL QTY: "); OUTINT(TOTAL, 0); OUTIMAGE;
+
+    COMMENT content vs reference equality;
+    A :- COPY("MATCH");
+    B :- COPY("MATCH");
+    OUTTEXT("A = B (content):  "); IF A =  B THEN OUTTEXT("YES") ELSE OUTTEXT("NO"); OUTIMAGE;
+    OUTTEXT("A == B (same obj): "); IF A == B THEN OUTTEXT("YES") ELSE OUTTEXT("NO"); OUTIMAGE;
+END.
