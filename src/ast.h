@@ -11,6 +11,7 @@ namespace llvm { class Value; }
 
 class ASTNode {
 public:
+    int line = 0;  // 1-based source line (0 = unknown); set by the parser
     virtual ~ASTNode() = default;
     virtual llvm::Value* codegen(CodeGenContext& context) = 0;
     // Collect all identifier names referenced in this subtree

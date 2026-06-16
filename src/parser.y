@@ -488,10 +488,12 @@ labeled_stmt
 goto_stmt
     : T_GOTO T_IDENT {
         $$ = new GotoStatement($2);
+        $$->line = @1.first_line;
       }
     | T_GOTO T_IDENT T_LPAREN expr T_RPAREN {
         /* Computed goto: GO TO S(expr) */
         $$ = new ComputedGoto($2, ExprPtr($4));
+        $$->line = @1.first_line;
       }
     ;
 
@@ -990,6 +992,7 @@ expr_stmt
                 }
             }
         }
+        if ($$) $$->line = @1.first_line;
       }
     | postfix T_REFASSIGN expr {
         Identifier* ident = dynamic_cast<Identifier*>($1);
@@ -1028,6 +1031,7 @@ expr_stmt
                 }
             }
         }
+        if ($$) $$->line = @1.first_line;
       }
     ;
 
@@ -1091,9 +1095,11 @@ comparison
       }
     | additive T_IS T_IDENT {
         $$ = new IsExpression(ExprPtr($1), $3);
+        $$->line = @1.first_line;
       }
     | additive T_IN T_IDENT {
         $$ = new InExpression(ExprPtr($1), $3);
+        $$->line = @1.first_line;
       }
     ;
 
@@ -1144,26 +1150,32 @@ postfix
     : primary
     | T_IDENT T_LPAREN arg_list T_RPAREN {
         $$ = new ProcedureCall($1, std::move(*$3));
+        $$->line = @1.first_line;
         delete $3;
       }
     | postfix T_DOT T_IDENT {
         $$ = new MemberAccess(ExprPtr($1), $3);
+        $$->line = @1.first_line;
       }
     | postfix T_DOT T_IDENT T_LPAREN arg_list T_RPAREN {
         $$ = new MethodCall(ExprPtr($1), $3, std::move(*$5));
+        $$->line = @1.first_line;
         delete $5;
       }
     | postfix T_DOT io_keyword T_LPAREN arg_list T_RPAREN {
         /* Allow I/O keywords as method names: obj.OutFix(...) etc. */
         $$ = new MethodCall(ExprPtr($1), $3, std::move(*$5));
+        $$->line = @1.first_line;
         delete $5;
       }
     | postfix T_DOT io_keyword {
         $$ = new MemberAccess(ExprPtr($1), $3);
+        $$->line = @1.first_line;
       }
     | postfix T_QUA T_IDENT {
         /* QUA type qualification — changes class resolution for member access */
         $$ = new QuaExpression(ExprPtr($1), $3);
+        $$->line = @1.first_line;
       }
     ;
 
@@ -1182,31 +1194,34 @@ io_keyword
     ;
 
 primary
-    : T_INTLIT    { $$ = new IntegerLiteral($1); }
-    | T_REALLIT   { $$ = new RealLiteral($1); }
-    | T_TEXTLIT   { $$ = new TextLiteral($1); }
-    | T_CHARLIT   { $$ = new CharLiteral((char)$1); }
-    | T_TRUE      { $$ = new BooleanLiteral(true); }
-    | T_FALSE     { $$ = new BooleanLiteral(false); }
-    | T_NONE      { $$ = new NoneLiteral(); }
-    | T_NOTEXT    { $$ = new NoneLiteral(); }
-    | T_THIS      { $$ = new ThisExpression(); }
-    | T_THIS T_IDENT { $$ = new ThisExpression(); } /* THIS ClassName — type qual ignored */
-    | T_IDENT     { $$ = new Identifier($1); }
+    : T_INTLIT    { $$ = new IntegerLiteral($1); $$->line = @1.first_line; }
+    | T_REALLIT   { $$ = new RealLiteral($1); $$->line = @1.first_line; }
+    | T_TEXTLIT   { $$ = new TextLiteral($1); $$->line = @1.first_line; }
+    | T_CHARLIT   { $$ = new CharLiteral((char)$1); $$->line = @1.first_line; }
+    | T_TRUE      { $$ = new BooleanLiteral(true); $$->line = @1.first_line; }
+    | T_FALSE     { $$ = new BooleanLiteral(false); $$->line = @1.first_line; }
+    | T_NONE      { $$ = new NoneLiteral(); $$->line = @1.first_line; }
+    | T_NOTEXT    { $$ = new NoneLiteral(); $$->line = @1.first_line; }
+    | T_THIS      { $$ = new ThisExpression(); $$->line = @1.first_line; }
+    | T_THIS T_IDENT { $$ = new ThisExpression(); $$->line = @1.first_line; } /* THIS ClassName — type qual ignored */
+    | T_IDENT     { $$ = new Identifier($1); $$->line = @1.first_line; }
     | T_NEW T_IDENT T_LPAREN arg_list T_RPAREN {
         $$ = new NewExpression($2, std::move(*$4));
+        $$->line = @1.first_line;
         delete $4;
       }
     | T_NEW T_IDENT {
         $$ = new NewExpression($2, ExprList());
+        $$->line = @1.first_line;
       }
     | T_LPAREN expr T_RPAREN { $$ = $2; }
-    | T_ININT     { $$ = new InIntExpression(); }
-    | T_INREAL    { $$ = new InRealExpression(); }
-    | T_INCHAR    { $$ = new InCharExpression(); }
-    | T_LASTITEM  { $$ = new Identifier("__lastitem"); }
+    | T_ININT     { $$ = new InIntExpression(); $$->line = @1.first_line; }
+    | T_INREAL    { $$ = new InRealExpression(); $$->line = @1.first_line; }
+    | T_INCHAR    { $$ = new InCharExpression(); $$->line = @1.first_line; }
+    | T_LASTITEM  { $$ = new Identifier("__lastitem"); $$->line = @1.first_line; }
     | T_IF expr T_THEN expr T_ELSE expr {
         $$ = new ConditionalExpr(ExprPtr($2), ExprPtr($4), ExprPtr($6));
+        $$->line = @1.first_line;
       }
     ;
 

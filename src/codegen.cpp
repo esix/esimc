@@ -315,6 +315,14 @@ llvm::Type* CodeGenContext::getFieldLLVMType(const std::string& className, const
     return nullptr;
 }
 
+std::ostream& CodeGenContext::errorAt(int line) {
+    hadError = true;
+    std::cerr << "Error";
+    if (line > 0) std::cerr << " at line " << line;
+    std::cerr << ": ";
+    return std::cerr;
+}
+
 std::string CodeGenContext::resolveRefType(const std::string& varName) {
     auto it = refTypes.find(varName);
     if (it != refTypes.end()) return it->second;
@@ -789,7 +797,7 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
         }
     }
 
-    (ctx.hadError = true, std::cerr) << "Error: unknown variable '" << name << "'\n";
+    ctx.errorAt(line) << "unknown variable '" << name << "'\n";
     return nullptr;
 }
 
@@ -1144,7 +1152,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
     if (ait != ctx.arrays.end()) {
         auto& info = ait->second;
         if (args.empty()) {
-            (ctx.hadError = true, std::cerr) << "Error: array '" << name << "' access requires an index\n";
+            ctx.errorAt(line) << "array '" << name << "' access requires an index\n";
             return nullptr;
         }
         auto idxVal = args[0]->codegen(ctx);
@@ -1649,7 +1657,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                 }
             }
         }
-        (ctx.hadError = true, std::cerr) << "Error: cannot determine array bounds\n";
+        ctx.errorAt(line) << "cannot determine array bounds\n";
         return llvm::ConstantInt::get(i64Ty, 0);
     }
 
@@ -1792,7 +1800,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             ArrArg A;
             auto u = seedPtr(args[1].get());
             if (!arrArg(args[0].get(), A) || !u) {
-                (ctx.hadError = true, std::cerr) << "Error: DISCRETE needs a REAL ARRAY variable\n";
+                ctx.errorAt(line) << "DISCRETE needs a REAL ARRAY variable\n";
                 return nullptr;
             }
             auto fn = ctx.module->getOrInsertFunction("simula_discrete",
@@ -1805,7 +1813,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             ArrArg A, B;
             auto u = seedPtr(args[2].get());
             if (!arrArg(args[0].get(), A) || !arrArg(args[1].get(), B) || !u) {
-                (ctx.hadError = true, std::cerr) << "Error: LINEAR needs REAL ARRAY variables\n";
+                ctx.errorAt(line) << "LINEAR needs REAL ARRAY variables\n";
                 return nullptr;
             }
             auto fn = ctx.module->getOrInsertFunction("simula_linear",
@@ -1817,7 +1825,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             ArrArg A;
             auto u = seedPtr(args[1].get());
             if (!arrArg(args[0].get(), A) || !u) {
-                (ctx.hadError = true, std::cerr) << "Error: HISTD needs a REAL ARRAY variable\n";
+                ctx.errorAt(line) << "HISTD needs a REAL ARRAY variable\n";
                 return nullptr;
             }
             auto fn = ctx.module->getOrInsertFunction("simula_histd",
@@ -1829,7 +1837,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         if (name == "histo" && args.size() == 4) {
             ArrArg A, B;
             if (!arrArg(args[0].get(), A) || !arrArg(args[1].get(), B)) {
-                (ctx.hadError = true, std::cerr) << "Error: HISTO needs REAL ARRAY variables\n";
+                ctx.errorAt(line) << "HISTO needs REAL ARRAY variables\n";
                 return nullptr;
             }
             auto c = args[2]->codegen(ctx); auto w = args[3]->codegen(ctx);
@@ -1902,7 +1910,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             auto cP = getPtr(args[2].get());
             auto dV = args[3]->codegen(ctx);
             if (!aP || !bP || !cP || !dV) {
-                (ctx.hadError = true, std::cerr) << "Error: ACCUM needs REAL variables for its first three arguments\n";
+                ctx.errorAt(line) << "ACCUM needs REAL variables for its first three arguments\n";
                 return nullptr;
             }
             if (dV->getType()->isIntegerTy())
@@ -2095,7 +2103,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
     // Look up in module functions
     auto func = ctx.module->getFunction(name);
     if (!func) {
-        (ctx.hadError = true, std::cerr) << "Error: unknown function '" << name << "'\n";
+        ctx.errorAt(line) << "unknown function '" << name << "'\n";
         return nullptr;
     }
     std::vector<llvm::Value*> argsV;
@@ -2363,7 +2371,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
 llvm::Value* NewExpression::codegen(CodeGenContext& ctx) {
     auto it = ctx.classes.find(className);
     if (it == ctx.classes.end()) {
-        (ctx.hadError = true, std::cerr) << "Error: unknown class '" << className << "'\n";
+        ctx.errorAt(line) << "unknown class '" << className << "'\n";
         return nullptr;
     }
     auto& ci = it->second;
@@ -2454,14 +2462,14 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
             auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
             auto [varPtr, varTy] = ctx.getVarPtr(ident->name);
             if (!varPtr) {
-                (ctx.hadError = true, std::cerr) << "Error: TEXT variable '" << ident->name << "' not accessible\n";
+                ctx.errorAt(line) << "TEXT variable '" << ident->name << "' not accessible\n";
                 return nullptr;
             }
             auto desc = ctx.builder->CreateLoad(ptrTy, varPtr, "txtdesc");
             std::vector<llvm::Value*> noArgs;
             auto r = emitTextOp(ctx, desc, member, noArgs);
             if (r) return r;
-            (ctx.hadError = true, std::cerr) << "Error: unknown TEXT member '." << member << "'\n";
+            ctx.errorAt(line) << "unknown TEXT member '." << member << "'\n";
             return nullptr;
         }
     }
@@ -2542,7 +2550,7 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
     }
 
     if (clsName.empty()) {
-        (ctx.hadError = true, std::cerr) << "Error: cannot determine class type for member access '." << member << "'\n";
+        ctx.errorAt(line) << "cannot determine class type for member access '." << member << "'\n";
         return nullptr;
     }
 
@@ -2630,7 +2638,7 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
             llvm::ConstantInt::get(i64TyP, 0), member + "_b");
     }
 
-    (ctx.hadError = true, std::cerr) << "Error: class '" << clsName << "' has no field or method '" << member << "'\n";
+    ctx.errorAt(line) << "class '" << clsName << "' has no field or method '" << member << "'\n";
     return nullptr;
 }
 
@@ -2677,7 +2685,7 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
             auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
             auto [varPtr, varTy] = ctx.getVarPtr(ident->name);
             if (!varPtr) {
-                (ctx.hadError = true, std::cerr) << "Error: TEXT variable '" << ident->name << "' not accessible\n";
+                ctx.errorAt(line) << "TEXT variable '" << ident->name << "' not accessible\n";
                 return nullptr;
             }
             auto desc = ctx.builder->CreateLoad(ptrTy, varPtr, "txtdesc");
@@ -2689,7 +2697,7 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
             }
             auto r = emitTextOp(ctx, desc, method, argv);
             if (r) return r;
-            (ctx.hadError = true, std::cerr) << "Error: unknown TEXT method '." << method << "'\n";
+            ctx.errorAt(line) << "unknown TEXT method '." << method << "'\n";
             return nullptr;
         }
     }
@@ -2797,7 +2805,7 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
     }
 
     if (clsName.empty()) {
-        (ctx.hadError = true, std::cerr) << "Error: cannot determine class type for method call '." << method << "'\n";
+        ctx.errorAt(line) << "cannot determine class type for method call '." << method << "'\n";
         return nullptr;
     }
 
@@ -2942,7 +2950,7 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
     }
 
     if (!methodFunc) {
-        (ctx.hadError = true, std::cerr) << "Error: class '" << clsName << "' has no method '" << method << "'\n";
+        ctx.errorAt(line) << "class '" << clsName << "' has no method '" << method << "'\n";
         return nullptr;
     }
 
@@ -2979,7 +2987,7 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
 
 llvm::Value* ThisExpression::codegen(CodeGenContext& ctx) {
     if (!ctx.currentThis) {
-        (ctx.hadError = true, std::cerr) << "Error: THIS used outside of a class body\n";
+        ctx.errorAt(line) << "THIS used outside of a class body\n";
         return nullptr;
     }
     return ctx.currentThis;
@@ -3024,7 +3032,7 @@ llvm::Value* IsExpression::codegen(CodeGenContext& ctx) {
 
     auto cit = ctx.classes.find(className);
     if (cit == ctx.classes.end()) {
-        (ctx.hadError = true, std::cerr) << "Error: unknown class '" << className << "' in IS expression\n";
+        ctx.errorAt(line) << "unknown class '" << className << "' in IS expression\n";
         return nullptr;
     }
     return classIdTest(ctx, obj, {cit->second.classId}, "is_check");
@@ -3037,7 +3045,7 @@ llvm::Value* InExpression::codegen(CodeGenContext& ctx) {
     // X IN C is true when X's class is C or any class prefixed by C.
     auto ids = ctx.getDescendantIdSet(className);
     if (ids.empty()) {
-        (ctx.hadError = true, std::cerr) << "Error: unknown class '" << className << "' in IN expression\n";
+        ctx.errorAt(line) << "unknown class '" << className << "' in IN expression\n";
         return nullptr;
     }
     return classIdTest(ctx, obj, ids, "in_cmp");
@@ -3487,7 +3495,7 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
 llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
     auto ait = ctx.arrays.find(name);
     if (ait == ctx.arrays.end()) {
-        (ctx.hadError = true, std::cerr) << "Error: unknown array '" << name << "'\n";
+        ctx.errorAt(line) << "unknown array '" << name << "'\n";
         return nullptr;
     }
     auto& info = ait->second;
@@ -3647,7 +3655,7 @@ llvm::Value* Assignment::codegen(CodeGenContext& ctx) {
         return val;
     }
 
-    (ctx.hadError = true, std::cerr) << "Error: unknown variable '" << name << "'\n";
+    ctx.errorAt(line) << "unknown variable '" << name << "'\n";
     return nullptr;
 }
 
@@ -3718,13 +3726,13 @@ llvm::Value* MemberAssignment::codegen(CodeGenContext& ctx) {
         }
     }
     if (clsName.empty()) {
-        (ctx.hadError = true, std::cerr) << "Error: cannot determine class for member assignment '." << member << "'\n";
+        ctx.errorAt(line) << "cannot determine class for member assignment '." << member << "'\n";
         return nullptr;
     }
 
     int idx = ctx.getFieldIndex(clsName, member);
     if (idx < 0) {
-        (ctx.hadError = true, std::cerr) << "Error: class '" << clsName << "' has no field '" << member << "'\n";
+        ctx.errorAt(line) << "class '" << clsName << "' has no field '" << member << "'\n";
         return nullptr;
     }
 
@@ -3813,12 +3821,12 @@ llvm::Value* MemberArrayAssignment::codegen(CodeGenContext& ctx) {
         }
     }
     if (clsName.empty()) {
-        (ctx.hadError = true, std::cerr) << "Error: cannot determine class for member array assignment '." << member << "'\n";
+        ctx.errorAt(line) << "cannot determine class for member array assignment '." << member << "'\n";
         return nullptr;
     }
     int fldIdx = ctx.getFieldIndex(clsName, member);
     if (fldIdx < 0) {
-        (ctx.hadError = true, std::cerr) << "Error: class '" << clsName << "' has no array field '" << member << "'\n";
+        ctx.errorAt(line) << "class '" << clsName << "' has no array field '" << member << "'\n";
         return nullptr;
     }
     auto& ci = ctx.classes[clsName];
@@ -3866,7 +3874,7 @@ llvm::Value* RefAssignment::codegen(CodeGenContext& ctx) {
     }
     auto [varPtr, varTy] = ctx.getVarPtr(name);
     if (!varPtr) {
-        (ctx.hadError = true, std::cerr) << "Error: unknown REF variable '" << name << "'\n";
+        ctx.errorAt(line) << "unknown REF variable '" << name << "'\n";
         return nullptr;
     }
     auto val = value->codegen(ctx);
@@ -3985,7 +3993,7 @@ llvm::Value* ComputedGoto::codegen(CodeGenContext& ctx) {
     // GO TO S(expr) — indirect branch to one of the labels in switch S.
     auto it = ctx.switches.find(switchName);
     if (it == ctx.switches.end()) {
-        (ctx.hadError = true, std::cerr) << "Error: unknown switch '" << switchName << "'\n";
+        ctx.errorAt(line) << "unknown switch '" << switchName << "'\n";
         return nullptr;
     }
     auto& labels = it->second;
@@ -4135,7 +4143,7 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
     auto startV = start->codegen(ctx);
     auto [varPtr, varTy] = ctx.getVarPtr(var);
     if (!varPtr) {
-        (ctx.hadError = true, std::cerr) << "Error: FOR variable '" << var << "' not declared\n";
+        ctx.errorAt(line) << "FOR variable '" << var << "' not declared\n";
         return nullptr;
     }
     ctx.builder->CreateStore(startV, varPtr);
@@ -4180,7 +4188,7 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
 llvm::Value* ForListStatement::codegen(CodeGenContext& ctx) {
     auto [varPtr, varTy] = ctx.getVarPtr(var);
     if (!varPtr) {
-        (ctx.hadError = true, std::cerr) << "Error: FOR variable '" << var << "' not declared\n";
+        ctx.errorAt(line) << "FOR variable '" << var << "' not declared\n";
         return nullptr;
     }
     // Simply iterate: for each value, assign to var and execute body
@@ -4199,7 +4207,7 @@ llvm::Value* ForMultiRangeStatement::codegen(CodeGenContext& ctx) {
         auto func = ctx.builder->GetInsertBlock()->getParent();
         auto [varPtr, varTy] = ctx.getVarPtr(var);
         if (!varPtr) {
-            (ctx.hadError = true, std::cerr) << "Error: FOR variable '" << var << "' not declared\n";
+            ctx.errorAt(line) << "FOR variable '" << var << "' not declared\n";
             return nullptr;
         }
         auto startV = range.start->codegen(ctx);
@@ -5313,7 +5321,7 @@ llvm::Value* InspectStatement::codegen(CodeGenContext& ctx) {
             // WHEN C matches when the object's class is C or a subclass of C.
             auto ids = ctx.getDescendantIdSet(wc.className);
             if (ids.empty()) {
-                (ctx.hadError = true, std::cerr) << "Error: unknown class '" << wc.className << "' in WHEN clause\n";
+                ctx.errorAt(line) << "unknown class '" << wc.className << "' in WHEN clause\n";
                 continue;
             }
             llvm::Value* cmpV = ctx.builder->getFalse();
@@ -5365,7 +5373,7 @@ llvm::Value* VirtualDecl::codegen(CodeGenContext& ctx) {
 
 llvm::Value* DetachStatement::codegen(CodeGenContext& ctx) {
     if (!ctx.currentThis) {
-        (ctx.hadError = true, std::cerr) << "Error: DETACH used outside of a class body\n";
+        ctx.errorAt(line) << "DETACH used outside of a class body\n";
         return nullptr;
     }
 

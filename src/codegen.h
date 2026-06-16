@@ -6,6 +6,7 @@
 #include <vector>
 #include <memory>
 #include <set>
+#include <iosfwd>
 
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
@@ -135,6 +136,10 @@ public:
     // Set whenever a codegen diagnostic is emitted; main exits 1 if set so a
     // dropped statement can never become a silently-wrong binary.
     bool hadError = false;
+
+    // Emit an error diagnostic, prefixed with the source line when known
+    // (line > 0). Returns std::cerr so the caller can stream the message.
+    std::ostream& errorAt(int line);
 
     // TEXT variables (named TEXT locals/params/fields in scope)
     std::set<std::string> textVars;
