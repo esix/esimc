@@ -1,0 +1,9 @@
+COMMENT BAD: misspelled array name B indexed on line 6 (declared as A);
+BEGIN
+    INTEGER ARRAY A(1:3);
+    INTEGER X;
+    A(1) := 5;
+    X := B(1);
+    OUTINT(X, 0);
+    OUTIMAGE;
+END.

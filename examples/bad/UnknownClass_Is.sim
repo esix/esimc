@@ -1,0 +1,13 @@
+! COMMENT BAD: IS expression names undeclared class BADCLASS;
+BEGIN
+    CLASS POINT(X, Y); INTEGER X, Y;
+    BEGIN
+    END POINT;
+
+    REF(POINT) P;
+    BOOLEAN B;
+    P :- NEW POINT(1, 2);
+    B := P IS BADCLASS;
+    OUTTEXT("DONE");
+    OUTIMAGE;
+END

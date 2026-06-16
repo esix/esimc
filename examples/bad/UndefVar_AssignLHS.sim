@@ -1,0 +1,8 @@
+COMMENT BAD: undefined variable TOTAL used on LHS of := ;
+BEGIN
+    INTEGER X;
+    X := 5;
+    TOTAL := X + 1;
+    OUTINT(X, 0);
+    OUTIMAGE
+END.

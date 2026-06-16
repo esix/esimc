@@ -1,0 +1,11 @@
+COMMENT BAD: undefined variable LIMIT used in WHILE condition on line 6;
+BEGIN
+    INTEGER n;
+    n := 0;
+    WHILE n < limit DO
+    BEGIN
+        n := n + 1
+    END;
+    OutInt(n, 4);
+    OutImage
+END

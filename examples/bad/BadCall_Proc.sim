@@ -1,0 +1,6 @@
+COMMENT BAD: misspelled procedure name GRET called on line 4 (declared as GREET);
+BEGIN
+    PROCEDURE GREET; OUTTEXT("HI");
+    GRET;
+    OUTIMAGE;
+END.

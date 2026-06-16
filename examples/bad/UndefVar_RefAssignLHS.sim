@@ -1,0 +1,8 @@
+COMMENT BAD: undefined variable HANDLE used on LHS of :- ;
+BEGIN
+    TEXT T;
+    T :- "HELLO";
+    HANDLE :- T;
+    OUTTEXT(T);
+    OUTIMAGE
+END.

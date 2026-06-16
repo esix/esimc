@@ -1,0 +1,11 @@
+! COMMENT BAD: NEW references undeclared class BADCLASS;
+BEGIN
+    CLASS POINT(X, Y); INTEGER X, Y;
+    BEGIN
+    END POINT;
+
+    REF(POINT) P;
+    P :- NEW BADCLASS;
+    OUTTEXT("DONE");
+    OUTIMAGE;
+END

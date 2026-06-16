@@ -1,0 +1,8 @@
+COMMENT BAD: misspelled function SQQ used in expression on line 5 (declared as SQ);
+BEGIN
+    INTEGER PROCEDURE SQ(N); INTEGER N; SQ := N * N;
+    INTEGER X;
+    X := SQQ(3);
+    OUTINT(X, 0);
+    OUTIMAGE;
+END.

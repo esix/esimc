@@ -1,0 +1,14 @@
+COMMENT BAD: undefined variable TOTAL used inside procedure body on line 6;
+BEGIN
+    INTEGER PROCEDURE addOne(INTEGER n);
+    BEGIN
+        INTEGER result;
+        result := n + TOTAL;
+        addOne := result
+    END;
+
+    INTEGER x;
+    x := addOne(3);
+    OutInt(x, 4);
+    OutImage
+END

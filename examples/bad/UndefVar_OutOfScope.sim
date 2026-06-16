@@ -1,0 +1,11 @@
+COMMENT BAD: variable TEMP used out of scope on line 9 (declared only in inner block);
+BEGIN
+    INTEGER total;
+    total := 1;
+    BEGIN
+        INTEGER temp;
+        temp := total + 1
+    END;
+    OutInt(temp, 4);
+    OutImage
+END

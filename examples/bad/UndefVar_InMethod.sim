@@ -1,0 +1,15 @@
+COMMENT BAD: undefined variable Z used inside class method body on line 7;
+BEGIN
+    CLASS Point(REAL x, REAL y);
+    BEGIN
+        REAL PROCEDURE sum;
+        BEGIN
+            sum := x + y + z
+        END;
+    END;
+
+    REF(Point) p;
+    p :- NEW Point(3.0, 4.0);
+    OutFix(p.sum, 1, 0);
+    OutImage
+END

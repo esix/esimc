@@ -1,0 +1,8 @@
+COMMENT BAD: one-letter typo COUMT of declared variable COUNT on line 5;
+BEGIN
+    INTEGER count;
+    count := 0;
+    coumt := count + 1;
+    OutInt(count, 4);
+    OutImage
+END

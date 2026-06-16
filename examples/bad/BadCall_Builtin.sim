@@ -1,0 +1,7 @@
+COMMENT BAD: misspelled would-be builtin SQRTT called on line 4 (correct name SQRT);
+BEGIN
+    REAL X;
+    X := SQRTT(4.0);
+    OUTREAL(X, 4, 10);
+    OUTIMAGE;
+END.

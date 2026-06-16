@@ -1,0 +1,7 @@
+COMMENT BAD: undefined variable LIMIT used as FOR loop limit;
+BEGIN
+    INTEGER I;
+    FOR I := 1 STEP 1 UNTIL LIMIT DO
+        OUTINT(I, 0);
+    OUTIMAGE
+END.

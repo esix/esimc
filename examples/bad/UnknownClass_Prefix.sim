@@ -1,0 +1,9 @@
+! COMMENT BAD: class prefix names undeclared class BADCLASS;
+BEGIN
+    BADCLASS CLASS SUB;
+    BEGIN
+    END SUB;
+
+    OUTTEXT("DONE");
+    OUTIMAGE;
+END

@@ -1,0 +1,13 @@
+COMMENT BAD: misspelled method SETXX called on line 10 (class POINT declares SETX);
+BEGIN
+    CLASS POINT;
+    BEGIN
+        INTEGER X;
+        PROCEDURE SETX(V); INTEGER V; X := V;
+    END;
+    REF(POINT) P;
+    P :- NEW POINT;
+    P.SETXX(5);
+    OUTINT(P.X, 0);
+    OUTIMAGE;
+END.

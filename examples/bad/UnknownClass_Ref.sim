@@ -1,0 +1,10 @@
+! COMMENT BAD: REF declaration names undeclared class BADCLASS;
+BEGIN
+    CLASS POINT(X, Y); INTEGER X, Y;
+    BEGIN
+    END POINT;
+
+    REF(BADCLASS) P;
+    OUTTEXT("DONE");
+    OUTIMAGE;
+END

@@ -1,0 +1,7 @@
+COMMENT BAD: undefined variable COUNTER used in arithmetic expression;
+BEGIN
+    INTEGER X;
+    X := COUNTER + 1;
+    OUTINT(X, 0);
+    OUTIMAGE
+END.

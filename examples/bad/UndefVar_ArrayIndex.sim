@@ -1,0 +1,7 @@
+COMMENT BAD: undefined variable IDX used as array index;
+BEGIN
+    INTEGER ARRAY A(0:4);
+    A(0) := 10;
+    OUTINT(A(IDX), 0);
+    OUTIMAGE
+END.
