@@ -1,4 +1,4 @@
-COMMENT BAD: NEW COLORPT given 2 args; full constructor (prefix PT + own) needs 4;
+COMMENT BAD: NEW COLORPT given 2 args but full constructor needs 4 (prefix PT X,Y plus own R,G);
 BEGIN
     CLASS PT(X, Y); INTEGER X, Y; BEGIN END;
     PT CLASS COLORPT(R, G); INTEGER R, G; BEGIN END;
