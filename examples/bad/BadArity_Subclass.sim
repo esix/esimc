@@ -1,0 +1,7 @@
+COMMENT BAD: NEW COLORPT given 2 args; full constructor (prefix PT + own) needs 4;
+BEGIN
+    CLASS PT(X, Y); INTEGER X, Y; BEGIN END;
+    PT CLASS COLORPT(R, G); INTEGER R, G; BEGIN END;
+    REF(COLORPT) C;
+    C :- NEW COLORPT(1, 2);
+END.

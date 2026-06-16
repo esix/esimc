@@ -1,0 +1,7 @@
+COMMENT BAD: NEW PT given 1 argument but class PT declares 2 (X, Y);
+BEGIN
+    CLASS PT(X, Y); INTEGER X, Y;
+    BEGIN END;
+    REF(PT) P;
+    P :- NEW PT(1);
+END.

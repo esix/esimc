@@ -280,6 +280,29 @@ void SemanticAnalyzer::checkExpr(Expression* e) {
     }
     if (auto* ne = dynamic_cast<NewExpression*>(e)) {
         checkClassRef(ne->className, ne->line);
+        // Constructor arity: NEW takes the FULL parameter list — the prefix
+        // chain's params plus the class's own (no overloading/defaults in
+        // Simula), so sum params up the chain and require an exact match.
+        int expect = -1;
+        {
+            std::string cur = lower(ne->className);
+            int sum = 0; bool known = false;
+            while (!cur.empty()) {
+                auto cit = classByName.find(cur);
+                if (cit == classByName.end()) { known = false; break; }
+                known = true;
+                sum += (int)cit->second->params.size();
+                cur = lower(cit->second->parentName);
+            }
+            if (known) expect = sum;
+        }
+        if (expect >= 0 && (int)ne->args.size() != expect) {
+            hadError = true;
+            std::cerr << "Error";
+            if (ne->line > 0) std::cerr << " at line " << ne->line;
+            std::cerr << ": class '" << ne->className << "' expects " << expect
+                      << " argument(s), got " << ne->args.size() << "\n";
+        }
         for (auto& a : ne->args) checkExpr(a.get());
         return;
     }
