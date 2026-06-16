@@ -18,7 +18,7 @@ PARSER_CPP := $(BUILD)/parser.tab.cpp
 PARSER_H   := $(BUILD)/parser.tab.hpp
 LEXER_CPP  := $(BUILD)/lexer.cpp
 
-OBJS := $(BUILD)/codegen.o $(BUILD)/main.o $(BUILD)/parser.tab.o $(BUILD)/lexer.o
+OBJS := $(BUILD)/codegen.o $(BUILD)/sema.o $(BUILD)/main.o $(BUILD)/parser.tab.o $(BUILD)/lexer.o
 
 .PHONY: all clean runtime
 
@@ -44,7 +44,10 @@ $(BUILD)/lexer.o: $(LEXER_CPP) | $(BUILD)
 $(BUILD)/codegen.o: $(SRCDIR)/codegen.cpp $(SRCDIR)/codegen.h $(SRCDIR)/ast.h | $(BUILD)
 	$(CXX) $(CXXFLAGS) -I$(SRCDIR) -I$(BUILD) -c -o $@ $<
 
-$(BUILD)/main.o: $(SRCDIR)/main.cpp $(SRCDIR)/ast.h $(SRCDIR)/codegen.h | $(BUILD)
+$(BUILD)/sema.o: $(SRCDIR)/sema.cpp $(SRCDIR)/sema.h $(SRCDIR)/ast.h | $(BUILD)
+	$(CXX) $(CXXFLAGS) -I$(SRCDIR) -I$(BUILD) -c -o $@ $<
+
+$(BUILD)/main.o: $(SRCDIR)/main.cpp $(SRCDIR)/ast.h $(SRCDIR)/codegen.h $(SRCDIR)/sema.h | $(BUILD)
 	$(CXX) $(CXXFLAGS) -I$(SRCDIR) -I$(BUILD) -c -o $@ $<
 
 $(BUILD)/esimc: $(OBJS)

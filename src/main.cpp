@@ -9,6 +9,7 @@
 #include <filesystem>
 #include "ast.h"
 #include "codegen.h"
+#include "sema.h"
 
 extern FILE* yyin;
 extern int yyparse();
@@ -608,6 +609,16 @@ int main(int argc, char** argv) {
 
     // Inject the built-in INFILE class if the program uses it.
     maybeInjectInfile(programRoot, preprocessed);
+
+    // Semantic analysis: catch errors (e.g. unknown classes) before codegen,
+    // with source line numbers.
+    SemanticAnalyzer sema;
+    sema.analyze(*programRoot);
+    if (sema.hadError) {
+        std::cerr << "Semantic analysis failed; no output written.\n";
+        delete programRoot;
+        return 1;
+    }
 
     CodeGenContext context;
     context.generateCode(*programRoot);

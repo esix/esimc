@@ -458,11 +458,14 @@ ref_declaration
         } else {
             auto stmts = new StmtList();
             for (auto& name : *$5) {
-                stmts->push_back(StmtPtr(new RefDeclaration($3, name)));
+                auto* rd = new RefDeclaration($3, name);
+                rd->line = @1.first_line;
+                stmts->push_back(StmtPtr(rd));
             }
             $$ = new CompoundStmt(std::move(*stmts));
             delete stmts;
         }
+        $$->line = @1.first_line;
         delete $5;
       }
     ;
