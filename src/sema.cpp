@@ -271,8 +271,10 @@ void SemanticAnalyzer::checkExpr(Expression* e) {
     if (auto* b = dynamic_cast<BinaryOp*>(e)) { checkExpr(b->lhs.get()); checkExpr(b->rhs.get()); return; }
     if (auto* u = dynamic_cast<UnaryOp*>(e)) { checkExpr(u->operand.get()); return; }
     if (auto* pc = dynamic_cast<ProcedureCall*>(e)) {
-        // The callee name may be a procedure, builtin, array, or class-field
-        // array; checking it has high false-positive risk, so only check args.
+        // Callee name resolves like any identifier: a declared procedure, an
+        // array (local/global/class-field), a builtin, a class method, or a
+        // formal-procedure parameter — all of which are in scope.
+        checkIdent(pc->name, pc->line);
         for (auto& a : pc->args) checkExpr(a.get());
         return;
     }
