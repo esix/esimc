@@ -1,0 +1,6 @@
+COMMENT BAD: ADD declared with 2 parameters but called with 1 argument;
+BEGIN
+    PROCEDURE ADD(A, B); INTEGER A, B;
+        OUTINT(A + B, 4);
+    ADD(5);
+END.

@@ -1,0 +1,6 @@
+COMMENT BAD: NEG declared with 1 parameter but called with 3 arguments;
+BEGIN
+    INTEGER PROCEDURE NEG(X); INTEGER X;
+        NEG := -X;
+    OUTINT(NEG(1, 2, 3), 4);
+END.

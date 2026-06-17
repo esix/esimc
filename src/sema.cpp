@@ -43,15 +43,23 @@ void SemanticAnalyzer::analyze(Program& program) {
 }
 
 // ---- scope helpers ----
-void SemanticAnalyzer::declare(const std::string& name) {
+void SemanticAnalyzer::declare(const std::string& name, Sym sym) {
     if (name.empty() || scopes.empty()) return;
-    scopes.back().insert(lower(name));
+    scopes.back()[lower(name)] = sym;
+}
+
+const Sym* SemanticAnalyzer::lookup(const std::string& name) const {
+    std::string n = lower(name);
+    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+        auto f = it->find(n);
+        if (f != it->end()) return &f->second;
+    }
+    return nullptr;
 }
 
 bool SemanticAnalyzer::resolved(const std::string& name) const {
     std::string n = lower(name);
-    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it)
-        if (it->count(n)) return true;
+    if (lookup(n)) return true;
     if (builtins.count(n)) return true;
     if (classNames.count(n)) return true;
     return false;
@@ -74,6 +82,33 @@ void SemanticAnalyzer::checkIdent(const std::string& name, int line) {
     std::cerr << "Error";
     if (line > 0) std::cerr << " at line " << line;
     std::cerr << ": unknown variable '" << name << "'\n";
+}
+
+// Arity check for a call site. Only fires when the innermost binding is a
+// procedure with a known parameter count — so arrays (A(I)), formal-procedure
+// params, variables, and builtins are all skipped (no false positives).
+void SemanticAnalyzer::checkCallArity(const std::string& name, int argc, int line) {
+    const Sym* s = lookup(name);
+    if (!s || s->kind != Sym::PROC || s->arity < 0) return;
+    if (argc == s->arity) return;
+    hadError = true;
+    std::cerr << "Error";
+    if (line > 0) std::cerr << " at line " << line;
+    std::cerr << ": procedure '" << name << "' expects " << s->arity
+              << " argument(s), got " << argc << "\n";
+}
+
+// Full constructor arity for NEW: sum params up the whole prefix chain.
+int SemanticAnalyzer::newArity(const std::string& className) const {
+    std::string cur = lower(className);
+    int sum = 0;
+    while (!cur.empty()) {
+        auto it = classByName.find(cur);
+        if (it == classByName.end()) return -1;  // unknown / standard class
+        sum += (int)it->second->params.size();
+        cur = lower(it->second->parentName);
+    }
+    return sum;
 }
 
 // ---- Pass 1: collect every class name + a name->decl map ----
@@ -110,21 +145,37 @@ void SemanticAnalyzer::collectClasses(Statement* s) {
 }
 
 // All members of a class and its prefix ancestors (params + fields + methods +
-// nested class names declared in the body).
-void SemanticAnalyzer::addClassMembers(ClassDecl* cd, std::set<std::string>& out) {
+// nested class names). Child members take precedence over inherited ones.
+void SemanticAnalyzer::addClassMembers(ClassDecl* cd, std::map<std::string, Sym>& out) {
     if (!cd) return;
-    for (auto& p : cd->params) out.insert(lower(p.name));
+    for (auto& p : cd->params)
+        out.emplace(lower(p.name), Sym{Sym::PARAM, p.type, p.refClassName, -1});
     for (auto& st : cd->bodyStmts) {
         Statement* s = st.get();
-        if (auto* v = dynamic_cast<VarDeclaration*>(s)) out.insert(lower(v->name));
-        else if (auto* a = dynamic_cast<ArrayDeclaration*>(s)) out.insert(lower(a->name));
-        else if (auto* r = dynamic_cast<RefDeclaration*>(s)) out.insert(lower(r->varName));
-        else if (auto* pr = dynamic_cast<ProcedureDecl*>(s)) out.insert(lower(pr->name));
-        else if (auto* c = dynamic_cast<ClassDecl*>(s)) out.insert(lower(c->name));
+        if (auto* v = dynamic_cast<VarDeclaration*>(s))
+            out.emplace(lower(v->name), Sym{Sym::VAR, v->type, "", -1});
+        else if (auto* a = dynamic_cast<ArrayDeclaration*>(s))
+            out.emplace(lower(a->name), Sym{Sym::ARRAY, a->elementType, a->refClassName, -1});
+        else if (auto* r = dynamic_cast<RefDeclaration*>(s))
+            out.emplace(lower(r->varName), Sym{Sym::VAR, -1, r->className, -1});
+        else if (auto* pr = dynamic_cast<ProcedureDecl*>(s))
+            out.emplace(lower(pr->name), Sym{Sym::PROC,
+                pr->hasReturnType ? pr->returnType : -100, "", (int)pr->params.size()});
+        else if (auto* c = dynamic_cast<ClassDecl*>(s))
+            out.emplace(lower(c->name), Sym{Sym::KLASS, -1, c->name, (int)c->params.size()});
+        else if (auto* vd = dynamic_cast<VirtualDecl*>(s)) {
+            // VIRTUAL: PROCEDURE M ... — a method whose body may live only in a
+            // subclass. Register the name so unqualified calls resolve; arity
+            // is unknown here, so calls to it are not arity-checked.
+            for (auto& m : vd->methodNames)
+                out.emplace(lower(m), Sym{Sym::PROC, -100, "", -1});
+        }
         else if (auto* cs = dynamic_cast<CompoundStmt*>(s)) {
             for (auto& in : cs->statements) {
-                if (auto* v = dynamic_cast<VarDeclaration*>(in.get())) out.insert(lower(v->name));
-                else if (auto* r = dynamic_cast<RefDeclaration*>(in.get())) out.insert(lower(r->varName));
+                if (auto* v = dynamic_cast<VarDeclaration*>(in.get()))
+                    out.emplace(lower(v->name), Sym{Sym::VAR, v->type, "", -1});
+                else if (auto* r = dynamic_cast<RefDeclaration*>(in.get()))
+                    out.emplace(lower(r->varName), Sym{Sym::VAR, -1, r->className, -1});
             }
         }
     }
@@ -137,25 +188,25 @@ void SemanticAnalyzer::addClassMembers(ClassDecl* cd, std::set<std::string>& out
 void SemanticAnalyzer::checkStmt(Statement* s) {
     if (!s) return;
 
-    // Block / CompoundStmt: a new scope; collect its declarations first.
     if (auto* b = dynamic_cast<Block*>(s)) {
         scopes.emplace_back();
+        // Two-pass: declarations are visible across the whole block.
         for (auto& st : b->statements) {
             Statement* d = st.get();
-            if (auto* v = dynamic_cast<VarDeclaration*>(d)) declare(v->name);
-            else if (auto* a = dynamic_cast<ArrayDeclaration*>(d)) declare(a->name);
-            else if (auto* r = dynamic_cast<RefDeclaration*>(d)) declare(r->varName);
-            else if (auto* p = dynamic_cast<ProcedureDecl*>(d)) declare(p->name);
-            else if (auto* c = dynamic_cast<ClassDecl*>(d)) declare(c->name);
-            else if (auto* sw = dynamic_cast<SwitchDeclaration*>(d)) declare(sw->name);
+            if (auto* v = dynamic_cast<VarDeclaration*>(d)) declare(v->name, {Sym::VAR, v->type, "", -1});
+            else if (auto* a = dynamic_cast<ArrayDeclaration*>(d)) declare(a->name, {Sym::ARRAY, a->elementType, a->refClassName, -1});
+            else if (auto* r = dynamic_cast<RefDeclaration*>(d)) declare(r->varName, {Sym::VAR, -1, r->className, -1});
+            else if (auto* p = dynamic_cast<ProcedureDecl*>(d)) declare(p->name, {Sym::PROC, p->hasReturnType ? p->returnType : -100, "", (int)p->params.size()});
+            else if (auto* c = dynamic_cast<ClassDecl*>(d)) declare(c->name, {Sym::KLASS, -1, c->name, (int)c->params.size()});
+            else if (auto* sw = dynamic_cast<SwitchDeclaration*>(d)) declare(sw->name, {Sym::SWITCH, -100, "", -1});
             else if (auto* ld = dynamic_cast<LabelDeclaration*>(d))
-                for (auto& l : ld->labels) declare(l);
-            else if (auto* ls = dynamic_cast<LabeledStatement*>(d)) declare(ls->label);
+                for (auto& l : ld->labels) declare(l, {Sym::LABEL, -100, "", -1});
+            else if (auto* ls = dynamic_cast<LabeledStatement*>(d)) declare(ls->label, {Sym::LABEL, -100, "", -1});
             else if (auto* cs = dynamic_cast<CompoundStmt*>(d)) {
                 for (auto& in : cs->statements) {
-                    if (auto* v = dynamic_cast<VarDeclaration*>(in.get())) declare(v->name);
-                    else if (auto* r = dynamic_cast<RefDeclaration*>(in.get())) declare(r->varName);
-                    else if (auto* a = dynamic_cast<ArrayDeclaration*>(in.get())) declare(a->name);
+                    if (auto* v = dynamic_cast<VarDeclaration*>(in.get())) declare(v->name, {Sym::VAR, v->type, "", -1});
+                    else if (auto* r = dynamic_cast<RefDeclaration*>(in.get())) declare(r->varName, {Sym::VAR, -1, r->className, -1});
+                    else if (auto* a = dynamic_cast<ArrayDeclaration*>(in.get())) declare(a->name, {Sym::ARRAY, a->elementType, a->refClassName, -1});
                 }
             }
         }
@@ -171,10 +222,9 @@ void SemanticAnalyzer::checkStmt(Statement* s) {
         if (!cd->parentName.empty()) checkClassRef(cd->parentName, cd->line);
         for (auto& p : cd->params)
             if (!p.refClassName.empty()) checkClassRef(p.refClassName, cd->line);
-        // Class body scope: all members (own + inherited) + a 'this' marker.
         scopes.emplace_back();
         addClassMembers(cd, scopes.back());
-        scopes.back().insert("this");
+        scopes.back().emplace("this", Sym{Sym::VAR, -1, cd->name, -1});
         for (auto& st : cd->bodyStmts) checkStmt(st.get());
         scopes.pop_back();
         return;
@@ -183,8 +233,10 @@ void SemanticAnalyzer::checkStmt(Statement* s) {
         for (auto& ps : p->params)
             if (!ps.refClassName.empty()) checkClassRef(ps.refClassName, p->line);
         scopes.emplace_back();
-        for (auto& ps : p->params) declare(ps.name);
-        declare(p->name);  // a typed procedure can assign to its own name (result)
+        for (auto& ps : p->params)
+            declare(ps.name, {Sym::PARAM, ps.type, ps.refClassName, -1});
+        // The procedure's own name (for result assignment and recursive calls).
+        declare(p->name, {Sym::PROC, p->hasReturnType ? p->returnType : -100, "", (int)p->params.size()});
         checkStmt(p->body.get());
         scopes.pop_back();
         return;
@@ -237,19 +289,18 @@ void SemanticAnalyzer::checkStmt(Statement* s) {
         checkExpr(in->object.get());
         for (auto& wc : in->whenClauses) {
             checkClassRef(wc.className, in->line);
-            // Connected: the WHEN class's members are visible unqualified.
             scopes.emplace_back();
             auto cit = classByName.find(lower(wc.className));
             if (cit != classByName.end()) addClassMembers(cit->second, scopes.back());
             checkStmt(wc.body.get());
             scopes.pop_back();
         }
-        // INSPECT ... DO connects an object whose class we can't always resolve
-        // here; suppress undefined-identifier reports inside the connected body.
+        // The connected class of INSPECT ... DO is not always resolvable here;
+        // suppress undefined-identifier reports inside the connected body.
         suppressUndef++;
         checkStmt(in->doBody.get());
         suppressUndef--;
-        checkStmt(in->otherwiseBody.get());  // unconnected
+        checkStmt(in->otherwiseBody.get());
         return;
     }
     if (auto* a = dynamic_cast<ActivateStatement*>(s)) {
@@ -271,31 +322,14 @@ void SemanticAnalyzer::checkExpr(Expression* e) {
     if (auto* b = dynamic_cast<BinaryOp*>(e)) { checkExpr(b->lhs.get()); checkExpr(b->rhs.get()); return; }
     if (auto* u = dynamic_cast<UnaryOp*>(e)) { checkExpr(u->operand.get()); return; }
     if (auto* pc = dynamic_cast<ProcedureCall*>(e)) {
-        // Callee name resolves like any identifier: a declared procedure, an
-        // array (local/global/class-field), a builtin, a class method, or a
-        // formal-procedure parameter — all of which are in scope.
         checkIdent(pc->name, pc->line);
+        if (suppressUndef == 0) checkCallArity(pc->name, (int)pc->args.size(), pc->line);
         for (auto& a : pc->args) checkExpr(a.get());
         return;
     }
     if (auto* ne = dynamic_cast<NewExpression*>(e)) {
         checkClassRef(ne->className, ne->line);
-        // Constructor arity: NEW takes the FULL parameter list — the prefix
-        // chain's params plus the class's own (no overloading/defaults in
-        // Simula), so sum params up the chain and require an exact match.
-        int expect = -1;
-        {
-            std::string cur = lower(ne->className);
-            int sum = 0; bool known = false;
-            while (!cur.empty()) {
-                auto cit = classByName.find(cur);
-                if (cit == classByName.end()) { known = false; break; }
-                known = true;
-                sum += (int)cit->second->params.size();
-                cur = lower(cit->second->parentName);
-            }
-            if (known) expect = sum;
-        }
+        int expect = newArity(ne->className);
         if (expect >= 0 && (int)ne->args.size() != expect) {
             hadError = true;
             std::cerr << "Error";
