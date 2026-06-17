@@ -340,6 +340,18 @@ std::set<int> CodeGenContext::getClassIdSet(const std::string& className) {
     return ids;
 }
 
+bool CodeGenContext::isVirtualMethod(const std::string& className,
+                                     const std::string& method) {
+    std::string cur = className;
+    while (!cur.empty()) {
+        auto it = classes.find(cur);
+        if (it == classes.end()) break;
+        if (it->second.virtualReturnTypes.count(method)) return true;
+        cur = it->second.parentName;
+    }
+    return false;
+}
+
 std::set<int> CodeGenContext::getDescendantIdSet(const std::string& className) {
     std::set<int> ids;
     if (!classes.count(className)) return ids;
@@ -722,9 +734,41 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
             return ctx.builder->CreateCall(func, callArgs, name + "_ret");
         }
     }
-    // Check for no-arg class method
+    // Check for no-arg class method called by bare name (within a class).
     if (ctx.currentThis && !ctx.currentClassName.empty()) {
         auto& ci = ctx.classes[ctx.currentClassName];
+        // A VIRTUAL method always dispatches dynamically through THIS's vtable,
+        // even when a body exists in this class — so an override in the runtime
+        // subclass is reached (Template Method pattern).
+        if (ctx.isVirtualMethod(ctx.currentClassName, name)) {
+            auto vtIt = ci.vtableIndex.find(name);
+            if (vtIt != ci.vtableIndex.end() && ci.vtableType) {
+                auto ptrTy2 = ctx.getRefType();
+                auto baseObjTy = llvm::StructType::get(*ctx.llvmContext, {ptrTy2, ptrTy2});
+                auto vtSlot = ctx.builder->CreateStructGEP(baseObjTy, ctx.currentThis, 0, "vt_slot");
+                auto vtPtr = ctx.builder->CreateLoad(ptrTy2, vtSlot, "vtptr");
+                auto fpSlot = ctx.builder->CreateStructGEP(ci.vtableType, vtPtr, vtIt->second, "fp_slot");
+                auto fp = ctx.builder->CreateLoad(ptrTy2, fpSlot, "method_fp");
+                llvm::FunctionType* funcTy = nullptr;
+                for (auto& [cn, ci2] : ctx.classes) {
+                    auto mm = ci2.methods.find(name);
+                    if (mm != ci2.methods.end()) { funcTy = mm->second->getFunctionType(); break; }
+                }
+                if (!funcTy) {
+                    auto rtIt = ci.virtualReturnTypes.find(name);
+                    llvm::Type* retTy = llvm::Type::getVoidTy(*ctx.llvmContext);
+                    if (rtIt != ci.virtualReturnTypes.end()) {
+                        if (rtIt->second == -2) retTy = ptrTy2;
+                        else if (rtIt->second >= 0) retTy = ctx.getLLVMType(rtIt->second);
+                    }
+                    funcTy = llvm::FunctionType::get(retTy, {ptrTy2}, false);
+                }
+                if (funcTy->getReturnType()->isVoidTy())
+                    return ctx.builder->CreateCall(funcTy, fp, {ctx.currentThis});
+                return ctx.builder->CreateCall(funcTy, fp, {ctx.currentThis}, name + "_vret");
+            }
+        }
+        // Non-virtual concrete method: static dispatch.
         auto mit = ci.methods.find(name);
         if (mit != ci.methods.end() && mit->second->arg_size() == 1) {
             if (mit->second->getReturnType()->isVoidTy())
@@ -1945,6 +1989,50 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
 
     // FACTORIAL — not built-in, but let's handle common utility functions
     // (users define their own; this just avoids confusing error messages)
+
+    // Unqualified call to a VIRTUAL method (within a class): always dispatch
+    // dynamically through THIS's vtable so a runtime-subclass override is
+    // reached, even when a body exists in this class.
+    if (ctx.currentThis && !ctx.currentClassName.empty() &&
+        ctx.isVirtualMethod(ctx.currentClassName, name)) {
+        auto& ci = ctx.classes[ctx.currentClassName];
+        auto vtIt = ci.vtableIndex.find(name);
+        if (vtIt != ci.vtableIndex.end() && ci.vtableType) {
+            auto ptrTy2 = ctx.getRefType();
+            std::vector<llvm::Value*> argVals;
+            argVals.push_back(ctx.currentThis);
+            std::vector<llvm::Type*> paramTys;
+            paramTys.push_back(ptrTy2);
+            for (auto& a : args) {
+                auto v = a->codegen(ctx);
+                if (!v) return nullptr;
+                argVals.push_back(v);
+                paramTys.push_back(v->getType());
+            }
+            llvm::FunctionType* funcTy = nullptr;
+            for (auto& [cn, ci2] : ctx.classes) {
+                auto mm = ci2.methods.find(name);
+                if (mm != ci2.methods.end()) { funcTy = mm->second->getFunctionType(); break; }
+            }
+            if (!funcTy) {
+                auto rtIt = ci.virtualReturnTypes.find(name);
+                llvm::Type* retTy = llvm::Type::getVoidTy(*ctx.llvmContext);
+                if (rtIt != ci.virtualReturnTypes.end()) {
+                    if (rtIt->second == -2) retTy = ptrTy2;
+                    else if (rtIt->second >= 0) retTy = ctx.getLLVMType(rtIt->second);
+                }
+                funcTy = llvm::FunctionType::get(retTy, paramTys, false);
+            }
+            auto baseObjTy = llvm::StructType::get(*ctx.llvmContext, {ptrTy2, ptrTy2});
+            auto vtSlot = ctx.builder->CreateStructGEP(baseObjTy, ctx.currentThis, 0, "vt_slot");
+            auto vtPtr = ctx.builder->CreateLoad(ptrTy2, vtSlot, "vtptr");
+            auto fpSlot = ctx.builder->CreateStructGEP(ci.vtableType, vtPtr, vtIt->second, "fp_slot");
+            auto fp = ctx.builder->CreateLoad(ptrTy2, fpSlot, "method_fp");
+            if (funcTy->getReturnType()->isVoidTy())
+                return ctx.builder->CreateCall(funcTy, fp, argVals);
+            return ctx.builder->CreateCall(funcTy, fp, argVals, name + "_vret");
+        }
+    }
 
     // Check if it's a method call on THIS (within a class)
     if (ctx.currentThis && !ctx.currentClassName.empty()) {

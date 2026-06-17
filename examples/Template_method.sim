@@ -1,0 +1,31 @@
+COMMENT Template Method pattern: a base-class algorithm (DESCRIBE) calls
+        virtual methods (NAME, LEGS) that subclasses override, via unqualified
+        dispatch on THIS;
+BEGIN
+    CLASS ANIMAL;
+    VIRTUAL: TEXT PROCEDURE NAME;
+             INTEGER PROCEDURE LEGS;
+    BEGIN
+        PROCEDURE DESCRIBE;
+        BEGIN
+            OUTTEXT(NAME); OUTTEXT(" has "); OUTINT(LEGS, 0);
+            OUTTEXT(" legs"); OUTIMAGE;
+        END;
+    END;
+
+    ANIMAL CLASS DOG;
+    BEGIN
+        TEXT PROCEDURE NAME; NAME :- COPY("Dog");
+        INTEGER PROCEDURE LEGS; LEGS := 4;
+    END;
+
+    ANIMAL CLASS BIRD;
+    BEGIN
+        TEXT PROCEDURE NAME; NAME :- COPY("Bird");
+        INTEGER PROCEDURE LEGS; LEGS := 2;
+    END;
+
+    REF(ANIMAL) A;
+    A :- NEW DOG;  A.DESCRIBE;
+    A :- NEW BIRD; A.DESCRIBE;
+END.

@@ -196,6 +196,9 @@ public:
     std::set<int> getClassIdSet(const std::string& className);
     // IDs of className and every class derived from it (for IN / WHEN matching)
     std::set<int> getDescendantIdSet(const std::string& className);
+    // True if `method` is declared VIRTUAL in className or any prefix ancestor
+    // (so unqualified calls must dispatch dynamically through the vtable).
+    bool isVirtualMethod(const std::string& className, const std::string& method);
 
     // Label helpers
     llvm::BasicBlock* getOrCreateLabel(const std::string& name);
