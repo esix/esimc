@@ -1,0 +1,7 @@
+A => T OK
+BARK => T OK
+BOOK => F OK
+TREAT => T OK
+COMMON => F OK
+SQUAD => T OK
+CONFUSE => T OK

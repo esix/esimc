@@ -1,0 +1,9 @@
+ITEM            QTY   PRICE
+--------------------------
+WIDGET           4    2.50
+GADGET          12    9.99
+GIZMO            7    0.75
+--------------------------
+TOTAL QTY: 23
+A = B (content):  YES
+A == B (same obj): NO

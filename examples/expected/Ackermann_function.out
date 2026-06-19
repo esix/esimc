@@ -1,0 +1,5 @@
+Ackermann(4, 0) = 13
+Ackermann(3, 3) = 61
+Ackermann(2, 6) = 15
+Ackermann(1, 9) = 11
+Ackermann(0,12) = 13

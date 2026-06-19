@@ -1,0 +1,4 @@
+(3.0, 4.0)
+(0.0, 0.0) rgb=1,2,*
+p.x = 3.0
+cp IS ColorPoint: TRUE

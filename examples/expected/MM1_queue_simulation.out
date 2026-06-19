@@ -1,0 +1,10 @@
+Customer 1 began service at t=0.00 after waiting 0.00
+Customer 2 began service at t=6.02 after waiting 0.00
+Customer 3 began service at t=10.27 after waiting 0.00
+Customer 4 began service at t=11.77 after waiting 1.04
+Customer 5 began service at t=13.77 after waiting 0.00
+Customer 6 began service at t=15.27 after waiting 0.88
+Customer 7 began service at t=16.83 after waiting 0.00
+Customer 8 began service at t=22.02 after waiting 0.00
+Customers served: 8
+Average wait: 0.24
