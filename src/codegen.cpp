@@ -1229,11 +1229,21 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             auto row = ctx.builder->CreateMul(adjusted, stride, "row_off");
             auto col = ctx.builder->CreateSub(idxVal2, lo2, "col_adj");
             adjusted = ctx.builder->CreateAdd(row, col, "flat_idx");
+            // 3D: flat = (prev) * size3 + (k - lo3)
+            if (args.size() >= 3 && info.stride2 != 0) {
+                auto idxVal3 = args[2]->codegen(ctx);
+                if (!idxVal3) return nullptr;
+                auto s3 = llvm::ConstantInt::get(i64Ty, info.stride2);
+                auto lo3 = llvm::ConstantInt::get(i64Ty, info.lowerBound3);
+                auto plane = ctx.builder->CreateMul(adjusted, s3, "plane_off");
+                auto dep = ctx.builder->CreateSub(idxVal3, lo3, "dep_adj");
+                adjusted = ctx.builder->CreateAdd(plane, dep, "flat_idx3");
+            }
         }
 
         llvm::Value* gep;
         if (info.isStackArray) {
-            auto totalSize = (info.stride > 0) ? info.size : info.size;
+            auto totalSize = info.size;
             auto arrTy = llvm::ArrayType::get(info.elementType, totalSize > 0 ? (size_t)totalSize : 1);
             gep = ctx.builder->CreateGEP(arrTy, info.basePtr,
                 {llvm::ConstantInt::get(i64Ty, 0), adjusted}, "arr_elem");
@@ -3456,16 +3466,37 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // Evaluate third dimension bounds (3D arrays, constant bounds only)
+    long long lo3 = 0, hi3 = 0;
+    bool has3D = (lowerBound3 != nullptr && upperBound3 != nullptr);
+    bool constBounds3 = false;
+    if (has3D) {
+        auto lo3Val = lowerBound3->codegen(ctx);
+        auto hi3Val = upperBound3->codegen(ctx);
+        if (lo3Val && hi3Val)
+            if (auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(lo3Val))
+                if (auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(hi3Val)) {
+                    lo3 = c1->getSExtValue(); hi3 = c2->getSExtValue();
+                    constBounds3 = true;
+                }
+    }
+
     // Use fully-constant path only when ALL required bounds are compile-time constants
-    bool fullyConst = constBounds && (!has2D || constBounds2);
+    bool fullyConst = constBounds && (!has2D || constBounds2) && (!has3D || constBounds3);
     if (fullyConst) {
         long long size = hi - lo + 1;
         if (size <= 0) size = 1;
-        long long stride = 0; // 0 = 1D
+        long long stride = 0;  // size of dim 2; 0 = 1D
+        long long stride2 = 0; // size of dim 3; 0 = <=2D
         if (has2D) {
             stride = hi2 - lo2 + 1;
             if (stride <= 0) stride = 1;
-            size = size * stride; // total elements
+            size = size * stride;
+        }
+        if (has3D) {
+            stride2 = hi3 - lo3 + 1;
+            if (stride2 <= 0) stride2 = 1;
+            size = size * stride2;
         }
 
         auto allocArr = [&](llvm::Value* basePtr, bool isStack) {
@@ -3478,6 +3509,8 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
             info.isStackArray = isStack;
             info.lowerBound2 = lo2;
             info.stride = stride;
+            info.lowerBound3 = lo3;
+            info.stride2 = stride2;
             ctx.arrays[name] = info;
             if (!refClassName.empty()) ctx.refTypes[name] = refClassName;
         };
@@ -3620,6 +3653,16 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
         auto row = ctx.builder->CreateMul(adjusted, stride, "row_off");
         auto col = ctx.builder->CreateSub(idxVal2, lo2, "col_adj");
         adjusted = ctx.builder->CreateAdd(row, col, "flat_idx");
+        // 3D: flat = (prev) * size3 + (k - lo3)
+        if (index3 && info.stride2 != 0) {
+            auto idxVal3 = index3->codegen(ctx);
+            if (!idxVal3) return nullptr;
+            auto s3 = llvm::ConstantInt::get(i64Ty, info.stride2);
+            auto lo3 = llvm::ConstantInt::get(i64Ty, info.lowerBound3);
+            auto plane = ctx.builder->CreateMul(adjusted, s3, "plane_off");
+            auto dep = ctx.builder->CreateSub(idxVal3, lo3, "dep_adj");
+            adjusted = ctx.builder->CreateAdd(plane, dep, "flat_idx3");
+        }
     }
 
     llvm::Value* gep;

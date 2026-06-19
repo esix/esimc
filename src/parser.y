@@ -449,6 +449,13 @@ array_decl
                                   ExprPtr($5), ExprPtr($7),
                                   "", ExprPtr($9), ExprPtr($11));
       }
+    | type_name T_ARRAY T_IDENT T_LPAREN expr T_COLON expr T_COMMA expr T_COLON expr T_COMMA expr T_COLON expr T_RPAREN {
+        /* 3D array: TYPE ARRAY a(lo1:hi1, lo2:hi2, lo3:hi3) */
+        $$ = new ArrayDeclaration((VarDeclaration::Type)$1, $3,
+                                  ExprPtr($5), ExprPtr($7),
+                                  "", ExprPtr($9), ExprPtr($11),
+                                  ExprPtr($13), ExprPtr($15));
+      }
     ;
 
 ref_declaration
@@ -968,7 +975,8 @@ expr_stmt
                 /* a(i) := expr or a(i,j) := expr -> ArrayAssignment */
                 ExprPtr idx(call->args.empty() ? nullptr : call->args[0].release());
                 ExprPtr idx2(call->args.size() >= 2 ? call->args[1].release() : nullptr);
-                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), false, std::move(idx2));
+                ExprPtr idx3(call->args.size() >= 3 ? call->args[2].release() : nullptr);
+                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), false, std::move(idx2), std::move(idx3));
                 delete $1;
             } else {
                 MemberAccess* ma = dynamic_cast<MemberAccess*>($1);
@@ -1008,7 +1016,8 @@ expr_stmt
                 /* a(i) :- expr or a(i,j) :- expr -> ArrayAssignment (ref-assign) */
                 ExprPtr idx(call->args.empty() ? nullptr : call->args[0].release());
                 ExprPtr idx2(call->args.size() >= 2 ? call->args[1].release() : nullptr);
-                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), true, std::move(idx2));
+                ExprPtr idx3(call->args.size() >= 3 ? call->args[2].release() : nullptr);
+                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), true, std::move(idx2), std::move(idx3));
                 delete $1;
             } else {
                 MemberAccess* ma = dynamic_cast<MemberAccess*>($1);

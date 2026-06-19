@@ -61,7 +61,10 @@ struct ArrayInfo {
     bool isStackArray;       // true: basePtr is alloca of [N x T]; false: basePtr is ptr to T
     // 2D array support (stride == 0 means 1D array)
     long long lowerBound2 = 0;
-    long long stride = 0;    // number of columns (hi2-lo2+1); 0 = 1D
+    long long stride = 0;    // size of dim 2 (hi2-lo2+1); 0 = 1D
+    // 3D array support (stride2 == 0 means <=2D); constant bounds only
+    long long lowerBound3 = 0;
+    long long stride2 = 0;   // size of dim 3 (hi3-lo3+1); 0 = not 3D
     // Dynamic second-dimension lower bound (runtime value stored in __lo2 alloca)
     bool hasDynLo2 = false;
     bool hasDynStride = false;

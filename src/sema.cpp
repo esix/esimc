@@ -247,13 +247,14 @@ void SemanticAnalyzer::checkStmt(Statement* s) {
         if (!ad->refClassName.empty()) checkClassRef(ad->refClassName, ad->line);
         checkExpr(ad->lowerBound.get()); checkExpr(ad->upperBound.get());
         checkExpr(ad->lowerBound2.get()); checkExpr(ad->upperBound2.get());
+        checkExpr(ad->lowerBound3.get()); checkExpr(ad->upperBound3.get());
         return;
     }
     if (auto* a = dynamic_cast<Assignment*>(s)) { checkIdent(a->name, a->line); checkExpr(a->value.get()); return; }
     if (auto* a = dynamic_cast<RefAssignment*>(s)) { checkIdent(a->name, a->line); checkExpr(a->value.get()); return; }
     if (auto* a = dynamic_cast<ArrayAssignment*>(s)) {
         checkIdent(a->name, a->line);
-        checkExpr(a->index.get()); checkExpr(a->index2.get()); checkExpr(a->value.get());
+        checkExpr(a->index.get()); checkExpr(a->index2.get()); checkExpr(a->index3.get()); checkExpr(a->value.get());
         return;
     }
     if (auto* a = dynamic_cast<MemberAssignment*>(s)) { checkExpr(a->object.get()); checkExpr(a->value.get()); return; }

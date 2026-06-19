@@ -246,13 +246,16 @@ public:
     std::string name;
     ExprPtr lowerBound, upperBound;
     ExprPtr lowerBound2, upperBound2; // second dimension (nullptr = 1D)
+    ExprPtr lowerBound3, upperBound3; // third dimension (nullptr = <=2D)
     std::string refClassName; // for REF arrays: the element class name
     ArrayDeclaration(VarDeclaration::Type t, std::string n, ExprPtr lo, ExprPtr hi,
                      std::string rc = "",
-                     ExprPtr lo2 = nullptr, ExprPtr hi2 = nullptr)
+                     ExprPtr lo2 = nullptr, ExprPtr hi2 = nullptr,
+                     ExprPtr lo3 = nullptr, ExprPtr hi3 = nullptr)
         : elementType(t), name(std::move(n)),
           lowerBound(std::move(lo)), upperBound(std::move(hi)),
           lowerBound2(std::move(lo2)), upperBound2(std::move(hi2)),
+          lowerBound3(std::move(lo3)), upperBound3(std::move(hi3)),
           refClassName(std::move(rc)) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
@@ -263,11 +266,13 @@ public:
     std::string name;
     ExprPtr index;
     ExprPtr index2; // second dimension index (nullptr = 1D)
+    ExprPtr index3; // third dimension index (nullptr = <=2D)
     ExprPtr value;
     bool isRef;     // true for :- (rebind), false for := (in-place for TEXT)
-    ArrayAssignment(std::string n, ExprPtr i, ExprPtr v, bool ref, ExprPtr i2 = nullptr)
+    ArrayAssignment(std::string n, ExprPtr i, ExprPtr v, bool ref,
+                    ExprPtr i2 = nullptr, ExprPtr i3 = nullptr)
         : name(std::move(n)), index(std::move(i)), index2(std::move(i2)),
-          value(std::move(v)), isRef(ref) {}
+          index3(std::move(i3)), value(std::move(v)), isRef(ref) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
