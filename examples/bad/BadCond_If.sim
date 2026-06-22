@@ -1,0 +1,6 @@
+COMMENT BAD: IF condition is an INTEGER variable, not a BOOLEAN;
+BEGIN
+    INTEGER N;
+    N := 5;
+    IF N THEN OUTTEXT("nope"); OUTIMAGE;
+END.

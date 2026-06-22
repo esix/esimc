@@ -98,6 +98,78 @@ void SemanticAnalyzer::checkCallArity(const std::string& name, int argc, int lin
               << " argument(s), got " << argc << "\n";
 }
 
+// Conservative type inference. Returns VarDeclaration::Type, -1 for REF, or
+// -100 (unknown). Only confidently-determinable cases are typed; every
+// uncertain construct (method calls, builtins, fields) returns unknown so the
+// caller never flags it.
+static const int UNKNOWN_TYPE = -100;
+int SemanticAnalyzer::inferType(Expression* e) {
+    using V = VarDeclaration;
+    if (!e) return UNKNOWN_TYPE;
+    if (dynamic_cast<IntegerLiteral*>(e)) return V::INTEGER;
+    if (dynamic_cast<RealLiteral*>(e)) return V::REAL;
+    if (dynamic_cast<BooleanLiteral*>(e)) return V::BOOLEAN;
+    if (dynamic_cast<CharLiteral*>(e)) return V::CHARACTER;
+    if (dynamic_cast<TextLiteral*>(e)) return V::TEXT;
+    if (dynamic_cast<NoneLiteral*>(e)) return -1;  // NONE/NOTEXT
+    if (dynamic_cast<IsExpression*>(e) || dynamic_cast<InExpression*>(e)) return V::BOOLEAN;
+    if (auto* id = dynamic_cast<Identifier*>(e)) {
+        const Sym* s = lookup(id->name);
+        if (s && (s->kind == Sym::VAR || s->kind == Sym::PARAM || s->kind == Sym::PROC))
+            return s->type;
+        return UNKNOWN_TYPE;  // builtins, classes, etc.
+    }
+    if (auto* u = dynamic_cast<UnaryOp*>(e))
+        return u->op == UnaryOp::NOT ? (int)V::BOOLEAN : inferType(u->operand.get());
+    if (auto* b = dynamic_cast<BinaryOp*>(e)) {
+        switch (b->op) {
+            case BinaryOp::EQ: case BinaryOp::NE: case BinaryOp::LT: case BinaryOp::LE:
+            case BinaryOp::GT: case BinaryOp::GE: case BinaryOp::REF_EQ:
+            case BinaryOp::REF_NE: case BinaryOp::AND: case BinaryOp::OR:
+            case BinaryOp::ANDTHEN: case BinaryOp::ORELSE:
+                return V::BOOLEAN;
+            case BinaryOp::CONCAT: return V::TEXT;
+            default: {  // arithmetic
+                int lt = inferType(b->lhs.get()), rt = inferType(b->rhs.get());
+                if (lt == V::REAL || rt == V::REAL) return V::REAL;
+                if (lt == V::INTEGER && rt == V::INTEGER) return V::INTEGER;
+                return UNKNOWN_TYPE;
+            }
+        }
+    }
+    if (auto* pc = dynamic_cast<ProcedureCall*>(e)) {
+        const Sym* s = lookup(pc->name);
+        if (s && s->kind == Sym::PROC) return s->type;
+        return UNKNOWN_TYPE;  // builtins / arrays — don't guess
+    }
+    if (auto* c = dynamic_cast<ConditionalExpr*>(e)) {
+        int t = inferType(c->thenExpr.get());
+        return t == inferType(c->elseExpr.get()) ? t : UNKNOWN_TYPE;
+    }
+    if (dynamic_cast<QuaExpression*>(e)) return -1;  // ref
+    return UNKNOWN_TYPE;  // MemberAccess, MethodCall, This, In*Expression
+}
+
+// A condition (IF/WHILE) must be BOOLEAN. Flag only when we are confident the
+// type is something else; unknown types are left alone.
+void SemanticAnalyzer::checkCondition(Expression* cond, int line) {
+    int t = inferType(cond);
+    if (t == UNKNOWN_TYPE || t == VarDeclaration::BOOLEAN) return;
+    if (cond && cond->line > 0) line = cond->line;
+    const char* tn = "value";
+    switch (t) {
+        case VarDeclaration::INTEGER: tn = "INTEGER"; break;
+        case VarDeclaration::REAL: tn = "REAL"; break;
+        case VarDeclaration::CHARACTER: tn = "CHARACTER"; break;
+        case VarDeclaration::TEXT: tn = "TEXT"; break;
+        case -1: tn = "REF"; break;
+    }
+    hadError = true;
+    std::cerr << "Error";
+    if (line > 0) std::cerr << " at line " << line;
+    std::cerr << ": condition must be BOOLEAN, not " << tn << "\n";
+}
+
 // Full constructor arity for NEW: sum params up the whole prefix chain.
 int SemanticAnalyzer::newArity(const std::string& className) const {
     std::string cur = lower(className);
@@ -266,11 +338,11 @@ void SemanticAnalyzer::checkStmt(Statement* s) {
     if (auto* e = dynamic_cast<ExprStatement*>(s)) { checkExpr(e->expr.get()); return; }
     if (auto* l = dynamic_cast<LabeledStatement*>(s)) { checkStmt(l->statement.get()); return; }
     if (auto* i = dynamic_cast<IfStatement*>(s)) {
-        checkExpr(i->condition.get());
+        checkExpr(i->condition.get()); checkCondition(i->condition.get(), i->line);
         checkStmt(i->thenBranch.get()); checkStmt(i->elseBranch.get());
         return;
     }
-    if (auto* w = dynamic_cast<WhileStatement*>(s)) { checkExpr(w->condition.get()); checkStmt(w->body.get()); return; }
+    if (auto* w = dynamic_cast<WhileStatement*>(s)) { checkExpr(w->condition.get()); checkCondition(w->condition.get(), w->line); checkStmt(w->body.get()); return; }
     if (auto* f = dynamic_cast<ForStatement*>(s)) {
         checkExpr(f->start.get()); checkExpr(f->step.get()); checkExpr(f->limit.get());
         checkStmt(f->body.get());

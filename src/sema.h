@@ -57,6 +57,11 @@ private:
     void checkIdent(const std::string& name, int line);
     void checkCallArity(const std::string& name, int argc, int line);
     int  newArity(const std::string& className) const;  // full prefix-chain arity, -1 unknown
+    // Conservative expression type inference: returns a VarDeclaration::Type, -1
+    // for REF, or -100 (unknown) when it can't be determined confidently. Used
+    // only to flag clearly-wrong types (e.g. a non-boolean condition).
+    int inferType(Expression* e);
+    void checkCondition(Expression* cond, int line);  // must be BOOLEAN
 };
 
 #endif // ESIMC_SEMA_H

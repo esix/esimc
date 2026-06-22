@@ -1,0 +1,6 @@
+COMMENT BAD: WHILE condition is INTEGER arithmetic, not BOOLEAN;
+BEGIN
+    INTEGER K;
+    K := 3;
+    WHILE K - 1 DO K := K - 1;
+END.
