@@ -1,0 +1,36 @@
+COMMENT Symmetric coroutine RESUME: two coroutines pass control back and forth
+        with RESUME, then control returns to the main program when the first
+        one terminates;
+BEGIN
+    REF(PINGER) P;
+    REF(PONGER) Q;
+
+    CLASS PINGER;
+    BEGIN
+        INTEGER I;
+        DETACH;
+        FOR I := 1 STEP 1 UNTIL 3 DO
+        BEGIN
+            OUTTEXT("ping "); OUTINT(I, 0); OUTIMAGE;
+            RESUME(Q);
+        END;
+    END;
+
+    CLASS PONGER;
+    BEGIN
+        INTEGER J;
+        DETACH;
+        FOR J := 1 STEP 1 UNTIL 3 DO
+        BEGIN
+            OUTTEXT("  pong "); OUTINT(J, 0); OUTIMAGE;
+            RESUME(P);
+        END;
+    END;
+
+    P :- NEW PINGER;
+    Q :- NEW PONGER;
+    RESUME(P);
+    OUTTEXT("main resumes again"); OUTIMAGE;
+    RESUME(Q);
+    OUTTEXT("main done"); OUTIMAGE;
+END.

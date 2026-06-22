@@ -30,6 +30,7 @@ struct SimulaCoro {
 static void (*_pending_func)(void*);
 static void* _pending_arg;
 static SimulaCoro* _pending_coro;
+static SimulaCoro* _coro_current = NULL;  /* currently running coroutine; NULL = main */
 
 static VOID CALLBACK coro_fiber_proc(LPVOID param) {
     void (*func)(void*) = _pending_func;
@@ -62,9 +63,11 @@ void simula_coro_start(SimulaCoro* coro, void (*func)(void*), void* arg) {
 
     coro->fiber = CreateFiber(SIMULA_CORO_STACK_SIZE, coro_fiber_proc, NULL);
     coro->caller_fiber = this_fiber;
+    SimulaCoro* prev = _coro_current;
     coro->state = 1;
-
+    _coro_current = coro;
     SwitchToFiber(coro->fiber);
+    _coro_current = prev;
 }
 
 void simula_coro_detach(SimulaCoro* coro) {
@@ -82,12 +85,19 @@ void simula_coro_resume(SimulaCoro* coro) {
                 coro->state);
         return;
     }
-
-    void* this_fiber = GetCurrentFiber();
-    coro->caller_fiber = this_fiber;
+    SimulaCoro* prev = _coro_current;
     coro->state = 1;
-
+    _coro_current = coro;
+    if (prev == NULL) {
+        // Main program resuming a coroutine (unchanged behavior).
+        coro->caller_fiber = GetCurrentFiber();
+    } else {
+        // A coroutine resuming another: the resumer becomes detached so it can
+        // be resumed back (symmetric transfer); its DETACH target is unchanged.
+        prev->state = 2;
+    }
     SwitchToFiber(coro->fiber);
+    _coro_current = prev;
 }
 
 void simula_coro_free(SimulaCoro* coro) {
@@ -117,6 +127,7 @@ struct SimulaCoro {
 static void (*_pending_func)(void*);
 static void* _pending_arg;
 static SimulaCoro* _pending_coro;
+static SimulaCoro* _coro_current = NULL;  /* currently running coroutine; NULL = main */
 
 static void coro_trampoline(void) {
     void (*func)(void*) = _pending_func;
@@ -148,8 +159,11 @@ void simula_coro_start(SimulaCoro* coro, void (*func)(void*), void* arg) {
 
     makecontext(&coro->context, coro_trampoline, 0);
 
+    SimulaCoro* prev = _coro_current;
     coro->state = 1;
+    _coro_current = coro;
     swapcontext(&coro->caller_ctx, &coro->context);
+    _coro_current = prev;
 }
 
 void simula_coro_detach(SimulaCoro* coro) {
@@ -167,8 +181,21 @@ void simula_coro_resume(SimulaCoro* coro) {
                 coro->state);
         return;
     }
+    SimulaCoro* prev = _coro_current;
     coro->state = 1;
-    swapcontext(&coro->caller_ctx, &coro->context);
+    _coro_current = coro;
+    if (prev == NULL) {
+        // Main program resuming a coroutine: control returns here on DETACH
+        // (unchanged behavior; the SIMULATION scheduler relies on it).
+        swapcontext(&coro->caller_ctx, &coro->context);
+    } else {
+        // A coroutine resuming another: the resumer becomes detached so it can
+        // be resumed back (Simula RESUME is a symmetric transfer). Its DETACH
+        // target (caller_ctx) is left pointing at its own main program.
+        prev->state = 2;
+        swapcontext(&prev->context, &coro->context);
+    }
+    _coro_current = prev;
 }
 
 void simula_coro_free(SimulaCoro* coro) {
