@@ -202,29 +202,30 @@ The compiler is single-pass: declarations are processed in order. The runtime li
 
 ## What's Implemented
 
-- **Types**: INTEGER, REAL, BOOLEAN, TEXT, CHARACTER, REF(Class), ARRAY (1D, dynamic bounds)
-- **Procedures**: C-style and Simula-style parameter declarations, recursion, return-by-name
-- **Classes**: inheritance, virtual dispatch via vtables, INSPECT/WHEN, IS/IN, QUA
-- **Coroutines**: DETACH/RESUME using POSIX ucontext (Windows Fibers on Win32)
-- **Closures**: nested procedures capture outer variables, this pointer, and arrays
-- **Control flow**: IF/THEN/ELSE (statement and expression), WHILE, FOR (range and value-list), GOTO/LABEL
-- **TEXT operations**: .Length, .More, .GetChar, .PutChar, .SetPos, .Pos, .Strip, .Sub, .Main
-- **I/O**: OutText, OutInt, OutReal, OutFix, OutChar, OutImage, ININT, INREAL, INCHAR, LASTITEM
-- **Built-ins**: ABS, MOD, ENTIER, SIGN, CHAR, RANK, BLANKS, COPY, LENGTH, RANDINT, UNIFORM, ERROR, UPPERBOUND, LOWERBOUND
-- **Operators**: arithmetic (+ - * / // **), comparison (= <> < <= > >= == =/=), logical (AND/OR/NOT/EQV/IMP/AND THEN/OR ELSE), text concatenation (&)
+- **Types**: INTEGER, REAL, BOOLEAN, TEXT, CHARACTER, REF(Class); ARRAY (1D/2D dynamic bounds, 3D constant bounds)
+- **Procedures**: C-style and Simula-style parameter declarations, recursion, return-by-name, NAME/VALUE/array/LABEL parameters, formal procedures
+- **Classes**: inheritance with prefixing, INNER, virtual dispatch via vtables (qualified and unqualified calls), INSPECT/WHEN/OTHERWISE, IS/IN, QUA
+- **Coroutines**: DETACH/RESUME (including symmetric RESUME between coroutines) via POSIX ucontext (Windows Fibers on Win32)
+- **SIMULATION**: PROCESS classes, ACTIVATE/REACTIVATE (AT/DELAY/BEFORE/AFTER/PRIOR), HOLD, PASSIVATE, WAIT, CANCEL, TIME, CURRENT, EVTIME/IDLE/TERMINATED, ACCUM
+- **SIMSET**: LINK/HEAD doubly-linked lists (INTO, OUT, FIRST, LAST, SUC, PRED, CARDINAL, EMPTY)
+- **TEXT**: a proper text descriptor (frame/start/length/pos) — SUB/STRIP/MAIN alias the parent frame, `==`/`=/=` are reference identity, `=`/`<>` content; .Length .More .GetChar .PutChar .SetPos .Pos, GetInt/GetReal/GetFrac, PutInt/PutFix/PutReal/PutFrac
+- **I/O**: OutText/OutInt/OutReal/OutFix/OutFrac/OutChar/OutImage, ININT/INREAL/INCHAR/INFRAC/LASTITEM; INFILE and OUTFILE classes; EXTERNAL CLASS auto-loading
+- **Built-ins**: ABS, MOD, ENTIER, ROUND, SIGN, SQRT/SIN/COS/TAN/EXP/LN/LOG, CHAR, RANK, DIGIT, LETTER, UPCASE, LOWCASE, BLANKS, COPY, LENGTH, MAXINT/PI, LOWERBOUND/UPPERBOUND; drawing library (RANDINT, UNIFORM, NORMAL, NEGEXP, POISSON, ERLANG, DRAW, DISCRETE, LINEAR, HISTD, HISTO) with by-reference seeds
+- **Control flow**: IF/THEN/ELSE (statement and expression), WHILE, FOR (range, value-list, and multi-range), GOTO/LABEL (incl. non-local GOTO via LABEL parameters), SWITCH + computed GOTO
+- **Operators**: arithmetic (+ - * / // **), comparison `= <> < <= > >=` and letter forms `EQ NE LT LE GT GE`, reference `== =/=`, logical (AND/OR/NOT/EQV/IMP/AND THEN/OR ELSE), text concatenation (&)
+- **Semantic analysis**: a pre-codegen pass reports, with source line numbers, unknown classes, undefined variables, misspelled calls, wrong NEW/procedure argument counts, and non-BOOLEAN IF/WHILE conditions
 
 ## Limitations / Not Yet Implemented
 
-- **2D+ arrays**: only 1-dimensional arrays supported
-- **LABEL parameters**: pass-by-name labels for non-local GOTO
-- **EXTERNAL CLASS**: no module/separate compilation system
-- **File I/O**: no INFILE/OUTFILE classes (only stdin/stdout)
-- **Garbage collection**: objects allocated but never freed
-- **FOR multi-range**: `FOR i := a STEP 1 UNTIL b, c STEP 1 UNTIL d DO`
-- **Error recovery**: parser stops at first error
+- **NAME parameters re-evaluation (Jensen's device)**: *intentionally not implemented.* A NAME parameter captures the actual's address once at the call (so write-back to a plain variable or array element works); it is not re-evaluated on every access, so Jensen's-device-style `Sum(i, 1, n, A(i))` does not recompute `A(i)` per iteration. This is rarely used in practice and the thunk machinery it requires isn't worth the complexity.
+- **Assignment type compatibility**: the type checker flags non-BOOLEAN conditions and bad arities but does not fully check `:=` operand compatibility (Simula's implicit INTEGER↔REAL↔CHARACTER coercions make this false-positive-prone).
+- **3D arrays**: constant bounds only; not supported as procedure parameters (1D/2D may have dynamic bounds and be passed to procedures).
+- **Garbage collection**: objects and text frames are allocated but never freed (arena-leak model).
+- **Parser error recovery**: parsing stops at the first syntax error (semantic and codegen errors are collected and reported together).
 
 ## Test Coverage
 
-The `examples/` directory includes 7 tutorial programs (all passing) plus 19 Rosetta Code Simula programs.
-**Currently 16 of 26 examples compile and run** — most remaining failures need EXTERNAL modules,
-2D arrays, or LABEL parameters.
+Two suites, both run by scripts in the repo root:
+
+- `./test_all.sh` — **53 positive examples** in `examples/`, checked by full-output golden diff against `examples/expected/` (`--bless` regenerates). All passing.
+- `./test_bad.sh` — **28 negative examples** in `examples/bad/`, each an intentionally-wrong program that must be rejected with the right diagnostic. All correctly rejected.
