@@ -102,6 +102,12 @@
 ">="                            return T_GE;
 "<"                             return T_LT;
 ">"                             return T_GT;
+"LT"                            return T_LT;  /* letter-form relationals */
+"LE"                            return T_LE;
+"EQ"                            return T_EQ;
+"NE"                            return T_NE;
+"GE"                            return T_GE;
+"GT"                            return T_GT;
 "("                             return T_LPAREN;
 ")"                             return T_RPAREN;
 ";"                             return T_SEMI;

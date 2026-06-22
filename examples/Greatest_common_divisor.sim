@@ -10,7 +10,7 @@ BEGIN
     INTEGER PROCEDURE GCDITER(A, B); INTEGER A, B;
     BEGIN
         INTEGER T;
-        WHILE B <> 0 DO
+        WHILE B NE 0 DO   COMMENT letter-form relational;
         BEGIN
             T := MOD(A, B);
             A := B;

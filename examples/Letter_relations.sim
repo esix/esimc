@@ -1,0 +1,27 @@
+COMMENT Letter-form relational operators (Simula 67 alternates):
+        LT LE EQ NE GE GT, equivalent to < <= = <> >= >. Also confirms
+        tokens that start with these letters (EQV, NEW, LENGTH) still lex;
+BEGIN
+    INTEGER A, B;
+    TEXT T;
+    PROCEDURE SHOW(LBL, COND); TEXT LBL; BOOLEAN COND;
+    BEGIN
+        OUTTEXT(LBL); OUTTEXT(": ");
+        IF COND THEN OUTTEXT("TRUE") ELSE OUTTEXT("FALSE");
+        OUTIMAGE;
+    END SHOW;
+
+    A := 3; B := 7;
+    SHOW("3 LT 7", A LT B);
+    SHOW("7 LE 7", B LE 7);
+    SHOW("3 EQ 3", A EQ 3);
+    SHOW("3 NE 7", A NE B);
+    SHOW("7 GE 3", B GE A);
+    SHOW("3 GT 7", A GT B);
+    SHOW("(A LT B) EQV (B GT A)", (A LT B) EQV (B GT A));
+    SHOW("(A LE B) AND (A NE B)", (A LE B) AND (A NE B));
+
+    COMMENT LENGTH starts with LE but still lexes as itself, not LE + NGTH;
+    T :- BLANKS(5);
+    SHOW("T.LENGTH GE 5", T.LENGTH GE 5);
+END.
