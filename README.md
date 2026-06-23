@@ -20,17 +20,29 @@ make        # builds the compiler (build/esimc) and runtime (build/simula_rt.o)
 
 ### Compile and run a Simula program
 
+`esimc` is a one-step compiler: point it at a `.sim` file and an output name and it
+produces a runnable executable directly, linking the runtime for you.
+
 ```bash
-make run SIM=examples/hello.sim
+./build/esimc input.sim -o program   # compile + link -> executable
+./program                            # run
 ```
 
-Or manually:
+The output extension selects what is produced:
+
+| `-o` argument | Output                       |
+|---------------|------------------------------|
+| `program`     | linked executable (default)  |
+| `program.o`   | native object file           |
+| `program.ll`  | LLVM IR (text)               |
+
+The runtime (`simula_rt.o`) is located automatically next to the `esimc` binary.
+The linker is the system `cc` (override with the `CC` environment variable).
+
+Or via make:
 
 ```bash
-./build/esimc input.sim -o output.ll        # compile to LLVM IR
-llc -filetype=obj output.ll -o output.o     # assemble
-clang output.o build/simula_rt.o -o program # link with runtime
-./program                                    # run
+make run SIM=examples/hello.sim
 ```
 
 ## Supported Language Features
@@ -195,7 +207,8 @@ examples/
 ## Architecture
 
 ```
-Source (.sim) → Flex (tokens) → Bison (AST) → Codegen (LLVM IR) → LLC (object) → Clang (executable)
+Source (.sim) → Flex (tokens) → Bison (AST) → Sema (checks) → Codegen (LLVM IR)
+              → LLVM TargetMachine (object) → system cc (link runtime → executable)
 ```
 
 The compiler is single-pass: declarations are processed in order. The runtime library provides memory allocation (`simula_alloc`) and coroutine primitives (`simula_coro_*`) using POSIX `ucontext`.

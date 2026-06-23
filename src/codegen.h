@@ -179,6 +179,9 @@ public:
 
     void generateCode(Program& program);
     void writeIR(const std::string& filename);
+    // Emit a native object file for the host target. Returns false on failure
+    // (and sets hadError). Used by the one-step compile-and-link driver.
+    bool emitObject(const std::string& filename);
     void declareRuntimeFunctions();
 
     llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* func,

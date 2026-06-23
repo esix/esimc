@@ -3,7 +3,16 @@
 
 #include <llvm/IR/Verifier.h>
 #include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/CodeGen.h>
+#include <llvm/MC/TargetRegistry.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/Target/TargetOptions.h>
+#include <llvm/TargetParser/Host.h>
+#include <llvm/TargetParser/Triple.h>
 
 #include <iostream>
 #include <algorithm>
@@ -544,6 +553,44 @@ void CodeGenContext::writeIR(const std::string& filename) {
         return;
     }
     module->print(out, nullptr);
+}
+
+bool CodeGenContext::emitObject(const std::string& filename) {
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    llvm::InitializeNativeTargetAsmParser();
+
+    llvm::Triple triple(llvm::sys::getDefaultTargetTriple());
+    module->setTargetTriple(triple);
+
+    std::string error;
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, error);
+    if (!target) {
+        (hadError = true, std::cerr) << "Error: " << error << "\n";
+        return false;
+    }
+
+    llvm::TargetOptions opt;
+    auto* tm = target->createTargetMachine(triple, "generic", "", opt,
+                                           llvm::Reloc::PIC_);
+    module->setDataLayout(tm->createDataLayout());
+
+    std::error_code ec;
+    llvm::raw_fd_ostream dest(filename, ec, llvm::sys::fs::OF_None);
+    if (ec) {
+        (hadError = true, std::cerr) << "Error opening object file: " << ec.message() << "\n";
+        return false;
+    }
+
+    llvm::legacy::PassManager pass;
+    if (tm->addPassesToEmitFile(pass, dest, nullptr,
+                                llvm::CodeGenFileType::ObjectFile)) {
+        (hadError = true, std::cerr) << "Error: target cannot emit an object file\n";
+        return false;
+    }
+    pass.run(*module);
+    dest.flush();
+    return true;
 }
 
 // ============================================================

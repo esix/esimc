@@ -64,9 +64,7 @@ runtime: $(BUILD)/simula_rt.o
 # Usage: make run SIM=examples/hello.sim
 
 run: $(BUILD)/esimc $(BUILD)/simula_rt.o
-	@$(BUILD)/esimc $(SIM) -o $(BUILD)/output.ll
-	@llc -filetype=obj $(BUILD)/output.ll -o $(BUILD)/output.o
-	@clang $(BUILD)/output.o $(BUILD)/simula_rt.o -o $(BUILD)/a.out
+	@$(BUILD)/esimc $(SIM) -o $(BUILD)/a.out
 	@$(BUILD)/a.out
 
 clean:

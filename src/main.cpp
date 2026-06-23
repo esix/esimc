@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <unistd.h>
 #include "ast.h"
 #include "codegen.h"
 #include "sema.h"
@@ -559,9 +560,49 @@ static std::string maybeInjectSimset(const std::string& source) {
     return prelude + "\n" + result;
 }
 
+// Shell-quote a path for use inside a system() command line.
+static std::string shellQuote(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') out += "'\\''";
+        else out += c;
+    }
+    out += "'";
+    return out;
+}
+
+// Directory containing the running esimc executable.
+static fs::path exeDir(const char* argv0) {
+    std::error_code ec;
+    fs::path p = fs::weakly_canonical(fs::path(argv0), ec);
+    if (ec || p.empty()) p = fs::absolute(fs::path(argv0));
+    return p.parent_path();
+}
+
+// Find the prebuilt runtime object (simula_rt.o) to link the executable against.
+static std::string findRuntimeObject(const fs::path& exedir) {
+    fs::path candidates[] = {
+        exedir / "simula_rt.o",
+        exedir / ".." / "build" / "simula_rt.o",
+        fs::path("build") / "simula_rt.o",
+    };
+    std::error_code ec;
+    for (auto& c : candidates) {
+        if (fs::exists(c)) {
+            auto canon = fs::weakly_canonical(c, ec);
+            return ec ? c.string() : canon.string();
+        }
+    }
+    return "";
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: esimc <source.sim> [-o output.ll]\n";
+        std::cerr << "Usage: esimc <source.sim> [-o output]\n"
+                     "  -o NAME      output file; the extension selects the mode:\n"
+                     "                 NAME.ll  -> LLVM IR\n"
+                     "                 NAME.o   -> native object file\n"
+                     "                 NAME     -> linked executable (default mode)\n";
         return 1;
     }
 
@@ -627,10 +668,53 @@ int main(int argc, char** argv) {
         delete programRoot;
         return 1;
     }
-    context.writeIR(outputFile);
+    // The output extension selects what we produce: .ll -> LLVM IR,
+    // .o -> native object file, anything else -> a linked executable.
+    std::string ext = fs::path(outputFile).extension().string();
 
-    std::cout << "Wrote LLVM IR to " << outputFile << "\n";
+    if (ext == ".ll") {
+        context.writeIR(outputFile);
+        bool ok = !context.hadError;
+        delete programRoot;
+        if (!ok) return 1;
+        std::cout << "Wrote LLVM IR to " << outputFile << "\n";
+        return 0;
+    }
 
+    if (ext == ".o") {
+        bool ok = context.emitObject(outputFile);
+        delete programRoot;
+        if (!ok) return 1;
+        std::cout << "Wrote object file to " << outputFile << "\n";
+        return 0;
+    }
+
+    // Executable: emit a temporary object, then link it against the runtime
+    // with the system C compiler.
+    fs::path tmpObj = fs::temp_directory_path() /
+                      ("esimc-" + std::to_string((long)getpid()) + ".o");
+    bool emitted = context.emitObject(tmpObj.string());
     delete programRoot;
+    if (!emitted) return 1;
+
+    std::string rt = findRuntimeObject(exeDir(argv[0]));
+    if (rt.empty()) {
+        std::cerr << "Error: cannot find the runtime (simula_rt.o); "
+                     "build it with 'make' first.\n";
+        std::error_code ec; fs::remove(tmpObj, ec);
+        return 1;
+    }
+
+    const char* ccEnv = std::getenv("CC");
+    std::string cc = (ccEnv && *ccEnv) ? ccEnv : "cc";
+    std::string cmd = shellQuote(cc) + " " + shellQuote(tmpObj.string()) + " " +
+                      shellQuote(rt) + " -lm -o " + shellQuote(outputFile);
+    int rc = std::system(cmd.c_str());
+    std::error_code ec; fs::remove(tmpObj, ec);
+    if (rc != 0) {
+        std::cerr << "Error: linking failed (" << cc << ").\n";
+        return 1;
+    }
+    std::cout << "Wrote executable to " << outputFile << "\n";
     return 0;
 }

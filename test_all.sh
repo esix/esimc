@@ -1,9 +1,9 @@
 #!/bin/bash
 # Golden-output test harness.
 #
-# For each examples/*.sim: compile -> llc -> link, run it with the matching
-# examples/input/<name>.in as stdin (empty if none), and compare the FULL
-# output to examples/expected/<name>.out.
+# For each examples/*.sim: compile straight to an executable (esimc's one-step
+# driver), run it with the matching examples/input/<name>.in as stdin (empty if
+# none), and compare the FULL output to examples/expected/<name>.out.
 #
 # A few examples are interactive and loop on EOF (no stable full output); they
 # are listed in LOOSE and checked only for a matching first output line.
@@ -25,9 +25,7 @@ is_loose() { case " $LOOSE " in *" $1 "*) return 0;; *) return 1;; esac; }
 # run_one <simfile> <name> <timeout> -> full combined output on stdout
 run_one() {
     local f=$1 name=$2 to=$3
-    ./build/esimc "$f" -o /tmp/g_$name.ll >/dev/null 2>&1 || { echo "__COMPILE_FAIL__"; return; }
-    llc -filetype=obj /tmp/g_$name.ll -o /tmp/g_$name.o 2>/dev/null || { echo "__LLC_FAIL__"; return; }
-    clang /tmp/g_$name.o build/simula_rt.o -o /tmp/g_$name.exe -lm 2>/dev/null || { echo "__LINK_FAIL__"; return; }
+    ./build/esimc "$f" -o /tmp/g_$name.exe >/dev/null 2>&1 || { echo "__COMPILE_FAIL__"; return; }
     local instream=/dev/null
     [ -f "examples/input/$name.in" ] && instream="examples/input/$name.in"
     # The watchdog must NOT inherit the captured stdout fd, or command
