@@ -1347,6 +1347,22 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             }
         }
 
+        // Bounds check (constant-bound stack arrays, where the size is known):
+        // 1D checks the original index against its declared [lo:hi]; multi-D
+        // checks the flat index against the whole allocation so an out-of-range
+        // subscript can't corrupt memory.
+        if (info.isStackArray && info.size > 0) {
+            if (info.stride == 0 && !info.hasDynStride) {
+                auto hiC = ctx.builder->CreateAdd(loBound,
+                    llvm::ConstantInt::get(i64Ty, info.size - 1), "hi");
+                ctx.emitBoundsCheck(idxVal, loBound, hiC, line);
+            } else {
+                ctx.emitBoundsCheck(adjusted,
+                    llvm::ConstantInt::get(i64Ty, 0),
+                    llvm::ConstantInt::get(i64Ty, info.size - 1), line);
+            }
+        }
+
         llvm::Value* gep;
         if (info.isStackArray) {
             auto totalSize = info.size;
@@ -3768,6 +3784,19 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
             auto plane = ctx.builder->CreateMul(adjusted, s3, "plane_off");
             auto dep = ctx.builder->CreateSub(idxVal3, lo3, "dep_adj");
             adjusted = ctx.builder->CreateAdd(plane, dep, "flat_idx3");
+        }
+    }
+
+    // Bounds check (constant-bound stack arrays): see ProcedureCall read path.
+    if (info.isStackArray && info.size > 0) {
+        if (info.stride == 0 && !info.hasDynStride) {
+            auto hiC = ctx.builder->CreateAdd(loBound,
+                llvm::ConstantInt::get(i64Ty, info.size - 1), "hi");
+            ctx.emitBoundsCheck(idxVal, loBound, hiC, line);
+        } else {
+            ctx.emitBoundsCheck(adjusted,
+                llvm::ConstantInt::get(i64Ty, 0),
+                llvm::ConstantInt::get(i64Ty, info.size - 1), line);
         }
     }
 
