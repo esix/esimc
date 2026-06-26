@@ -196,7 +196,6 @@ public:
     // source-located diagnostic), and leaves the builder positioned in the
     // success continuation so codegen proceeds normally.
     void emitDivZeroCheck(llvm::Value* divisor, int line);
-    void emitBoundsCheck(llvm::Value* idx, llvm::Value* lo, llvm::Value* hi, int line);
     void emitNilCheck(llvm::Value* refPtr, int line);
     // Bounds-check one array subscript: idx must lie in [lo, lo+size-1], where
     // size is that dimension's element count (a constant for constant-bound

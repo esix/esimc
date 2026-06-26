@@ -639,25 +639,6 @@ void CodeGenContext::emitDivZeroCheck(llvm::Value* divisor, int line) {
     builder->SetInsertPoint(okBB);
 }
 
-void CodeGenContext::emitBoundsCheck(llvm::Value* idx, llvm::Value* lo,
-                                     llvm::Value* hi, int line) {
-    auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
-    auto* fn = builder->GetInsertBlock()->getParent();
-    auto* okBB  = llvm::BasicBlock::Create(*llvmContext, "boundsok", fn);
-    auto* badBB = llvm::BasicBlock::Create(*llvmContext, "boundsbad", fn);
-    auto belowLo = builder->CreateICmpSLT(idx, lo, "below_lo");
-    auto aboveHi = builder->CreateICmpSGT(idx, hi, "above_hi");
-    auto oob = builder->CreateOr(belowLo, aboveHi, "oob");
-    builder->CreateCondBr(oob, badBB, okBB);
-    builder->SetInsertPoint(badBB);
-    auto trapFn = module->getOrInsertFunction("simula_bounds_error",
-        llvm::FunctionType::get(llvm::Type::getVoidTy(*llvmContext),
-            {i64Ty, i64Ty, i64Ty, i64Ty}, false));
-    builder->CreateCall(trapFn, {idx, lo, hi, llvm::ConstantInt::get(i64Ty, line)});
-    builder->CreateUnreachable();
-    builder->SetInsertPoint(okBB);
-}
-
 llvm::Value* CodeGenContext::arrayFirstDimSize(const std::string& name,
                                                const ArrayInfo& info) {
     auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
@@ -671,20 +652,44 @@ llvm::Value* CodeGenContext::arrayFirstDimSize(const std::string& name,
     auto it = locals.find(name + "__n1");
     if (it != locals.end())
         return builder->CreateLoad(i64Ty, it->second, "n1");
-    // Array parameters also carry a first-dimension bound (__hi), but it is not
-    // reliably forwarded when a formal array is re-passed to another procedure,
-    // so checking it would risk false positives. Leave parameter arrays
-    // unchecked (return null = skip) rather than abort a correct program.
+    // Array parameters carry their first dimension as __lo/__hi. The size is
+    // hi - lo + 1; when the caller could not determine it (e.g. a dynamic class
+    // field passed as an argument) it forwards an empty range (hi = lo - 1), so
+    // the size comes out <= 0 and emitDimCheck skips the check.
+    auto hiIt = locals.find(name + "__hi");
+    auto loIt = locals.find(name + "__lo");
+    if (hiIt != locals.end() && loIt != locals.end()) {
+        auto hi = builder->CreateLoad(i64Ty, hiIt->second, "hi");
+        auto lo = builder->CreateLoad(i64Ty, loIt->second, "lo");
+        return builder->CreateAdd(builder->CreateSub(hi, lo, "range"),
+            llvm::ConstantInt::get(i64Ty, 1), "n1");
+    }
     return nullptr;
 }
 
 void CodeGenContext::emitDimCheck(llvm::Value* idx, llvm::Value* lo,
                                   llvm::Value* size, int line) {
     auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
-    auto sizeM1 = builder->CreateSub(size,
-        llvm::ConstantInt::get(i64Ty, 1), "size_m1");
-    auto hi = builder->CreateAdd(lo, sizeM1, "hi");
-    emitBoundsCheck(idx, lo, hi, line);
+    auto hi = builder->CreateAdd(lo,
+        builder->CreateSub(size, llvm::ConstantInt::get(i64Ty, 1), "size_m1"), "hi");
+    auto* fn = builder->GetInsertBlock()->getParent();
+    auto* okBB  = llvm::BasicBlock::Create(*llvmContext, "boundsok", fn);
+    auto* badBB = llvm::BasicBlock::Create(*llvmContext, "boundsbad", fn);
+    auto belowLo = builder->CreateICmpSLT(idx, lo, "below_lo");
+    auto aboveHi = builder->CreateICmpSGT(idx, hi, "above_hi");
+    auto oob = builder->CreateOr(belowLo, aboveHi, "oob");
+    // Only trap when the size is actually known (> 0); a non-positive size is the
+    // "unknown bound" sentinel, for which we skip rather than risk a false abort.
+    auto known = builder->CreateICmpSGT(size, llvm::ConstantInt::get(i64Ty, 0), "size_known");
+    auto trap = builder->CreateAnd(known, oob, "do_trap");
+    builder->CreateCondBr(trap, badBB, okBB);
+    builder->SetInsertPoint(badBB);
+    auto trapFn = module->getOrInsertFunction("simula_bounds_error",
+        llvm::FunctionType::get(llvm::Type::getVoidTy(*llvmContext),
+            {i64Ty, i64Ty, i64Ty, i64Ty}, false));
+    builder->CreateCall(trapFn, {idx, lo, hi, llvm::ConstantInt::get(i64Ty, line)});
+    builder->CreateUnreachable();
+    builder->SetInsertPoint(okBB);
 }
 
 void CodeGenContext::emitNilCheck(llvm::Value* refPtr, int line) {
@@ -2492,14 +2497,24 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                         : (llvm::Value*)llvm::ConstantInt::get(i64Ty2, ainfo.lowerBound);
                     if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isIntegerTy(64))
                         { argsV.push_back(loV); paramIdx++; }
-                    // hi
+                    // hi (first-dimension upper bound). Source it from the array's
+                    // actual first-dimension size so dynamic arrays forward a correct
+                    // bound: hi = lo + n1 - 1. A re-passed parameter keeps its own
+                    // __hi (which may already be the unknown sentinel). When the size
+                    // can't be determined (a dynamic class-field array passed as an
+                    // argument), forward an empty range (hi = lo - 1) so the callee
+                    // skips bounds checks rather than using a wrong bound.
                     auto hiIt = ctx.locals.find(id->name + "__hi");
                     llvm::Value* hiV;
                     if (hiIt != ctx.locals.end()) {
                         hiV = ctx.builder->CreateLoad(i64Ty2, hiIt->second, "hi_arg");
+                    } else if (auto* n1 = ctx.arrayFirstDimSize(id->name, ainfo)) {
+                        hiV = ctx.builder->CreateAdd(loV,
+                            ctx.builder->CreateSub(n1, llvm::ConstantInt::get(i64Ty2, 1),
+                                "n1_m1"), "hi_arg");
                     } else {
-                        long long hiC = ainfo.lowerBound + (ainfo.size > 0 ? ainfo.size - 1 : 0);
-                        hiV = llvm::ConstantInt::get(i64Ty2, hiC);
+                        hiV = ctx.builder->CreateSub(loV,
+                            llvm::ConstantInt::get(i64Ty2, 1), "hi_unknown");
                     }
                     if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isIntegerTy(64))
                         { argsV.push_back(hiV); paramIdx++; }
