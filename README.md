@@ -39,6 +39,9 @@ The output extension selects what is produced:
 The runtime (`simula_rt.o`) is located automatically next to the `esimc` binary.
 The linker is the system `cc` (override with the `CC` environment variable).
 
+Output is optimized at `-O2` by default (an LLVM `mem2reg`/`SROA`/`GVN`/inlining
+pipeline runs before lowering); pass `-O0` to disable optimization.
+
 Or via make:
 
 ```bash
@@ -227,12 +230,15 @@ The compiler is single-pass: declarations are processed in order. The runtime li
 - **Control flow**: IF/THEN/ELSE (statement and expression), WHILE, FOR (range, value-list, and multi-range), GOTO/LABEL (incl. non-local GOTO via LABEL parameters), SWITCH + computed GOTO
 - **Operators**: arithmetic (+ - * / // **), comparison `= <> < <= > >=` and letter forms `EQ NE LT LE GT GE`, reference `== =/=`, logical (AND/OR/NOT/EQV/IMP/AND THEN/OR ELSE), text concatenation (&)
 - **Semantic analysis**: a pre-codegen pass reports, with source line numbers, unknown classes, undefined variables, misspelled calls, wrong NEW/procedure argument counts, and non-BOOLEAN IF/WHILE conditions
+- **Optimization**: an LLVM `-O2` module pipeline (mem2reg/SROA/instcombine/GVN/simplifycfg/inlining) runs before object emission (disable with `-O0`)
+- **Checked runtime mode**: array indexing (constant-bound arrays), integer division/MOD by zero, and NONE-reference access (method calls, field reads/writes) are checked and abort with a source-located `Runtime error at line N: ...` diagnostic instead of corrupting memory or silently producing garbage
 
 ## Limitations / Not Yet Implemented
 
 - **NAME parameters re-evaluation (Jensen's device)**: *intentionally not implemented.* A NAME parameter captures the actual's address once at the call (so write-back to a plain variable or array element works); it is not re-evaluated on every access, so Jensen's-device-style `Sum(i, 1, n, A(i))` does not recompute `A(i)` per iteration. This is rarely used in practice and the thunk machinery it requires isn't worth the complexity.
 - **Assignment type compatibility**: the type checker flags non-BOOLEAN conditions and bad arities but does not fully check `:=` operand compatibility (Simula's implicit INTEGER↔REAL↔CHARACTER coercions make this false-positive-prone).
 - **3D arrays**: constant bounds only; not supported as procedure parameters (1D/2D may have dynamic bounds and be passed to procedures).
+- **Bounds checking scope**: the checked runtime mode covers constant-bound (stack) arrays; dynamic-bound arrays are not yet bounds-checked (their size isn't threaded to the access site).
 - **Garbage collection**: objects and text frames are allocated but never freed (arena-leak model).
 - **Parser error recovery**: parsing stops at the first syntax error (semantic and codegen errors are collected and reported together).
 
