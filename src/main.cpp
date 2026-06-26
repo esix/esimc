@@ -598,20 +598,27 @@ static std::string findRuntimeObject(const fs::path& exedir) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: esimc <source.sim> [-o output]\n"
+        std::cerr << "Usage: esimc <source.sim> [-o output] [-O0]\n"
                      "  -o NAME      output file; the extension selects the mode:\n"
                      "                 NAME.ll  -> LLVM IR\n"
                      "                 NAME.o   -> native object file\n"
-                     "                 NAME     -> linked executable (default mode)\n";
+                     "                 NAME     -> linked executable (default mode)\n"
+                     "  -O0          disable optimization (default is -O2)\n";
         return 1;
     }
 
     std::string inputFile = argv[1];
     std::string outputFile = "output.ll";
+    bool optimize = true;
 
     for (int i = 2; i < argc; i++) {
-        if (std::string(argv[i]) == "-o" && i + 1 < argc) {
+        std::string a = argv[i];
+        if (a == "-o" && i + 1 < argc) {
             outputFile = argv[++i];
+        } else if (a == "-O0") {
+            optimize = false;
+        } else if (a == "-O2" || a == "-O") {
+            optimize = true;
         }
     }
 
@@ -662,6 +669,7 @@ int main(int argc, char** argv) {
     }
 
     CodeGenContext context;
+    context.optimize = optimize;
     context.generateCode(*programRoot);
     if (context.hadError) {
         std::cerr << "Compilation failed with errors; no output written.\n";

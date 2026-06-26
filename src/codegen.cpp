@@ -4,6 +4,7 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/LegacyPassManager.h>
+#include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/FileSystem.h>
@@ -407,6 +408,10 @@ void CodeGenContext::declareRuntimeFunctions() {
     setjmpFunc = llvm::Function::Create(
         llvm::FunctionType::get(i32Ty, {ptrTy}, false),
         llvm::Function::ExternalLinkage, "setjmp", module.get());
+    // setjmp returns more than once; without this the optimizer treats the
+    // post-setjmp code as reachable only on the first return and miscompiles
+    // the non-local GOTO dispatch under -O2.
+    setjmpFunc->addFnAttr(llvm::Attribute::ReturnsTwice);
     longjmpFunc = llvm::Function::Create(
         llvm::FunctionType::get(voidTy, {ptrTy, i32Ty}, false),
         llvm::Function::ExternalLinkage, "longjmp", module.get());
@@ -545,7 +550,25 @@ void CodeGenContext::generateCode(Program& program) {
     }
 }
 
+void CodeGenContext::optimizeModule() {
+    if (!optimize) return;
+    llvm::PassBuilder pb;
+    llvm::LoopAnalysisManager lam;
+    llvm::FunctionAnalysisManager fam;
+    llvm::CGSCCAnalysisManager cgam;
+    llvm::ModuleAnalysisManager mam;
+    pb.registerModuleAnalyses(mam);
+    pb.registerCGSCCAnalyses(cgam);
+    pb.registerFunctionAnalyses(fam);
+    pb.registerLoopAnalyses(lam);
+    pb.crossRegisterProxies(lam, fam, cgam, mam);
+    llvm::ModulePassManager mpm =
+        pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2);
+    mpm.run(*module, mam);
+}
+
 void CodeGenContext::writeIR(const std::string& filename) {
+    optimizeModule();
     std::error_code ec;
     llvm::raw_fd_ostream out(filename, ec);
     if (ec) {
@@ -556,6 +579,7 @@ void CodeGenContext::writeIR(const std::string& filename) {
 }
 
 bool CodeGenContext::emitObject(const std::string& filename) {
+    optimizeModule();
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
     llvm::InitializeNativeTargetAsmParser();

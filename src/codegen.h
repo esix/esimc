@@ -177,8 +177,15 @@ public:
 
     CodeGenContext();
 
+    // When true, run an LLVM -O2 module pipeline before emitting IR/objects.
+    // Disabled by the driver's -O0 flag.
+    bool optimize = true;
+
     void generateCode(Program& program);
     void writeIR(const std::string& filename);
+    // Run the default -O2 module optimization pipeline in place (mem2reg, SROA,
+    // instcombine, GVN, simplifycfg, inlining, ...). No-op if optimize is false.
+    void optimizeModule();
     // Emit a native object file for the host target. Returns false on failure
     // (and sets hadError). Used by the one-step compile-and-link driver.
     bool emitObject(const std::string& filename);
