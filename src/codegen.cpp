@@ -2798,6 +2798,14 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
         return nullptr;
     }
 
+    // Accessing a field/method through a NONE reference would segfault; guard it
+    // once class resolution has identified a real class. `this`/NEW are non-null.
+    if (!clsName.empty() && ctx.classes.count(clsName) &&
+        !dynamic_cast<ThisExpression*>(object.get()) &&
+        !dynamic_cast<NewExpression*>(object.get())) {
+        ctx.emitNilCheck(obj, line);
+    }
+
     int idx = ctx.getFieldIndex(clsName, member);
     if (idx >= 0) {
         auto& ci = ctx.classes[clsName];
@@ -3051,6 +3059,13 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
     if (clsName.empty()) {
         ctx.errorAt(line) << "cannot determine class type for method call '." << method << "'\n";
         return nullptr;
+    }
+
+    // Calling a method on NONE would segfault loading the vtable; guard it.
+    // `this` and freshly-NEW'd receivers are never null, so skip those.
+    if (!dynamic_cast<ThisExpression*>(object.get()) &&
+        !dynamic_cast<NewExpression*>(object.get())) {
+        ctx.emitNilCheck(obj, line);
     }
 
     // Look up the method — try vtable dispatch first
@@ -4026,6 +4041,12 @@ llvm::Value* MemberAssignment::codegen(CodeGenContext& ctx) {
         return nullptr;
     }
 
+    // Assigning through a NONE reference would corrupt memory; guard it.
+    if (!dynamic_cast<ThisExpression*>(object.get()) &&
+        !dynamic_cast<NewExpression*>(object.get())) {
+        ctx.emitNilCheck(obj, line);
+    }
+
     auto val = value->codegen(ctx);
     if (!val) return nullptr;
 
@@ -4113,6 +4134,10 @@ llvm::Value* MemberArrayAssignment::codegen(CodeGenContext& ctx) {
     if (clsName.empty()) {
         ctx.errorAt(line) << "cannot determine class for member array assignment '." << member << "'\n";
         return nullptr;
+    }
+    if (!dynamic_cast<ThisExpression*>(object.get()) &&
+        !dynamic_cast<NewExpression*>(object.get())) {
+        ctx.emitNilCheck(obj, line);
     }
     int fldIdx = ctx.getFieldIndex(clsName, member);
     if (fldIdx < 0) {
