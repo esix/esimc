@@ -1135,9 +1135,11 @@ multiplicative
       }
     | multiplicative T_SLASH power {
         $$ = new BinaryOp(BinaryOp::DIV, ExprPtr($1), ExprPtr($3));
+        $$->line = @2.first_line;
       }
     | multiplicative T_IDIV power {
         $$ = new BinaryOp(BinaryOp::IDIV, ExprPtr($1), ExprPtr($3));
+        $$->line = @2.first_line;
       }
     ;
 

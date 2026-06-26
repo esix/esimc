@@ -225,6 +225,44 @@ void* simula_alloc(int64_t size) {
 }
 
 /* ================================================================
+ * Platform-independent: runtime safety checks (checked mode)
+ *
+ * These are invoked from generated code on the failing path only; each
+ * prints a source-located diagnostic and aborts. A line of 0 means the
+ * front-end had no location for the site, so the line is omitted.
+ * ================================================================ */
+
+void simula_div_zero(int64_t line) {
+    if (line > 0)
+        fprintf(stderr, "Runtime error at line %ld: integer division or MOD by zero\n",
+                (long)line);
+    else
+        fprintf(stderr, "Runtime error: integer division or MOD by zero\n");
+    exit(1);
+}
+
+void simula_bounds_error(int64_t idx, int64_t lo, int64_t hi, int64_t line) {
+    if (line > 0)
+        fprintf(stderr,
+                "Runtime error at line %ld: array index %ld out of bounds [%ld:%ld]\n",
+                (long)line, (long)idx, (long)lo, (long)hi);
+    else
+        fprintf(stderr,
+                "Runtime error: array index %ld out of bounds [%ld:%ld]\n",
+                (long)idx, (long)lo, (long)hi);
+    exit(1);
+}
+
+void simula_nil_ref(int64_t line) {
+    if (line > 0)
+        fprintf(stderr, "Runtime error at line %ld: NONE-reference access (no object)\n",
+                (long)line);
+    else
+        fprintf(stderr, "Runtime error: NONE-reference access (no object)\n");
+    exit(1);
+}
+
+/* ================================================================
  * Platform-independent: text operations
  * ================================================================ */
 

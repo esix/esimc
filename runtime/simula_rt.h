@@ -27,6 +27,11 @@ typedef struct SimulaText {
 /* Memory allocation */
 void* simula_alloc(int64_t size);
 
+/* Runtime safety checks (checked mode): print a source-located diagnostic and abort. */
+void simula_div_zero(int64_t line);
+void simula_bounds_error(int64_t idx, int64_t lo, int64_t hi, int64_t line);
+void simula_nil_ref(int64_t line);
+
 /* Text constructors / operations (all on SimulaText* descriptors; NULL = NOTEXT) */
 SimulaText* simula_text_lit(const char* cstr);            /* wrap (no copy) */
 SimulaText* simula_text_dup(const char* cstr);            /* copy into writable frame */

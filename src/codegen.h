@@ -184,6 +184,14 @@ public:
     bool emitObject(const std::string& filename);
     void declareRuntimeFunctions();
 
+    // Checked-mode runtime guards. Each splits the current basic block, emits a
+    // failing path that calls the matching runtime abort (printing a
+    // source-located diagnostic), and leaves the builder positioned in the
+    // success continuation so codegen proceeds normally.
+    void emitDivZeroCheck(llvm::Value* divisor, int line);
+    void emitBoundsCheck(llvm::Value* idx, llvm::Value* lo, llvm::Value* hi, int line);
+    void emitNilCheck(llvm::Value* refPtr, int line);
+
     llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* func,
                                               const std::string& name,
                                               llvm::Type* type);

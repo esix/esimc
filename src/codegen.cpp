@@ -593,6 +593,65 @@ bool CodeGenContext::emitObject(const std::string& filename) {
     return true;
 }
 
+// ---- Checked-mode runtime guards ---------------------------------------
+// Each guard splits the current block into a "bad" path (calls the runtime
+// abort, then `unreachable`) and an "ok" continuation, and leaves the builder
+// in the ok block. The compare folds away under -O2 when the operand is a
+// known-safe constant, so the cost is near-zero in practice.
+
+void CodeGenContext::emitDivZeroCheck(llvm::Value* divisor, int line) {
+    auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
+    auto* fn = builder->GetInsertBlock()->getParent();
+    auto* okBB  = llvm::BasicBlock::Create(*llvmContext, "divok", fn);
+    auto* badBB = llvm::BasicBlock::Create(*llvmContext, "divzero", fn);
+    auto isZero = builder->CreateICmpEQ(
+        divisor, llvm::ConstantInt::get(divisor->getType(), 0), "iszero");
+    builder->CreateCondBr(isZero, badBB, okBB);
+    builder->SetInsertPoint(badBB);
+    auto trapFn = module->getOrInsertFunction("simula_div_zero",
+        llvm::FunctionType::get(llvm::Type::getVoidTy(*llvmContext), {i64Ty}, false));
+    builder->CreateCall(trapFn, {llvm::ConstantInt::get(i64Ty, line)});
+    builder->CreateUnreachable();
+    builder->SetInsertPoint(okBB);
+}
+
+void CodeGenContext::emitBoundsCheck(llvm::Value* idx, llvm::Value* lo,
+                                     llvm::Value* hi, int line) {
+    auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
+    auto* fn = builder->GetInsertBlock()->getParent();
+    auto* okBB  = llvm::BasicBlock::Create(*llvmContext, "boundsok", fn);
+    auto* badBB = llvm::BasicBlock::Create(*llvmContext, "boundsbad", fn);
+    auto belowLo = builder->CreateICmpSLT(idx, lo, "below_lo");
+    auto aboveHi = builder->CreateICmpSGT(idx, hi, "above_hi");
+    auto oob = builder->CreateOr(belowLo, aboveHi, "oob");
+    builder->CreateCondBr(oob, badBB, okBB);
+    builder->SetInsertPoint(badBB);
+    auto trapFn = module->getOrInsertFunction("simula_bounds_error",
+        llvm::FunctionType::get(llvm::Type::getVoidTy(*llvmContext),
+            {i64Ty, i64Ty, i64Ty, i64Ty}, false));
+    builder->CreateCall(trapFn, {idx, lo, hi, llvm::ConstantInt::get(i64Ty, line)});
+    builder->CreateUnreachable();
+    builder->SetInsertPoint(okBB);
+}
+
+void CodeGenContext::emitNilCheck(llvm::Value* refPtr, int line) {
+    if (!refPtr || !refPtr->getType()->isPointerTy()) return;
+    auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
+    auto* fn = builder->GetInsertBlock()->getParent();
+    auto* okBB  = llvm::BasicBlock::Create(*llvmContext, "refok", fn);
+    auto* badBB = llvm::BasicBlock::Create(*llvmContext, "refnil", fn);
+    auto isNull = builder->CreateICmpEQ(refPtr,
+        llvm::ConstantPointerNull::get(
+            llvm::cast<llvm::PointerType>(refPtr->getType())), "isnil");
+    builder->CreateCondBr(isNull, badBB, okBB);
+    builder->SetInsertPoint(badBB);
+    auto trapFn = module->getOrInsertFunction("simula_nil_ref",
+        llvm::FunctionType::get(llvm::Type::getVoidTy(*llvmContext), {i64Ty}, false));
+    builder->CreateCall(trapFn, {llvm::ConstantInt::get(i64Ty, line)});
+    builder->CreateUnreachable();
+    builder->SetInsertPoint(okBB);
+}
+
 // ============================================================
 // Expression codegen
 // ============================================================
@@ -1205,8 +1264,8 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
         case ADD: return ctx.builder->CreateAdd(L, R, "addtmp");
         case SUB: return ctx.builder->CreateSub(L, R, "subtmp");
         case MUL: return ctx.builder->CreateMul(L, R, "multmp");
-        case DIV: return ctx.builder->CreateSDiv(L, R, "divtmp");
-        case IDIV: return ctx.builder->CreateSDiv(L, R, "idivtmp");
+        case DIV: ctx.emitDivZeroCheck(R, line); return ctx.builder->CreateSDiv(L, R, "divtmp");
+        case IDIV: ctx.emitDivZeroCheck(R, line); return ctx.builder->CreateSDiv(L, R, "idivtmp");
         case EQ:  return ctx.builder->CreateICmpEQ(L, R, "eqtmp");
         case NE:  return ctx.builder->CreateICmpNE(L, R, "netmp");
         case LT:  return ctx.builder->CreateICmpSLT(L, R, "lttmp");
@@ -1366,6 +1425,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         auto a = args[0]->codegen(ctx);
         auto b = args[1]->codegen(ctx);
         if (!a || !b) return nullptr;
+        ctx.emitDivZeroCheck(b, line);
         auto rem = ctx.builder->CreateSRem(a, b, "srem");
         auto zero = llvm::ConstantInt::get(rem->getType(), 0);
         auto remNeg = ctx.builder->CreateICmpSLT(rem, zero, "rem_neg");
@@ -1514,7 +1574,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         auto le9 = ctx.builder->CreateICmpSLE(ch, c9);
         return ctx.builder->CreateAnd(ge0, le9, "digit");
     }
-    if (name == "letter") {
+    if (name == "letter" || name == "isoletter") {
         if (args.empty()) return nullptr;
         auto val = args[0]->codegen(ctx);
         if (!val) return nullptr;
@@ -1561,7 +1621,6 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         auto le9 = ctx.builder->CreateICmpSLE(ch, c9);
         return ctx.builder->CreateAnd(ge0, le9, "isodigit");
     }
-    if (name == "isoletter") { return nullptr; } // alias for letter
 
     // MAXINT / MININT / MAXREAL — manifest constants
     if (name == "maxint")  return llvm::ConstantInt::get(i64Ty, INT64_MAX);
