@@ -658,6 +658,35 @@ void CodeGenContext::emitBoundsCheck(llvm::Value* idx, llvm::Value* lo,
     builder->SetInsertPoint(okBB);
 }
 
+llvm::Value* CodeGenContext::arrayFirstDimSize(const std::string& name,
+                                               const ArrayInfo& info) {
+    auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
+    if (info.size > 0) {
+        // Total flat size factors as n1 * stride * stride2; divide them out.
+        long long n1 = info.size;
+        if (info.stride > 0)  n1 /= info.stride;
+        if (info.stride2 > 0) n1 /= info.stride2;
+        return llvm::ConstantInt::get(i64Ty, n1);
+    }
+    auto it = locals.find(name + "__n1");
+    if (it != locals.end())
+        return builder->CreateLoad(i64Ty, it->second, "n1");
+    // Array parameters also carry a first-dimension bound (__hi), but it is not
+    // reliably forwarded when a formal array is re-passed to another procedure,
+    // so checking it would risk false positives. Leave parameter arrays
+    // unchecked (return null = skip) rather than abort a correct program.
+    return nullptr;
+}
+
+void CodeGenContext::emitDimCheck(llvm::Value* idx, llvm::Value* lo,
+                                  llvm::Value* size, int line) {
+    auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
+    auto sizeM1 = builder->CreateSub(size,
+        llvm::ConstantInt::get(i64Ty, 1), "size_m1");
+    auto hi = builder->CreateAdd(lo, sizeM1, "hi");
+    emitBoundsCheck(idx, lo, hi, line);
+}
+
 void CodeGenContext::emitNilCheck(llvm::Value* refPtr, int line) {
     if (!refPtr || !refPtr->getType()->isPointerTy()) return;
     auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
@@ -1341,6 +1370,10 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         }
         auto adjusted = ctx.builder->CreateSub(idxVal, loBound, "adj_idx");
 
+        // Per-dimension bounds check, dim 1: idx in [lo1, lo1 + n1 - 1].
+        if (auto* n1 = ctx.arrayFirstDimSize(name, info))
+            ctx.emitDimCheck(idxVal, loBound, n1, line);
+
         // 2D array: flat_idx = (i - lo1) * stride + (j - lo2)
         if (args.size() >= 2 && (info.stride != 0 || info.hasDynStride)) {
             auto idxVal2 = args[1]->codegen(ctx);
@@ -1356,6 +1389,8 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                 stride = llvm::ConstantInt::get(i64Ty, info.stride);
                 lo2 = llvm::ConstantInt::get(i64Ty, info.lowerBound2);
             }
+            // dim 2: idx2 in [lo2, lo2 + stride - 1] (stride is dim-2's size).
+            ctx.emitDimCheck(idxVal2, lo2, stride, line);
             auto row = ctx.builder->CreateMul(adjusted, stride, "row_off");
             auto col = ctx.builder->CreateSub(idxVal2, lo2, "col_adj");
             adjusted = ctx.builder->CreateAdd(row, col, "flat_idx");
@@ -1365,25 +1400,10 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                 if (!idxVal3) return nullptr;
                 auto s3 = llvm::ConstantInt::get(i64Ty, info.stride2);
                 auto lo3 = llvm::ConstantInt::get(i64Ty, info.lowerBound3);
+                ctx.emitDimCheck(idxVal3, lo3, s3, line);  // dim 3
                 auto plane = ctx.builder->CreateMul(adjusted, s3, "plane_off");
                 auto dep = ctx.builder->CreateSub(idxVal3, lo3, "dep_adj");
                 adjusted = ctx.builder->CreateAdd(plane, dep, "flat_idx3");
-            }
-        }
-
-        // Bounds check (constant-bound stack arrays, where the size is known):
-        // 1D checks the original index against its declared [lo:hi]; multi-D
-        // checks the flat index against the whole allocation so an out-of-range
-        // subscript can't corrupt memory.
-        if (info.isStackArray && info.size > 0) {
-            if (info.stride == 0 && !info.hasDynStride) {
-                auto hiC = ctx.builder->CreateAdd(loBound,
-                    llvm::ConstantInt::get(i64Ty, info.size - 1), "hi");
-                ctx.emitBoundsCheck(idxVal, loBound, hiC, line);
-            } else {
-                ctx.emitBoundsCheck(adjusted,
-                    llvm::ConstantInt::get(i64Ty, 0),
-                    llvm::ConstantInt::get(i64Ty, info.size - 1), line);
             }
         }
 
@@ -3713,6 +3733,9 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
                 llvm::ConstantInt::get(i64Ty, 1), "arrsize");
         }
 
+        // First-dimension element count, before folding in the 2D stride.
+        llvm::Value* dim1Count = sizeVal;
+
         // If 2D, compute stride and multiply total size
         llvm::Value* strideVal = nullptr;
         if (has2D && lo2Val && hi2Val) {
@@ -3736,6 +3759,12 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
         auto func = ctx.builder->GetInsertBlock()->getParent();
         auto alloca = ctx.createEntryBlockAlloca(func, name, ptrTy);
         ctx.builder->CreateStore(ptr, alloca);
+
+        // Remember the first-dimension element count so accesses can be
+        // bounds-checked; __stride (stored below for 2D) gives the second.
+        auto n1Alloca = ctx.createEntryBlockAlloca(func, name + "__n1", i64Ty);
+        ctx.builder->CreateStore(dim1Count, n1Alloca);
+        ctx.locals[name + "__n1"] = n1Alloca;
 
         // Store lower bound for first-dimension index adjustment
         ArrayInfo info;
@@ -3796,6 +3825,10 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
     }
     auto adjusted = ctx.builder->CreateSub(idxVal, loBound, "adj_idx");
 
+    // Per-dimension bounds check, dim 1 (see ProcedureCall read path).
+    if (auto* n1 = ctx.arrayFirstDimSize(name, info))
+        ctx.emitDimCheck(idxVal, loBound, n1, line);
+
     // 2D array: flat_idx = (i - lo1) * stride + (j - lo2)
     if (index2 && (info.stride != 0 || info.hasDynStride)) {
         auto idxVal2 = index2->codegen(ctx);
@@ -3811,6 +3844,7 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
             stride = llvm::ConstantInt::get(i64Ty, info.stride);
             lo2 = llvm::ConstantInt::get(i64Ty, info.lowerBound2);
         }
+        ctx.emitDimCheck(idxVal2, lo2, stride, line);  // dim 2
         auto row = ctx.builder->CreateMul(adjusted, stride, "row_off");
         auto col = ctx.builder->CreateSub(idxVal2, lo2, "col_adj");
         adjusted = ctx.builder->CreateAdd(row, col, "flat_idx");
@@ -3820,22 +3854,10 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
             if (!idxVal3) return nullptr;
             auto s3 = llvm::ConstantInt::get(i64Ty, info.stride2);
             auto lo3 = llvm::ConstantInt::get(i64Ty, info.lowerBound3);
+            ctx.emitDimCheck(idxVal3, lo3, s3, line);  // dim 3
             auto plane = ctx.builder->CreateMul(adjusted, s3, "plane_off");
             auto dep = ctx.builder->CreateSub(idxVal3, lo3, "dep_adj");
             adjusted = ctx.builder->CreateAdd(plane, dep, "flat_idx3");
-        }
-    }
-
-    // Bounds check (constant-bound stack arrays): see ProcedureCall read path.
-    if (info.isStackArray && info.size > 0) {
-        if (info.stride == 0 && !info.hasDynStride) {
-            auto hiC = ctx.builder->CreateAdd(loBound,
-                llvm::ConstantInt::get(i64Ty, info.size - 1), "hi");
-            ctx.emitBoundsCheck(idxVal, loBound, hiC, line);
-        } else {
-            ctx.emitBoundsCheck(adjusted,
-                llvm::ConstantInt::get(i64Ty, 0),
-                llvm::ConstantInt::get(i64Ty, info.size - 1), line);
         }
     }
 

@@ -198,6 +198,17 @@ public:
     void emitDivZeroCheck(llvm::Value* divisor, int line);
     void emitBoundsCheck(llvm::Value* idx, llvm::Value* lo, llvm::Value* hi, int line);
     void emitNilCheck(llvm::Value* refPtr, int line);
+    // Bounds-check one array subscript: idx must lie in [lo, lo+size-1], where
+    // size is that dimension's element count (a constant for constant-bound
+    // arrays, a runtime value for dynamic ones). Applied per dimension so an
+    // out-of-range subscript is caught even when it would wrap within the
+    // allocation (e.g. G(2,5) in G(1:3,1:3)).
+    void emitDimCheck(llvm::Value* idx, llvm::Value* lo, llvm::Value* size, int line);
+    // First-dimension element count for bounds checking: a constant for
+    // constant-bound arrays, the runtime __n1 alloca for dynamic ones. Returns
+    // null when unknown (e.g. a closure-captured dynamic array) so the caller
+    // can skip the check rather than emit a wrong one.
+    llvm::Value* arrayFirstDimSize(const std::string& name, const ArrayInfo& info);
 
     llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* func,
                                               const std::string& name,
