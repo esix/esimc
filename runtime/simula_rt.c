@@ -352,23 +352,26 @@ SimulaText* simula_text_main(SimulaText* s) {
     return st_new(s->frame, 0, s->framelen, 0, s->framelen);
 }
 
-/* Content equality (= operator): same length and same characters. NOTEXT
- * equals only NOTEXT; an allocated "" (length 0) does NOT equal NOTEXT. */
+/* Content equality (= operator): same length and same characters. A length-0
+ * text — NOTEXT, "", COPY(""), BLANKS(0) — is content-equal to any other
+ * length-0 text (the empty character sequences match). */
 int64_t simula_text_eq(SimulaText* a, SimulaText* b) {
-    if (a == NULL && b == NULL) return 1;
-    if (a == NULL || b == NULL) return 0;
-    if (a->length != b->length) return 0;
-    if (a->length == 0) return 1;
-    return memcmp(a->frame + a->start, b->frame + b->start, (size_t)a->length) == 0 ? 1 : 0;
+    int64_t la = a ? a->length : 0;
+    int64_t lb = b ? b->length : 0;
+    if (la != lb) return 0;
+    if (la == 0) return 1;
+    return memcmp(a->frame + a->start, b->frame + b->start, (size_t)la) == 0 ? 1 : 0;
 }
 
-/* Reference identity (== operator): the same text object, i.e. same frame,
- * start and length (cursor is not part of identity). Both NOTEXT => true. */
+/* Reference identity (== operator): the same text object (same frame, start and
+ * length; the cursor is not part of identity). All texts of length 0 (NOTEXT and
+ * every "") denote the one empty text, so they are identical to each other. */
 int64_t simula_text_ref_eq(SimulaText* a, SimulaText* b) {
     if (a == b) return 1;
+    int64_t la = a ? a->length : 0;
+    int64_t lb = b ? b->length : 0;
+    if (la == 0 && lb == 0) return 1;
     if (a == NULL || b == NULL) return 0;
-    /* All empty (length 0) texts denote the same (empty) text object. */
-    if (a->length == 0 && b->length == 0) return 1;
     return (a->frame == b->frame && a->start == b->start && a->length == b->length) ? 1 : 0;
 }
 
