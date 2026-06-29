@@ -4684,10 +4684,22 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
 
     std::string funcName = isMethod ? (ctx.currentClassName + "_" + name) : name;
 
-    // Reuse existing function declaration if already created (e.g. by class pre-pass)
+    // Reuse existing function declaration if already created (e.g. by class
+    // pre-pass or the main-block forward-declaration pass). Those pre-passes run
+    // before closure-capture analysis, so their signature omits the captured
+    // parameters. When that happens the real definition needs the wider
+    // signature, so replace the stale declaration rather than overrun its args.
+    auto funcType = llvm::FunctionType::get(retTy, paramTypes, false);
     auto func = ctx.module->getFunction(funcName);
+    if (func && func->getFunctionType() != funcType) {
+        if (func->use_empty()) {
+            func->eraseFromParent();      // not referenced yet: safe to replace
+        } else {
+            func->setName(funcName + ".fwd");  // keep stale refs valid, free the name
+        }
+        func = nullptr;
+    }
     if (!func) {
-        auto funcType = llvm::FunctionType::get(retTy, paramTypes, false);
         func = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
                                       funcName, ctx.module.get());
     }
@@ -4882,6 +4894,9 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     // Set up captured outer variables (closure)
     for (size_t ci = 0; ci < captured.size(); ci++) {
         auto& capName = captured[ci];
+        // Defensive: never read past the function's argument list (a signature
+        // mismatch would otherwise dereference an invalid iterator and crash).
+        if (argIt == func->arg_end()) break;
         llvm::Value* capPtr = &*argIt;
         capPtr->setName("cap_" + capName);
         ++argIt;
