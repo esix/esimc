@@ -1,0 +1,5 @@
+static 1D:   3  9
+static 2D:   2  5 10 13
+dyn 1D:      1  6
+dyn 2D:      4  6
+captured:   15

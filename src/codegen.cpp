@@ -1862,37 +1862,57 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         return ctx.builder->CreateCall(ctx.textLengthFunc, {val}, "length");
     }
 
-    // UPPERBOUND(arr, dim) / LOWERBOUND(arr, dim)
+    // UPPERBOUND(arr, dim) / LOWERBOUND(arr, dim). Honors the dimension argument
+    // and uses per-dimension lower bounds and extents (the dim-1 extent comes from
+    // arrayFirstDimSize, which already resolves constant/dynamic/parameter arrays).
     if (name == "upperbound" || name == "lowerbound") {
         if (args.empty()) return nullptr;
-        // First arg should be an identifier naming an array
-        if (auto* id = dynamic_cast<Identifier*>(args[0].get())) {
-            auto ait2 = ctx.arrays.find(id->name);
-            if (ait2 != ctx.arrays.end()) {
-                auto& info = ait2->second;
-                if (name == "lowerbound") {
-                    auto loIt = ctx.locals.find(id->name + "__lo");
-                    if (loIt != ctx.locals.end())
-                        return ctx.builder->CreateLoad(i64Ty, loIt->second, "lo");
-                    return llvm::ConstantInt::get(i64Ty, info.lowerBound);
-                } else {
-                    // Prefer dynamic hi (set for array params); fall back to static
-                    auto hiIt = ctx.locals.find(id->name + "__hi");
-                    if (hiIt != ctx.locals.end())
-                        return ctx.builder->CreateLoad(i64Ty, hiIt->second, "hi");
-                    auto loIt = ctx.locals.find(id->name + "__lo");
-                    llvm::Value* lo;
-                    if (loIt != ctx.locals.end())
-                        lo = ctx.builder->CreateLoad(i64Ty, loIt->second, "lo");
-                    else
-                        lo = llvm::ConstantInt::get(i64Ty, info.lowerBound);
-                    return ctx.builder->CreateAdd(lo,
-                        llvm::ConstantInt::get(i64Ty, info.size > 0 ? info.size - 1 : 0), "hi");
-                }
-            }
+        auto* id = dynamic_cast<Identifier*>(args[0].get());
+        if (!id) { ctx.errorAt(line) << "cannot determine array bounds\n";
+                   return llvm::ConstantInt::get(i64Ty, 0); }
+        auto ait2 = ctx.arrays.find(id->name);
+        if (ait2 == ctx.arrays.end()) { ctx.errorAt(line) << "cannot determine array bounds\n";
+                                        return llvm::ConstantInt::get(i64Ty, 0); }
+        auto& info = ait2->second;
+
+        // Dimension (1-based); defaults to 1 and is a constant in practice.
+        long long dim = 1;
+        if (args.size() >= 2)
+            if (auto* dci = llvm::dyn_cast<llvm::ConstantInt>(args[1]->codegen(ctx)))
+                dim = dci->getSExtValue();
+
+        // Per-dimension lower bound.
+        llvm::Value* lo;
+        if (dim <= 1) {
+            auto it = ctx.locals.find(id->name + "__lo");
+            lo = it != ctx.locals.end()
+                ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty, it->second, "lo")
+                : (llvm::Value*)llvm::ConstantInt::get(i64Ty, info.lowerBound);
+        } else if (dim == 2) {
+            auto it = ctx.locals.find(id->name + "__lo2");
+            lo = it != ctx.locals.end()
+                ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty, it->second, "lo2")
+                : (llvm::Value*)llvm::ConstantInt::get(i64Ty, info.lowerBound2);
+        } else {
+            lo = llvm::ConstantInt::get(i64Ty, info.lowerBound3);
         }
-        ctx.errorAt(line) << "cannot determine array bounds\n";
-        return llvm::ConstantInt::get(i64Ty, 0);
+        if (name == "lowerbound") return lo;
+
+        // Upper bound = lo + extent(dim) - 1.
+        llvm::Value* extent;
+        if (dim <= 1) {
+            extent = ctx.arrayFirstDimSize(id->name, info);
+            if (!extent) extent = llvm::ConstantInt::get(i64Ty, info.size > 0 ? info.size : 1);
+        } else if (dim == 2) {
+            auto it = ctx.locals.find(id->name + "__stride");
+            extent = it != ctx.locals.end()
+                ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty, it->second, "stride")
+                : (llvm::Value*)llvm::ConstantInt::get(i64Ty, info.stride > 0 ? info.stride : 1);
+        } else {
+            extent = llvm::ConstantInt::get(i64Ty, info.stride2 > 0 ? info.stride2 : 1);
+        }
+        return ctx.builder->CreateAdd(lo,
+            ctx.builder->CreateSub(extent, llvm::ConstantInt::get(i64Ty, 1), "ext_m1"), "hi");
     }
 
     // OUTCHAR(ch) — print a single character
@@ -4870,6 +4890,15 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             auto hiAlloca = ctx.createEntryBlockAlloca(func, p.name + "__hi", i64Ty2);
             ctx.builder->CreateStore(hiArg, hiAlloca);
             ctx.locals[p.name + "__hi"] = hiAlloca;
+            // First-dimension element count (hi - lo + 1). Storing it lets the
+            // closure-capture machinery forward the upper bound into nested
+            // procedures (it propagates __n1, not __hi) and lets UPPERBOUND and
+            // bounds checks resolve the size via arrayFirstDimSize.
+            auto n1Alloca = ctx.createEntryBlockAlloca(func, p.name + "__n1", i64Ty2);
+            ctx.builder->CreateStore(
+                ctx.builder->CreateAdd(ctx.builder->CreateSub(hiArg, loArg, "prange"),
+                    llvm::ConstantInt::get(i64Ty2, 1), "pn1"), n1Alloca);
+            ctx.locals[p.name + "__n1"] = n1Alloca;
             auto lo2Alloca = ctx.createEntryBlockAlloca(func, p.name + "__lo2", i64Ty2);
             ctx.builder->CreateStore(lo2Arg, lo2Alloca);
             ctx.locals[p.name + "__lo2"] = lo2Alloca;

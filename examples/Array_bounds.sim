@@ -1,0 +1,51 @@
+! UPPERBOUND / LOWERBOUND across static, dynamic, multi-dimensional, and
+! closure-captured arrays — exercises per-dimension bounds resolution ;
+BEGIN
+    INTEGER m, n, i, j, s;
+
+    ! Static 1D ;
+    BEGIN
+        INTEGER ARRAY S(3:9);
+        OUTTEXT("static 1D: "); OUTINT(LOWERBOUND(S, 1), 3);
+        OUTINT(UPPERBOUND(S, 1), 3); OUTIMAGE
+    END;
+
+    ! Static 2D with non-1 lower bounds, both dimensions ;
+    BEGIN
+        INTEGER ARRAY M(2:5, 10:13);
+        OUTTEXT("static 2D: ");
+        OUTINT(LOWERBOUND(M, 1), 3); OUTINT(UPPERBOUND(M, 1), 3);
+        OUTINT(LOWERBOUND(M, 2), 3); OUTINT(UPPERBOUND(M, 2), 3); OUTIMAGE
+    END;
+
+    ! Dynamic 1D and 2D sized by computed values ;
+    m := 4; n := 6;
+    BEGIN
+        INTEGER ARRAY D(1:n);
+        INTEGER ARRAY G(1:m, 1:n);
+        OUTTEXT("dyn 1D:    "); OUTINT(LOWERBOUND(D, 1), 3);
+        OUTINT(UPPERBOUND(D, 1), 3); OUTIMAGE;
+        OUTTEXT("dyn 2D:    ");
+        OUTINT(UPPERBOUND(G, 1), 3); OUTINT(UPPERBOUND(G, 2), 3); OUTIMAGE
+    END;
+
+    ! Sum an array parameter via the FOR LOWERBOUND..UPPERBOUND idiom,
+    ! where the bound query happens inside a nested procedure (closure) ;
+    BEGIN
+        INTEGER ARRAY A(1:5);
+        INTEGER PROCEDURE total(a); INTEGER ARRAY a;
+        BEGIN
+            INTEGER k, t;
+            PROCEDURE accumulate;
+            BEGIN
+                t := 0;
+                FOR k := LOWERBOUND(a, 1) STEP 1 UNTIL UPPERBOUND(a, 1) DO
+                    t := t + a(k)
+            END;
+            accumulate;
+            total := t
+        END;
+        FOR i := 1 STEP 1 UNTIL 5 DO A(i) := i;
+        OUTTEXT("captured:  "); OUTINT(total(A), 3); OUTIMAGE
+    END
+END.
