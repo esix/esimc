@@ -2906,8 +2906,11 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
         return ctx.builder->CreateLoad(fieldTy, gep, member);
     }
 
-    // No field — try as a no-arg method call via vtable (virtual dispatch)
-    {
+    // No field — try as a no-arg method call. Only a VIRTUAL quantity dispatches
+    // on the object's runtime class; a non-virtual method redefined in a subclass
+    // binds statically to the reference's qualification (clsName), so fall through
+    // to the static-dispatch search below for non-virtual members.
+    if (ctx.isVirtualMethod(clsName, member)) {
         auto cit2 = ctx.classes.find(clsName);
         if (cit2 != ctx.classes.end()) {
             auto vtIt = cit2->second.vtableIndex.find(member);
@@ -3160,9 +3163,12 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
         ctx.emitNilCheck(obj, line);
     }
 
-    // Look up the method — try vtable dispatch first
+    // Look up the method. Only VIRTUAL quantities dispatch on the object's runtime
+    // class; a non-virtual method redefined in a subclass binds statically to the
+    // reference's qualification (clsName, also correct for QUA). Use the vtable
+    // only for virtuals; otherwise fall through to the static-dispatch search.
     auto cit = ctx.classes.find(clsName);
-    if (cit != ctx.classes.end()) {
+    if (cit != ctx.classes.end() && ctx.isVirtualMethod(clsName, method)) {
         auto vtIt = cit->second.vtableIndex.find(method);
         if (vtIt != cit->second.vtableIndex.end() && cit->second.vtableType) {
             // Virtual dispatch through vtable
