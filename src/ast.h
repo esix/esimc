@@ -34,6 +34,7 @@ struct ParamSpec {
     int arrayElemType = 0; // VarDeclaration::Type for array elements
     bool isName = false; // NAME (pass-by-reference) parameter
     bool isLabel = false; // LABEL parameter (non-local goto target)
+    bool isValue = false; // VALUE parameter (callee gets a private copy)
 };
 
 // ============================================================

@@ -4978,6 +4978,24 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             info.isStackArray = false;
             info.hasDynLo2 = true;
             info.hasDynStride = true;
+            // VALUE array: the callee gets a private copy, so element writes don't
+            // reach the caller. Allocate a fresh buffer of (hi-lo+1)*stride elements
+            // and copy the actual's contents; rebind the formal to that copy.
+            if (p.isValue) {
+                auto ptrTyV = llvm::PointerType::getUnqual(*ctx.llvmContext);
+                auto elemSz = ctx.module->getDataLayout().getTypeAllocSize(info.elementType);
+                auto n1 = ctx.builder->CreateAdd(
+                    ctx.builder->CreateSub(hiArg, loArg, "vrange"),
+                    llvm::ConstantInt::get(i64Ty2, 1), "vn1");
+                auto total = ctx.builder->CreateMul(n1, strideArg, "vtotal");
+                auto bytes = ctx.builder->CreateMul(total,
+                    llvm::ConstantInt::get(i64Ty2, (long long)elemSz), "vbytes");
+                auto fresh = ctx.builder->CreateCall(ctx.allocFunc, {bytes}, p.name + "_vcopy");
+                auto memcpyFn = ctx.module->getOrInsertFunction("memcpy",
+                    llvm::FunctionType::get(ptrTyV, {ptrTyV, ptrTyV, i64Ty2}, false));
+                ctx.builder->CreateCall(memcpyFn, {fresh, basePtr, bytes});
+                info.basePtr = fresh;
+            }
             ctx.arrays[p.name] = info;
             continue;
         }
@@ -4992,8 +5010,17 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             ++argIt;
             continue;
         }
+        llvm::Value* incoming = &*argIt;
+        // VALUE TEXT: bind the formal to a fresh Copy of the actual (FP :- Copy(AP)),
+        // so edits through the formal don't reach the caller's frame.
+        if (p.isValue && p.type == VarDeclaration::TEXT && p.refClassName.empty() && !p.isArray) {
+            auto ptrTyV = llvm::PointerType::getUnqual(*ctx.llvmContext);
+            auto copyFn = ctx.module->getOrInsertFunction("simula_text_copy",
+                llvm::FunctionType::get(ptrTyV, {ptrTyV}, false));
+            incoming = ctx.builder->CreateCall(copyFn, {incoming}, p.name + "_valcopy");
+        }
         auto alloca = ctx.createEntryBlockAlloca(func, p.name, ty);
-        ctx.builder->CreateStore(&*argIt, alloca);
+        ctx.builder->CreateStore(incoming, alloca);
         ctx.locals[p.name] = alloca;
         ++argIt;
         // Register REF class name for member access resolution

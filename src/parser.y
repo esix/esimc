@@ -37,12 +37,14 @@ static std::vector<ParamSpec> mergeParams(
         int arrayElem = 0;
         bool isName = false;
         bool isLabel = false;
+        bool isValue = false;
         /* First pass: check NAME/VALUE markers */
         for (auto& sp : specs) {
             if (sp.first == -30 || sp.first == -31) {
                 for (auto& sn : sp.second) {
                     if (matchName(sn, n)) {
                         if (sp.first == -30) isName = true;
+                        else isValue = true;
                         break;
                     }
                 }
@@ -127,7 +129,7 @@ static std::vector<ParamSpec> mergeParams(
         ParamSpec ps;
         ps.name = n; ps.type = type; ps.refClassName = refClass;
         ps.isArray = isArray; ps.arrayElemType = arrayElem;
-        ps.isName = isName; ps.isLabel = isLabel;
+        ps.isName = isName; ps.isLabel = isLabel; ps.isValue = isValue;
         result.push_back(ps);
     }
     return result;
