@@ -4549,12 +4549,24 @@ llvm::Value* WhileStatement::codegen(CodeGenContext& ctx) {
 llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
     auto func = ctx.builder->GetInsertBlock()->getParent();
 
-    auto startV = start->codegen(ctx);
     auto [varPtr, varTy] = ctx.getVarPtr(var);
     if (!varPtr) {
         ctx.errorAt(line) << "FOR variable '" << var << "' not declared\n";
         return nullptr;
     }
+    // The controlled variable governs the loop arithmetic. A REAL variable needs
+    // floating-point compares/add; coerce start/limit/step to the variable's type.
+    bool isFloat = varTy->isDoubleTy();
+    auto coerce = [&](llvm::Value* v) -> llvm::Value* {
+        if (!v) return v;
+        if (isFloat && v->getType()->isIntegerTy())
+            return ctx.builder->CreateSIToFP(v, varTy, "tofp");
+        if (!isFloat && v->getType()->isDoubleTy())
+            return simulaRealToInt(ctx, v, varTy);
+        return v;
+    };
+
+    auto startV = coerce(start->codegen(ctx));
     ctx.builder->CreateStore(startV, varPtr);
 
     auto condBB = llvm::BasicBlock::Create(*ctx.llvmContext, "forcond", func);
@@ -4565,15 +4577,22 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
     ctx.builder->SetInsertPoint(condBB);
 
     auto curVal = ctx.builder->CreateLoad(varTy, varPtr, var);
-    auto limitV = limit->codegen(ctx);
-    // Simula FOR-STEP-UNTIL: the continuation test depends on the sign of the
-    // step. For a positive step, loop while cur <= limit; for a negative step,
-    // loop while cur >= limit (sign(step)*(cur-limit) <= 0).
-    auto stepSign = step->codegen(ctx);
-    auto zero = llvm::ConstantInt::get(stepSign->getType(), 0);
-    auto stepNonNeg = ctx.builder->CreateICmpSGE(stepSign, zero, "stepsign");
-    auto leCond = ctx.builder->CreateICmpSLE(curVal, limitV, "forcmp_le");
-    auto geCond = ctx.builder->CreateICmpSGE(curVal, limitV, "forcmp_ge");
+    auto limitV = coerce(limit->codegen(ctx));
+    // Simula FOR-STEP-UNTIL: continuation depends on the step's sign. Positive
+    // step -> loop while cur <= limit; negative -> while cur >= limit.
+    auto stepSign = coerce(step->codegen(ctx));
+    llvm::Value *stepNonNeg, *leCond, *geCond;
+    if (isFloat) {
+        auto z = llvm::ConstantFP::get(varTy, 0.0);
+        stepNonNeg = ctx.builder->CreateFCmpOGE(stepSign, z, "stepsign");
+        leCond = ctx.builder->CreateFCmpOLE(curVal, limitV, "forcmp_le");
+        geCond = ctx.builder->CreateFCmpOGE(curVal, limitV, "forcmp_ge");
+    } else {
+        auto z = llvm::ConstantInt::get(varTy, 0);
+        stepNonNeg = ctx.builder->CreateICmpSGE(stepSign, z, "stepsign");
+        leCond = ctx.builder->CreateICmpSLE(curVal, limitV, "forcmp_le");
+        geCond = ctx.builder->CreateICmpSGE(curVal, limitV, "forcmp_ge");
+    }
     auto condV = ctx.builder->CreateSelect(stepNonNeg, leCond, geCond, "forcmp");
     ctx.builder->CreateCondBr(condV, bodyBB, afterBB);
 
@@ -4584,8 +4603,9 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
     // Re-get the pointer (class field GEP may have been invalidated)
     auto [varPtr2, varTy2] = ctx.getVarPtr(var);
     auto curVal2 = ctx.builder->CreateLoad(varTy2, varPtr2, var);
-    auto stepV = step->codegen(ctx);
-    auto nextVal = ctx.builder->CreateAdd(curVal2, stepV, "forstep");
+    auto stepV = coerce(step->codegen(ctx));
+    auto nextVal = isFloat ? ctx.builder->CreateFAdd(curVal2, stepV, "forstep")
+                           : ctx.builder->CreateAdd(curVal2, stepV, "forstep");
     ctx.builder->CreateStore(nextVal, varPtr2);
     ctx.builder->CreateBr(condBB);
 
@@ -4619,7 +4639,16 @@ llvm::Value* ForMultiRangeStatement::codegen(CodeGenContext& ctx) {
             ctx.errorAt(line) << "FOR variable '" << var << "' not declared\n";
             return nullptr;
         }
-        auto startV = range.start->codegen(ctx);
+        bool isFloat = varTy->isDoubleTy();
+        auto coerce = [&](llvm::Value* v) -> llvm::Value* {
+            if (!v) return v;
+            if (isFloat && v->getType()->isIntegerTy())
+                return ctx.builder->CreateSIToFP(v, varTy, "tofp");
+            if (!isFloat && v->getType()->isDoubleTy())
+                return simulaRealToInt(ctx, v, varTy);
+            return v;
+        };
+        auto startV = coerce(range.start->codegen(ctx));
         ctx.builder->CreateStore(startV, varPtr);
 
         auto condBB = llvm::BasicBlock::Create(*ctx.llvmContext, "fmr_cond", func);
@@ -4630,12 +4659,20 @@ llvm::Value* ForMultiRangeStatement::codegen(CodeGenContext& ctx) {
         ctx.builder->SetInsertPoint(condBB);
 
         auto cur = ctx.builder->CreateLoad(varTy, varPtr, var);
-        auto limitV = range.limit->codegen(ctx);
-        auto stepSign = range.step->codegen(ctx);
-        auto zero = llvm::ConstantInt::get(stepSign->getType(), 0);
-        auto stepNonNeg = ctx.builder->CreateICmpSGE(stepSign, zero, "fmr_sign");
-        auto leCond = ctx.builder->CreateICmpSLE(cur, limitV, "fmr_le");
-        auto geCond = ctx.builder->CreateICmpSGE(cur, limitV, "fmr_ge");
+        auto limitV = coerce(range.limit->codegen(ctx));
+        auto stepSign = coerce(range.step->codegen(ctx));
+        llvm::Value *stepNonNeg, *leCond, *geCond;
+        if (isFloat) {
+            auto z = llvm::ConstantFP::get(varTy, 0.0);
+            stepNonNeg = ctx.builder->CreateFCmpOGE(stepSign, z, "fmr_sign");
+            leCond = ctx.builder->CreateFCmpOLE(cur, limitV, "fmr_le");
+            geCond = ctx.builder->CreateFCmpOGE(cur, limitV, "fmr_ge");
+        } else {
+            auto z = llvm::ConstantInt::get(varTy, 0);
+            stepNonNeg = ctx.builder->CreateICmpSGE(stepSign, z, "fmr_sign");
+            leCond = ctx.builder->CreateICmpSLE(cur, limitV, "fmr_le");
+            geCond = ctx.builder->CreateICmpSGE(cur, limitV, "fmr_ge");
+        }
         auto cond = ctx.builder->CreateSelect(stepNonNeg, leCond, geCond, "fmr_cmp");
         ctx.builder->CreateCondBr(cond, bodyBB, afterBB);
 
@@ -4644,8 +4681,9 @@ llvm::Value* ForMultiRangeStatement::codegen(CodeGenContext& ctx) {
         body->codegen(ctx);
 
         auto cur2 = ctx.builder->CreateLoad(varTy, varPtr, var);
-        auto stepV = range.step->codegen(ctx);
-        auto next = ctx.builder->CreateAdd(cur2, stepV, "fmr_step");
+        auto stepV = coerce(range.step->codegen(ctx));
+        auto next = isFloat ? ctx.builder->CreateFAdd(cur2, stepV, "fmr_step")
+                            : ctx.builder->CreateAdd(cur2, stepV, "fmr_step");
         ctx.builder->CreateStore(next, varPtr);
         ctx.builder->CreateBr(condBB);
 
