@@ -1018,17 +1018,16 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
     return nullptr;
 }
 
-// Implicit real-to-integer conversion: Simula rounds (ENTIER(r + 0.5)), unlike
-// C's truncation. Used at every assignment/parameter/array-store coercion site;
-// explicit ENTIER/TRUNCATE keep their own semantics.
+// Implicit real-to-integer conversion. Simula's Round = Sign(R)*Entier(Abs(R)+0.5),
+// i.e. round to nearest with ties broken AWAY FROM ZERO — exactly llvm.round
+// (not floor(x+0.5), which rounds negative ties toward zero). Used at every
+// assignment/parameter/array-store coercion; explicit ENTIER/TRUNCATE differ.
 static llvm::Value* simulaRealToInt(CodeGenContext& ctx, llvm::Value* v,
                                     llvm::Type* destTy) {
-    auto half = llvm::ConstantFP::get(v->getType(), 0.5);
-    auto shifted = ctx.builder->CreateFAdd(v, half, "rnd_shift");
-    auto floorF = llvm::Intrinsic::getOrInsertDeclaration(ctx.module.get(),
-        llvm::Intrinsic::floor, {v->getType()});
-    auto floored = ctx.builder->CreateCall(floorF, {shifted}, "rnd_floor");
-    return ctx.builder->CreateFPToSI(floored, destTy, "rnd_toint");
+    auto roundF = llvm::Intrinsic::getOrInsertDeclaration(ctx.module.get(),
+        llvm::Intrinsic::round, {v->getType()});
+    auto rounded = ctx.builder->CreateCall(roundF, {v}, "rnd");
+    return ctx.builder->CreateFPToSI(rounded, destTy, "rnd_toint");
 }
 
 static void emitTextValueAssign(CodeGenContext& ctx, llvm::Value* slot,
@@ -1224,6 +1223,17 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
             auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
             auto ipowFunc = ctx.module->getOrInsertFunction("simula_ipow",
                 llvm::FunctionType::get(i64Ty, {i64Ty, i64Ty}, false));
+            // A statically-negative integer exponent yields a REAL: 1.0/base**(-exp)
+            // (Simula 3.5.1). Non-negative exponents stay exact integer arithmetic.
+            if (auto* rc = llvm::dyn_cast<llvm::ConstantInt>(R)) {
+                if (rc->getSExtValue() < 0) {
+                    auto negExp = llvm::ConstantInt::get(i64Ty, -rc->getSExtValue());
+                    auto denom = ctx.builder->CreateCall(ipowFunc, {L, negExp}, "ipow");
+                    auto denomF = ctx.builder->CreateSIToFP(denom, doubleTy, "tofp");
+                    return ctx.builder->CreateFDiv(
+                        llvm::ConstantFP::get(doubleTy, 1.0), denomF, "rpow");
+                }
+            }
             return ctx.builder->CreateCall(ipowFunc, {L, R}, "ipow");
         }
         auto Lf = L, Rf = R;
@@ -1528,13 +1538,11 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         auto val = args[0]->codegen(ctx);
         if (!val) return nullptr;
         if (val->getType()->isIntegerTy()) return val;
-        // ROUND = ENTIER(x + 0.5)
-        auto half = llvm::ConstantFP::get(doubleTy, 0.5);
-        auto shifted = ctx.builder->CreateFAdd(val, half, "round_shift");
-        auto floorF = llvm::Intrinsic::getOrInsertDeclaration(ctx.module.get(),
-            llvm::Intrinsic::floor, {doubleTy});
-        auto floored = ctx.builder->CreateCall(floorF, {shifted}, "floored");
-        return ctx.builder->CreateFPToSI(floored, i64Ty, "round");
+        // ROUND = Sign(x)*Entier(Abs(x)+0.5): ties away from zero = llvm.round.
+        auto roundF = llvm::Intrinsic::getOrInsertDeclaration(ctx.module.get(),
+            llvm::Intrinsic::round, {doubleTy});
+        auto rounded = ctx.builder->CreateCall(roundF, {val}, "round");
+        return ctx.builder->CreateFPToSI(rounded, i64Ty, "round_toint");
     }
 
     if (name == "truncate" || name == "trunc") {
