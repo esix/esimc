@@ -4424,10 +4424,13 @@ llvm::Value* ComputedGoto::codegen(CodeGenContext& ctx) {
     auto idx0 = ctx.builder->CreateSub(idxVal, one, "sw_idx0");
     auto idx32 = ctx.builder->CreateTrunc(idx0, llvm::Type::getInt32Ty(*ctx.llvmContext), "sw_i32");
 
-    // Create a default block (unreachable — out-of-range)
+    // Per ALGOL 60 / Simula, an out-of-range switch index (< 1 or > n) makes the
+    // GOTO a no-op: control continues with the next statement. So the switch's
+    // default branch falls through to the "after" block rather than being
+    // undefined behaviour (which silently mis-jumped at -O0 and trapped at -O2).
+    auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_cgoto", func);
     auto defaultBB = llvm::BasicBlock::Create(*ctx.llvmContext, "sw_default", func);
-    llvm::IRBuilder<> tmpB(defaultBB);
-    tmpB.CreateUnreachable();
+    { llvm::IRBuilder<> tmpB(defaultBB); tmpB.CreateBr(afterBB); }
 
     // LLVM switch instruction (i32 index, i32 case values)
     auto i32Ty = llvm::Type::getInt32Ty(*ctx.llvmContext);
@@ -4438,7 +4441,6 @@ llvm::Value* ComputedGoto::codegen(CodeGenContext& ctx) {
         sw->addCase(llvm::ConstantInt::get(i32Ty, (int32_t)i), lbb);
     }
 
-    auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_cgoto", func);
     ctx.builder->SetInsertPoint(afterBB);
     return nullptr;
 }
