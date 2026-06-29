@@ -2715,30 +2715,41 @@ llvm::Value* NewExpression::codegen(CodeGenContext& ctx) {
     auto coroPtr = ctx.builder->CreateStructGEP(ci.structType, obj, 1, "coro_ptr");
     ctx.builder->CreateStore(coro, coroPtr);
 
-    // Store constructor arguments into this class's own parameter fields only.
-    // Inherited parent fields are left for the parent body coroutine to set up.
-    // Skip companion "__pos" fields — those are bookkeeping fields, not params.
-    size_t argIdx = 0;
-    for (auto& param : ci.fields) {
-        if (param.structIndex < ci.firstOwnFieldIndex) continue;
-        if (param.name.size() >= 5 &&
-            param.name.compare(param.name.size() - 5, 5, "__pos") == 0) continue;
-        if (argIdx < args.size()) {
-            auto val = args[argIdx]->codegen(ctx);
-            if (val) {
-                auto fieldPtr = ctx.builder->CreateStructGEP(
-                    ci.structType, obj, param.structIndex, param.name + "_ptr");
-                auto destTy = ci.structType->getElementType(param.structIndex);
-                if (val->getType() != destTy) {
-                    if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
-                        val = ctx.builder->CreateSIToFP(val, destTy);
-                    else if (destTy->isIntegerTy(64) && val->getType()->isDoubleTy())
-                        val = simulaRealToInt(ctx, val, destTy);
-                }
-                ctx.builder->CreateStore(val, fieldPtr);
-            }
-            argIdx++;
+    // Bind constructor arguments to the full parameter list. A prefixed class's
+    // parameters are the prefix chain's parameters in textual order (root first)
+    // followed by its own — Simula class concatenation. Build that ordered list of
+    // parameter names, then store each actual into the matching field (which may be
+    // an inherited field; the class body only receives `this`, so it cannot set
+    // inherited params itself).
+    std::vector<std::string> paramNames;
+    {
+        std::vector<ClassDecl*> chain;
+        std::string cn = className;
+        while (!cn.empty()) {
+            auto cit = ctx.classes.find(cn);
+            if (cit == ctx.classes.end() || !cit->second.decl) break;
+            chain.push_back(cit->second.decl);
+            cn = cit->second.parentName;
         }
+        for (auto rit = chain.rbegin(); rit != chain.rend(); ++rit)
+            for (auto& p : (*rit)->params) paramNames.push_back(p.name);
+    }
+    for (size_t i = 0; i < paramNames.size() && i < args.size(); i++) {
+        const ClassInfo::FieldInfo* fld = nullptr;
+        for (auto& f : ci.fields) if (f.name == paramNames[i]) { fld = &f; break; }
+        if (!fld) continue;
+        auto val = args[i]->codegen(ctx);
+        if (!val) continue;
+        auto fieldPtr = ctx.builder->CreateStructGEP(
+            ci.structType, obj, fld->structIndex, fld->name + "_ptr");
+        auto destTy = ci.structType->getElementType(fld->structIndex);
+        if (val->getType() != destTy) {
+            if (destTy->isDoubleTy() && val->getType()->isIntegerTy())
+                val = ctx.builder->CreateSIToFP(val, destTy);
+            else if (destTy->isIntegerTy(64) && val->getType()->isDoubleTy())
+                val = simulaRealToInt(ctx, val, destTy);
+        }
+        ctx.builder->CreateStore(val, fieldPtr);
     }
 
     // Start the class body as a coroutine
