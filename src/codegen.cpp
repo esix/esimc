@@ -858,6 +858,15 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
                             callArgs.push_back(llvm::ConstantInt::get(i64Ty5,
                                 ait3 != ctx.arrays.end() ? ait3->second.lowerBound : 0));
                         }
+                    } else if (capName.size() > 8 && capName.substr(0, 8) == "__arrn1_") {
+                        // First-dim element-count capture (0 = unknown -> unchecked)
+                        std::string arrName = capName.substr(8);
+                        auto i64Ty5 = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                        auto n1It = ctx.locals.find(arrName + "__n1");
+                        if (n1It != ctx.locals.end())
+                            callArgs.push_back(ctx.builder->CreateLoad(i64Ty5, n1It->second, "n1v"));
+                        else
+                            callArgs.push_back(llvm::ConstantInt::get(i64Ty5, 0));
                     } else if (capName.size() > 8 && capName.substr(0, 8) == "__arr2d_") {
                         // 2D array lo2/stride: pass as i64 values
                         std::string rest = capName.substr(8);
@@ -2604,6 +2613,15 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                     argsV.push_back(llvm::ConstantInt::get(i64Ty5,
                         ait3 != ctx.arrays.end() ? ait3->second.lowerBound : 0));
                 }
+            } else if (capName.size() > 8 && capName.substr(0, 8) == "__arrn1_") {
+                // First-dim element-count capture (0 = unknown -> unchecked)
+                std::string arrName = capName.substr(8);
+                auto i64Ty5 = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                auto n1It = ctx.locals.find(arrName + "__n1");
+                if (n1It != ctx.locals.end())
+                    argsV.push_back(ctx.builder->CreateLoad(i64Ty5, n1It->second, "n1v"));
+                else
+                    argsV.push_back(llvm::ConstantInt::get(i64Ty5, 0));
             } else if (capName.size() > 8 && capName.substr(0, 8) == "__arr2d_") {
                 // 2D array extra captures: lo2 and stride as i64 values
                 std::string rest = capName.substr(8);
@@ -4662,6 +4680,13 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
                 capturedTys.push_back(i64TyC);
                 paramTypes.push_back(i64TyC);
             }
+            // Capture the first-dimension element count so the nested procedure
+            // can bounds-check the dynamic array it accesses through the closure.
+            if (ctx.locals.count(aname + "__n1")) {
+                captured.push_back("__arrn1_" + aname);
+                capturedTys.push_back(i64TyC);
+                paramTypes.push_back(i64TyC);
+            }
             if ((ainfo.hasDynStride || ainfo.stride > 0) &&
                 (ctx.locals.count(aname + "__lo2") || ainfo.lowerBound2 != 0 ||
                  ctx.locals.count(aname + "__stride") || ainfo.stride > 0)) {
@@ -4950,6 +4975,15 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             auto loAlloca = ctx.createEntryBlockAlloca(func, arrName + "__lo", i64Ty4);
             ctx.builder->CreateStore(capPtr, loAlloca);
             ctx.locals[arrName + "__lo"] = loAlloca;
+            continue;
+        }
+        // Handle first-dim element-count captures: __arrn1_NAME (i64 value)
+        if (capName.size() > 8 && capName.substr(0, 8) == "__arrn1_") {
+            std::string arrName = capName.substr(8);
+            auto i64Ty4 = llvm::Type::getInt64Ty(*ctx.llvmContext);
+            auto n1Alloca = ctx.createEntryBlockAlloca(func, arrName + "__n1", i64Ty4);
+            ctx.builder->CreateStore(capPtr, n1Alloca);
+            ctx.locals[arrName + "__n1"] = n1Alloca;
             continue;
         }
         // Handle 2D array lo2/stride captures: __arr2d_NAME_lo2 and __arr2d_NAME_stride
