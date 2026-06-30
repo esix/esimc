@@ -55,6 +55,75 @@ llvm::BasicBlock* CodeGenContext::getOrCreateLabel(const std::string& name) {
     return bb;
 }
 
+void CodeGenContext::emitNonLocalGotoSetup(llvm::Function* func, Statement* body) {
+    // Pre-scan the body for declared/used labels (so forward references resolve)
+    // and for identifiers passed as call arguments (potential non-local GOTO
+    // targets, i.e. LABEL actuals).
+    std::set<std::string> localLabels, nonLocalTargets;
+    std::function<void(Expression*)> scanExpr = [&](Expression* e) {
+        if (!e) return;
+        auto checkArgs = [&](ExprList& args) {
+            for (auto& a : args) {
+                if (auto* id = dynamic_cast<Identifier*>(a.get()))
+                    nonLocalTargets.insert(id->name);
+                scanExpr(a.get());
+            }
+        };
+        if (auto* pc = dynamic_cast<ProcedureCall*>(e)) { checkArgs(pc->args); }
+        else if (auto* mc = dynamic_cast<MethodCall*>(e)) { scanExpr(mc->object.get()); checkArgs(mc->args); }
+        else if (auto* ne = dynamic_cast<NewExpression*>(e)) { checkArgs(ne->args); }
+        else if (auto* bo = dynamic_cast<BinaryOp*>(e)) { scanExpr(bo->lhs.get()); scanExpr(bo->rhs.get()); }
+        else if (auto* ma = dynamic_cast<MemberAccess*>(e)) { scanExpr(ma->object.get()); }
+    };
+    std::function<void(Statement*)> scan = [&](Statement* s) {
+        if (!s) return;
+        if (auto* ld = dynamic_cast<LabelDeclaration*>(s)) {
+            for (auto& n : ld->labels) { getOrCreateLabel(n); localLabels.insert(n); }
+        }
+        if (auto* ls = dynamic_cast<LabeledStatement*>(s)) {
+            getOrCreateLabel(ls->label);
+            localLabels.insert(ls->label);
+            if (ls->statement) scan(ls->statement.get());
+        }
+        if (auto* b = dynamic_cast<Block*>(s)) {
+            for (auto& st : b->statements) scan(st.get());
+        }
+        if (auto* cs = dynamic_cast<CompoundStmt*>(s)) {
+            for (auto& st : cs->statements) scan(st.get());
+        }
+        if (auto* ifs = dynamic_cast<IfStatement*>(s)) {
+            if (ifs->thenBranch) scan(ifs->thenBranch.get());
+            if (ifs->elseBranch) scan(ifs->elseBranch.get());
+        }
+        if (auto* w = dynamic_cast<WhileStatement*>(s)) { if (w->body) scan(w->body.get()); }
+        if (auto* fs = dynamic_cast<ForStatement*>(s)) { if (fs->body) scan(fs->body.get()); }
+        if (auto* es = dynamic_cast<ExprStatement*>(s)) { scanExpr(es->expr.get()); }
+    };
+    scan(body);
+
+    // Any local label passed as a call argument may be the target of a longjmp
+    // from a callee. Allocate a jmp_buf, assign each such label an id, and emit a
+    // setjmp dispatch at the current insertion point.
+    std::vector<std::string> nlLabels;
+    for (auto& l : localLabels)
+        if (nonLocalTargets.count(l)) nlLabels.push_back(l);
+    if (nlLabels.empty()) return;
+
+    auto i8Ty = llvm::Type::getInt8Ty(*llvmContext);
+    auto i32Ty = llvm::Type::getInt32Ty(*llvmContext);
+    // jmp_buf: generously sized byte buffer (macOS arm64 needs ~192 bytes).
+    auto bufTy = llvm::ArrayType::get(i8Ty, 512);
+    currentJmpBuf = createEntryBlockAlloca(func, "jmpbuf", bufTy);
+    int nextId = 1;
+    for (auto& l : nlLabels) nonLocalLabelIds[l] = nextId++;
+    auto rc = builder->CreateCall(setjmpFunc, {currentJmpBuf}, "setjmp_rc");
+    auto bodyStart = llvm::BasicBlock::Create(*llvmContext, "body_start", func);
+    auto sw = builder->CreateSwitch(rc, bodyStart, (unsigned)nlLabels.size());
+    for (auto& l : nlLabels)
+        sw->addCase(llvm::ConstantInt::get(i32Ty, nonLocalLabelIds[l]), getOrCreateLabel(l));
+    builder->SetInsertPoint(bodyStart);
+}
+
 // Build the value to pass for a LABEL argument named `labelName`:
 //  - a local label: allocate a {jmp_buf*, id} record pointing at this function's buf
 //  - a LABEL parameter: forward the record pointer we were given
@@ -3565,6 +3634,14 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // Outermost (program) block: set up non-local GOTO so a LABEL parameter bound
+    // to a main-block label works (a longjmp from a callee resumes here). Procedure
+    // bodies get the same treatment in ProcedureDecl::codegen.
+    auto savedJmpBuf = ctx.currentJmpBuf;
+    auto savedNlIds = ctx.nonLocalLabelIds;
+    if (isOutermostBlock)
+        ctx.emitNonLocalGotoSetup(ctx.builder->GetInsertBlock()->getParent(), this);
+
     // Second pass: execute all statements (declarations will be no-ops
     // since the variables already exist)
     llvm::Value* last = nullptr;
@@ -3578,6 +3655,8 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
         }
         last = stmt->codegen(ctx);
     }
+    ctx.currentJmpBuf = savedJmpBuf;
+    ctx.nonLocalLabelIds = savedNlIds;
     ctx.restoreScope(saved);
     ctx.refTypes = savedRefTypes;
     ctx.textVars = savedTextVars;
@@ -5185,86 +5264,9 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         ctx.setupTextFieldTracking(func);
     }
 
-    // Pre-scan body for labels so they're available for forward references.
-    // Also collect local label names and detect which are used as non-local
-    // GOTO targets (passed as a LABEL argument to a call).
-    std::set<std::string> localLabels;
-    std::set<std::string> nonLocalTargets;
-    {
-        std::function<void(Expression*)> scanExpr = [&](Expression* e) {
-            if (!e) return;
-            auto checkArgs = [&](ExprList& args) {
-                for (auto& a : args) {
-                    if (auto* id = dynamic_cast<Identifier*>(a.get()))
-                        nonLocalTargets.insert(id->name);
-                    scanExpr(a.get());
-                }
-            };
-            if (auto* pc = dynamic_cast<ProcedureCall*>(e)) { checkArgs(pc->args); }
-            else if (auto* mc = dynamic_cast<MethodCall*>(e)) { scanExpr(mc->object.get()); checkArgs(mc->args); }
-            else if (auto* ne = dynamic_cast<NewExpression*>(e)) { checkArgs(ne->args); }
-            else if (auto* bo = dynamic_cast<BinaryOp*>(e)) { scanExpr(bo->lhs.get()); scanExpr(bo->rhs.get()); }
-            else if (auto* ma = dynamic_cast<MemberAccess*>(e)) { scanExpr(ma->object.get()); }
-        };
-        std::function<void(Statement*)> scan = [&](Statement* s) {
-            if (!s) return;
-            if (auto* ld = dynamic_cast<LabelDeclaration*>(s)) {
-                for (auto& n : ld->labels) { ctx.getOrCreateLabel(n); localLabels.insert(n); }
-            }
-            if (auto* ls = dynamic_cast<LabeledStatement*>(s)) {
-                ctx.getOrCreateLabel(ls->label);
-                localLabels.insert(ls->label);
-                if (ls->statement) scan(ls->statement.get());
-            }
-            if (auto* b = dynamic_cast<Block*>(s)) {
-                for (auto& st : b->statements) scan(st.get());
-            }
-            if (auto* cs = dynamic_cast<CompoundStmt*>(s)) {
-                for (auto& st : cs->statements) scan(st.get());
-            }
-            if (auto* ifs = dynamic_cast<IfStatement*>(s)) {
-                if (ifs->thenBranch) scan(ifs->thenBranch.get());
-                if (ifs->elseBranch) scan(ifs->elseBranch.get());
-            }
-            if (auto* w = dynamic_cast<WhileStatement*>(s)) {
-                if (w->body) scan(w->body.get());
-            }
-            if (auto* fs = dynamic_cast<ForStatement*>(s)) {
-                if (fs->body) scan(fs->body.get());
-            }
-            if (auto* es = dynamic_cast<ExprStatement*>(s)) {
-                scanExpr(es->expr.get());
-            }
-        };
-        if (body) scan(body.get());
-    }
-
-    // Set up non-local GOTO machinery: any local label that is passed as a call
-    // argument may be the target of a longjmp from a callee. Allocate a jmp_buf,
-    // assign each such label an id, and emit a setjmp dispatch at function entry.
-    {
-        std::vector<std::string> nlLabels;
-        for (auto& l : localLabels)
-            if (nonLocalTargets.count(l)) nlLabels.push_back(l);
-        if (!nlLabels.empty()) {
-            auto i8Ty = llvm::Type::getInt8Ty(*ctx.llvmContext);
-            auto i32Ty = llvm::Type::getInt32Ty(*ctx.llvmContext);
-            // jmp_buf: generously sized byte buffer (macOS arm64 needs ~192 bytes).
-            auto bufTy = llvm::ArrayType::get(i8Ty, 512);
-            ctx.currentJmpBuf = ctx.createEntryBlockAlloca(func, "jmpbuf", bufTy);
-            int nextId = 1;
-            for (auto& l : nlLabels) ctx.nonLocalLabelIds[l] = nextId++;
-            // Emit: rc = setjmp(buf); switch rc -> [0:body, id:label]
-            auto rc = ctx.builder->CreateCall(ctx.setjmpFunc, {ctx.currentJmpBuf}, "setjmp_rc");
-            auto bodyStart = llvm::BasicBlock::Create(*ctx.llvmContext, "body_start", func);
-            auto sw = ctx.builder->CreateSwitch(rc, bodyStart, (unsigned)nlLabels.size());
-            for (auto& l : nlLabels) {
-                sw->addCase(llvm::ConstantInt::get(i32Ty, ctx.nonLocalLabelIds[l]),
-                            ctx.getOrCreateLabel(l));
-            }
-            ctx.builder->SetInsertPoint(bodyStart);
-        }
-    }
+    // Pre-scan body for forward-referenced labels and set up non-local GOTO
+    // (setjmp dispatch) for any local label passed as a call argument.
+    ctx.emitNonLocalGotoSetup(func, body.get());
 
     // Generate body
     body->codegen(ctx);

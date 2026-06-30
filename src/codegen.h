@@ -15,6 +15,7 @@
 class Program;
 class VarDeclaration;
 class ClassDecl;
+class Statement;
 
 struct ClassInfo {
     std::string name;
@@ -190,6 +191,12 @@ public:
     // (and sets hadError). Used by the one-step compile-and-link driver.
     bool emitObject(const std::string& filename);
     void declareRuntimeFunctions();
+
+    // Scan `body` for labels passed as call arguments (non-local GOTO targets) and,
+    // if any exist, emit a setjmp dispatch at the current point so a longjmp from a
+    // callee resumes at the right label. Positions the builder at the post-setjmp
+    // "body" path. Used for procedure bodies and the outermost program block.
+    void emitNonLocalGotoSetup(llvm::Function* func, Statement* body);
 
     // Checked-mode runtime guards. Each splits the current basic block, emits a
     // failing path that calls the matching runtime abort (printing a
