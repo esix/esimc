@@ -348,6 +348,24 @@ SimulaText* simula_blanks(int64_t n) {
     return st_fresh(n);
 }
 
+/* UPCASE(t) / LOWCASE(t): convert every letter of the text in place (non-letters
+ * unchanged) and return the same text reference. */
+SimulaText* simula_upcase(SimulaText* t) {
+    if (t) for (int64_t i = 0; i < t->length; i++) {
+        char c = t->frame[t->start + i];
+        if (c >= 'a' && c <= 'z') t->frame[t->start + i] = (char)(c - 32);
+    }
+    return t;
+}
+
+SimulaText* simula_lowcase(SimulaText* t) {
+    if (t) for (int64_t i = 0; i < t->length; i++) {
+        char c = t->frame[t->start + i];
+        if (c >= 'A' && c <= 'Z') t->frame[t->start + i] = (char)(c + 32);
+    }
+    return t;
+}
+
 SimulaText* simula_text_copy(SimulaText* s) {
     if (s == NULL) return st_fresh(0);
     SimulaText* r = st_fresh(s->length);

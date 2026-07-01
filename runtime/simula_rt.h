@@ -28,6 +28,9 @@ typedef struct SimulaText {
 void* simula_alloc(int64_t size);
 
 /* Runtime safety checks (checked mode): print a source-located diagnostic and abort. */
+SimulaText* simula_upcase(SimulaText* t);
+SimulaText* simula_lowcase(SimulaText* t);
+
 void simula_div_zero(int64_t line);
 void simula_bounds_error(int64_t idx, int64_t lo, int64_t hi, int64_t line);
 void simula_nil_ref(int64_t line);

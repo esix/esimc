@@ -18,6 +18,7 @@ const char* const BUILTINS[] = {
     "sqrt","sin","cos","tan","arctan","arcsin","arccos","exp","ln","log","log10",
     "max","min","maxval","minval","maxint","minint","maxreal","minreal","pi",
     "char","rank","digit","letter","isodigit","isoletter","lowcase","upcase",
+    "isorank","isochar",
     "copy","blanks","sub","strip","length","main",
     "randint","uniform","normal","negexp","poisson","erlang","draw",
     "discrete","linear","histd","histo",

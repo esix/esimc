@@ -1122,6 +1122,14 @@ static llvm::Value* simulaRealToInt(CodeGenContext& ctx, llvm::Value* v,
     return ctx.builder->CreateFPToSI(rounded, destTy, "rnd_toint");
 }
 
+// Coerce an array subscript to INTEGER: a REAL subscript is rounded to nearest
+// per the Simula standard. No-op for an already-integer index.
+static llvm::Value* coerceIndex(CodeGenContext& ctx, llvm::Value* v) {
+    if (v && v->getType()->isDoubleTy())
+        return simulaRealToInt(ctx, v, llvm::Type::getInt64Ty(*ctx.llvmContext));
+    return v;
+}
+
 static void emitTextValueAssign(CodeGenContext& ctx, llvm::Value* slot,
                                 llvm::Value* rhsDesc);
 
@@ -1474,7 +1482,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             ctx.errorAt(line) << "array '" << name << "' access requires an index\n";
             return nullptr;
         }
-        auto idxVal = args[0]->codegen(ctx);
+        auto idxVal = coerceIndex(ctx, args[0]->codegen(ctx));
         if (!idxVal) return nullptr;
         // Compute adjusted first-dimension index: index - lowerBound
         llvm::Value* loBound;
@@ -1492,7 +1500,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
 
         // 2D array: flat_idx = (i - lo1) * stride + (j - lo2)
         if (args.size() >= 2 && (info.stride != 0 || info.hasDynStride)) {
-            auto idxVal2 = args[1]->codegen(ctx);
+            auto idxVal2 = coerceIndex(ctx, args[1]->codegen(ctx));
             if (!idxVal2) return nullptr;
             llvm::Value* stride;
             llvm::Value* lo2;
@@ -1512,7 +1520,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             adjusted = ctx.builder->CreateAdd(row, col, "flat_idx");
             // 3D: flat = (prev) * size3 + (k - lo3)
             if (args.size() >= 3 && info.stride2 != 0) {
-                auto idxVal3 = args[2]->codegen(ctx);
+                auto idxVal3 = coerceIndex(ctx, args[2]->codegen(ctx));
                 if (!idxVal3) return nullptr;
                 auto s3 = llvm::ConstantInt::get(i64Ty, info.stride2);
                 auto lo3 = llvm::ConstantInt::get(i64Ty, info.lowerBound3);
@@ -1553,7 +1561,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                     auto gep = ctx.builder->CreateStructGEP(ci.structType, ctx.currentThis,
                                                             fldIdx, name + "_aptr");
                     auto arrPtr = ctx.builder->CreateLoad(ptrTy2, gep, name + "_arr");
-                    auto idxVal = args[0]->codegen(ctx);
+                    auto idxVal = coerceIndex(ctx, args[0]->codegen(ctx));
                     if (!idxVal) return nullptr;
                     long long lo = amIt->second.first;
                     auto adjusted = ctx.builder->CreateSub(idxVal,
@@ -1783,6 +1791,20 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         auto upper = ctx.builder->CreateAnd(ctx.builder->CreateICmpSGE(ch,lo2),ctx.builder->CreateICmpSLE(ch,hi2));
         return ctx.builder->CreateOr(lower, upper, "letter");
     }
+    if ((name == "lowcase" || name == "upcase") && !args.empty()) {
+        // TEXT form (the standard one): convert every letter of the referenced
+        // text in place and return the same text reference.
+        auto pv = args[0]->codegen(ctx);
+        if (pv && pv->getType()->isPointerTy()) {
+            auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+            auto fn = ctx.module->getOrInsertFunction(
+                name == "upcase" ? "simula_upcase" : "simula_lowcase",
+                llvm::FunctionType::get(ptrTy, {ptrTy}, false));
+            return ctx.builder->CreateCall(fn, {pv}, name);
+        }
+        // Otherwise fall through to the CHARACTER form below (pv is an i8 value;
+        // re-evaluating args[0] there is fine — it's a pure character expression).
+    }
     if (name == "lowcase") {
         if (args.empty()) return nullptr;
         auto val = args[0]->codegen(ctx);
@@ -1848,14 +1870,14 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         return ctx.builder->CreateSelect(isNeg, neg1, sel1, "sign");
     }
 
-    if (name == "char") {
+    if (name == "char" || name == "isochar") {
         if (args.empty()) return nullptr;
         auto val = args[0]->codegen(ctx);
         if (!val) return nullptr;
         return ctx.builder->CreateTrunc(val, i8Ty, "char");
     }
 
-    if (name == "rank") {
+    if (name == "rank" || name == "isorank") {
         if (args.empty()) return nullptr;
         auto val = args[0]->codegen(ctx);
         if (!val) return nullptr;
@@ -2572,7 +2594,7 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                 if (ait3 != ctx.arrays.end() && !pc->args.empty()) {
                     auto& ainfo = ait3->second;
                     auto i64Ty3 = llvm::Type::getInt64Ty(*ctx.llvmContext);
-                    auto idxVal = pc->args[0]->codegen(ctx);
+                    auto idxVal = coerceIndex(ctx, pc->args[0]->codegen(ctx));
                     if (!idxVal) return nullptr;
                     llvm::Value* loBound;
                     auto loIt3 = ctx.locals.find(pc->name + "__lo");
@@ -4038,7 +4060,7 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
     auto& info = ait->second;
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
 
-    auto idxVal = index->codegen(ctx);
+    auto idxVal = coerceIndex(ctx, index->codegen(ctx));
     if (!idxVal) return nullptr;
 
     // Compute adjusted first-dimension index = index - lowerBound
@@ -4057,7 +4079,7 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
 
     // 2D array: flat_idx = (i - lo1) * stride + (j - lo2)
     if (index2 && (info.stride != 0 || info.hasDynStride)) {
-        auto idxVal2 = index2->codegen(ctx);
+        auto idxVal2 = coerceIndex(ctx, index2->codegen(ctx));
         if (!idxVal2) return nullptr;
         llvm::Value* stride;
         llvm::Value* lo2;
@@ -4076,7 +4098,7 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
         adjusted = ctx.builder->CreateAdd(row, col, "flat_idx");
         // 3D: flat = (prev) * size3 + (k - lo3)
         if (index3 && info.stride2 != 0) {
-            auto idxVal3 = index3->codegen(ctx);
+            auto idxVal3 = coerceIndex(ctx, index3->codegen(ctx));
             if (!idxVal3) return nullptr;
             auto s3 = llvm::ConstantInt::get(i64Ty, info.stride2);
             auto lo3 = llvm::ConstantInt::get(i64Ty, info.lowerBound3);
@@ -4408,7 +4430,7 @@ llvm::Value* MemberArrayAssignment::codegen(CodeGenContext& ctx) {
     }
     if (!elemTy) elemTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
-    auto idxV = index->codegen(ctx);
+    auto idxV = coerceIndex(ctx, index->codegen(ctx));
     if (!idxV) return nullptr;
     long long lo = 1;
     auto amIt = ci.arrayMeta.find(member);
