@@ -119,6 +119,7 @@ SimulaCoro* simula_coro_create(void);
 void simula_coro_start(SimulaCoro* coro, void (*func)(void*), void* arg);
 void simula_coro_detach(SimulaCoro* coro);
 void simula_coro_resume(SimulaCoro* coro);
+void simula_coro_call(SimulaCoro* coro);
 void simula_coro_free(SimulaCoro* coro);
 
 #ifdef __cplusplus

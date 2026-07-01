@@ -164,6 +164,7 @@ public:
     llvm::Function* coroStartFunc = nullptr;
     llvm::Function* coroDetachFunc = nullptr;
     llvm::Function* coroResumeFunc = nullptr;
+    llvm::Function* coroCallFunc = nullptr;
     llvm::Function* blanksFunc = nullptr;
     llvm::Function* textCopyFunc = nullptr;
     llvm::Function* textConcatFunc = nullptr;

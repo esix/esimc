@@ -100,6 +100,26 @@ void simula_coro_resume(SimulaCoro* coro) {
     _coro_current = prev;
 }
 
+/* CALL(X): attach X to the caller so X's next DETACH returns HERE (see the POSIX
+ * version for the full contract). */
+void simula_coro_call(SimulaCoro* coro) {
+    if (coro->state == 3) {
+        fprintf(stderr, "simula_coro_call: coroutine has terminated\n");
+        return;
+    }
+    if (coro->state != 2) {
+        fprintf(stderr, "simula_coro_call: coroutine is not detached (state=%d)\n",
+                coro->state);
+        return;
+    }
+    SimulaCoro* prev = _coro_current;
+    coro->state = 1;
+    _coro_current = coro;
+    coro->caller_fiber = GetCurrentFiber();
+    SwitchToFiber(coro->fiber);
+    _coro_current = prev;
+}
+
 void simula_coro_free(SimulaCoro* coro) {
     if (coro) {
         if (coro->fiber) DeleteFiber(coro->fiber);
@@ -195,6 +215,27 @@ void simula_coro_resume(SimulaCoro* coro) {
         prev->state = 2;
         swapcontext(&prev->context, &coro->context);
     }
+    _coro_current = prev;
+}
+
+/* CALL(X): transfer control to detached X, attaching it to the caller so that
+ * X's next DETACH returns HERE — unlike RESUME, whose DETACH returns to X's own
+ * detach point and which leaves the resumer detached. The caller simply waits
+ * for X to detach (or terminate), whether the caller is a process or main. */
+void simula_coro_call(SimulaCoro* coro) {
+    if (coro->state == 3) {
+        fprintf(stderr, "simula_coro_call: coroutine has terminated\n");
+        return;
+    }
+    if (coro->state != 2) {
+        fprintf(stderr, "simula_coro_call: coroutine is not detached (state=%d)\n",
+                coro->state);
+        return;
+    }
+    SimulaCoro* prev = _coro_current;
+    coro->state = 1;
+    _coro_current = coro;
+    swapcontext(&coro->caller_ctx, &coro->context);
     _coro_current = prev;
 }
 

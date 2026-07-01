@@ -526,6 +526,11 @@ void CodeGenContext::declareRuntimeFunctions() {
         llvm::FunctionType::get(voidTy, {ptrTy}, false),
         llvm::Function::ExternalLinkage, "simula_coro_resume", module.get());
 
+    // simula_coro_call(ptr coro)
+    coroCallFunc = llvm::Function::Create(
+        llvm::FunctionType::get(voidTy, {ptrTy}, false),
+        llvm::Function::ExternalLinkage, "simula_coro_call", module.get());
+
     // simula_blanks(i64) -> ptr
     blanksFunc = llvm::Function::Create(
         llvm::FunctionType::get(ptrTy, {i64Ty}, false),
@@ -5954,7 +5959,7 @@ llvm::Value* CallStatement::codegen(CodeGenContext& ctx) {
     auto coroSlot = ctx.builder->CreateStructGEP(baseTy, obj, 1, "coro_slot");
     auto coro = ctx.builder->CreateLoad(ptrTy, coroSlot, "coro");
 
-    return ctx.builder->CreateCall(ctx.coroResumeFunc, {coro});
+    return ctx.builder->CreateCall(ctx.coroCallFunc, {coro});
 }
 
 // ---- I/O ----
