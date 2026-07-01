@@ -137,6 +137,14 @@ public:
     std::map<std::string, llvm::GlobalVariable*> globals;
     bool inMainBlock = false; // true when generating the outermost block
 
+    // Block nesting depth (a Block bumps it) and the set of names declared in the
+    // current block. Together these give correct Algol/Simula block scoping: only
+    // the outermost main block (depth 1) makes globals; a nested block re-declaring
+    // a name gets fresh shadowing storage; a name is a genuine same-block duplicate
+    // only if it is already in blockDeclared.
+    int blockDepth = 0;
+    std::set<std::string> blockDeclared;
+
     // Set whenever a codegen diagnostic is emitted; main exits 1 if set so a
     // dropped statement can never become a silently-wrong binary.
     bool hadError = false;

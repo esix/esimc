@@ -3662,6 +3662,12 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
     auto saved = ctx.saveScope();
     auto savedRefTypes = ctx.refTypes;
     auto savedTextVars = ctx.textVars;
+    // Enter a new block scope: track its declared names separately so a
+    // re-declaration here shadows (fresh storage) rather than aliasing an outer
+    // variable; only names declared in THIS block are genuine duplicates.
+    auto savedBlockDeclared = ctx.blockDeclared;
+    ctx.blockDeclared.clear();
+    ctx.blockDepth++;
 
     // Pre-pass: declare all class skeletons in this block so sibling classes can
     // reference each other regardless of declaration order (Simula sibling classes
@@ -3748,6 +3754,8 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
     }
     ctx.currentJmpBuf = savedJmpBuf;
     ctx.nonLocalLabelIds = savedNlIds;
+    ctx.blockDepth--;
+    ctx.blockDeclared = savedBlockDeclared;
     ctx.restoreScope(saved);
     ctx.refTypes = savedRefTypes;
     ctx.textVars = savedTextVars;
@@ -3763,12 +3771,17 @@ llvm::Value* CompoundStmt::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* VarDeclaration::codegen(CodeGenContext& ctx) {
-    // Skip if already declared in the current scope (two-pass block processing).
-    // A like-named global only blocks re-declaration at global scope; inside a
-    // procedure or class body it's a genuine local that shadows the global
-    // (Simula block scoping).
-    bool atGlobalScope = ctx.inMainBlock && !ctx.currentThis;
-    if (ctx.locals.count(name) || (atGlobalScope && ctx.globals.count(name))) {
+    // A name already declared in THIS block is a genuine duplicate (the two-pass
+    // block re-visit) — reuse it. A same-named variable in an ENCLOSING scope is
+    // shadowed with fresh storage, not aliased: that shadow is always a local
+    // alloca (even inside the main block, where it shadows a global) so it is
+    // discarded on block exit. Only a first declaration in the main block becomes
+    // a global (so procedures/processes can reach top-level variables).
+    bool alreadyThisBlock = ctx.blockDeclared.count(name) > 0;
+    bool shadowsOuter = !alreadyThisBlock &&
+        (ctx.locals.count(name) || ctx.globals.count(name));
+    bool atGlobalScope = ctx.inMainBlock && !ctx.currentThis && !shadowsOuter;
+    if (alreadyThisBlock) {
         // But still process initializer if present
         if (init) {
             auto [varPtr, varTy] = ctx.getVarPtr(name);
@@ -3787,10 +3800,12 @@ llvm::Value* VarDeclaration::codegen(CodeGenContext& ctx) {
         }
         return nullptr;
     }
+    ctx.blockDeclared.insert(name);
     auto ty = ctx.getLLVMType(type);
 
-    // In the main block, create global variables so procedures can access them
-    if (ctx.inMainBlock && !ctx.currentThis) {
+    // Only the outermost main block creates globals (so procedures can access
+    // top-level variables); nested blocks fall through to a local alloca.
+    if (atGlobalScope) {
         auto gv = new llvm::GlobalVariable(
             *ctx.module, ty, false, llvm::GlobalValue::InternalLinkage,
             llvm::Constant::getNullValue(ty), "g_" + name);
