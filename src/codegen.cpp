@@ -5842,6 +5842,21 @@ llvm::Value* InspectStatement::codegen(CodeGenContext& ctx) {
             if (found) break;
             searchCls = cit->second.parentName;
         }
+    } else if (auto* qua = dynamic_cast<QuaExpression*>(object.get())) {
+        // INSPECT r QUA Class DO ... : the qualification is the QUA class.
+        inspectClass = qua->className;
+    } else if (auto* ce = dynamic_cast<ConditionalExpr*>(object.get())) {
+        // INSPECT (IF c THEN a ELSE b) DO ... : qualification is the common class
+        // of the two branches.
+        auto branchClass = [&](Expression* e) -> std::string {
+            if (auto* id = dynamic_cast<Identifier*>(e)) return ctx.resolveRefType(id->name);
+            if (auto* q = dynamic_cast<QuaExpression*>(e)) return q->className;
+            if (auto* pc = dynamic_cast<ProcedureCall*>(e)) return ctx.resolveRefType(pc->name);
+            return "";
+        };
+        auto a = branchClass(ce->thenExpr.get());
+        auto b = branchClass(ce->elseExpr.get());
+        inspectClass = !a.empty() ? a : b;
     }
 
     // The inspected object may be a field of the enclosing connected/class
