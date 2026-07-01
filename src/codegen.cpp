@@ -5455,7 +5455,10 @@ void ClassDecl::declareSkeleton(CodeGenContext& ctx) {
             }
             ci.arrayMeta[ad->name] = {staticLo, 0};
         } else if (auto* cs = dynamic_cast<CompoundStmt*>(stmt.get())) {
-            // Multi-var declarations like "INTEGER a, b, c"
+            // Multi-identifier declarations on one line — "INTEGER a, b, c",
+            // "REF(T) l, r", "REAL ARRAY p, q(1:n)" — are lowered by the parser
+            // into a CompoundStmt of individual declarations. Register each as a
+            // field, mirroring the top-level Var/Ref/Array handling above.
             for (auto& inner : cs->statements) {
                 if (auto* vd2 = dynamic_cast<VarDeclaration*>(inner.get())) {
                     ClassInfo::FieldInfo fi;
@@ -5464,6 +5467,34 @@ void ClassDecl::declareSkeleton(CodeGenContext& ctx) {
                     fi.structIndex = (int)fieldTypes.size();
                     ci.fields.push_back(fi);
                     fieldTypes.push_back(ctx.getLLVMType(vd2->type));
+                    if (vd2->type == VarDeclaration::TEXT) {
+                        ClassInfo::FieldInfo posfi;
+                        posfi.name = vd2->name + "__pos";
+                        posfi.type = VarDeclaration::INTEGER;
+                        posfi.structIndex = (int)fieldTypes.size();
+                        ci.fields.push_back(posfi);
+                        fieldTypes.push_back(llvm::Type::getInt64Ty(*ctx.llvmContext));
+                    }
+                } else if (auto* rd2 = dynamic_cast<RefDeclaration*>(inner.get())) {
+                    ClassInfo::FieldInfo fi;
+                    fi.name = rd2->varName;
+                    fi.type = -1;
+                    fi.refClassName = rd2->className;
+                    fi.structIndex = (int)fieldTypes.size();
+                    ci.fields.push_back(fi);
+                    fieldTypes.push_back(ctx.getRefType());
+                } else if (auto* ad2 = dynamic_cast<ArrayDeclaration*>(inner.get())) {
+                    ClassInfo::FieldInfo fi;
+                    fi.name = ad2->name;
+                    fi.type = ad2->elementType;
+                    fi.refClassName = ad2->refClassName;
+                    fi.structIndex = (int)fieldTypes.size();
+                    ci.fields.push_back(fi);
+                    fieldTypes.push_back(ctx.getRefType());
+                    long long staticLo = 1;
+                    if (auto* il = dynamic_cast<IntegerLiteral*>(ad2->lowerBound.get()))
+                        staticLo = il->value;
+                    ci.arrayMeta[ad2->name] = {staticLo, 0};
                 }
             }
         }
