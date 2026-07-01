@@ -1613,6 +1613,30 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         return ctx.builder->CreateSelect(needAdj, adj, rem, "mod");
     }
 
+    if (name == "rem") {
+        // REM(a,b) = a - (a//b)*b with // truncating toward zero — C's SRem, which
+        // takes the dividend's sign (distinct from MOD's floor-mod).
+        if (args.size() < 2) return nullptr;
+        auto a = args[0]->codegen(ctx);
+        auto b = args[1]->codegen(ctx);
+        if (!a || !b) return nullptr;
+        ctx.emitDivZeroCheck(b, line);
+        return ctx.builder->CreateSRem(a, b, "rem");
+    }
+
+    if (name == "__isnone") {
+        // Raw NULL-pointer test on a REF/TEXT value. Distinct from = / == which
+        // treat every empty text as equal to NOTEXT; used by INFILE to tell a
+        // real end-of-file (NULL image) from a blank line (length-0 image).
+        if (args.empty()) return nullptr;
+        auto v = args[0]->codegen(ctx);
+        if (!v || !v->getType()->isPointerTy())
+            return llvm::ConstantInt::getFalse(*ctx.llvmContext);
+        return ctx.builder->CreateICmpEQ(v,
+            llvm::ConstantPointerNull::get(
+                llvm::cast<llvm::PointerType>(v->getType())), "isnone");
+    }
+
     if (name == "entier") {
         if (args.empty()) return nullptr;
         auto val = args[0]->codegen(ctx);

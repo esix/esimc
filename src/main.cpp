@@ -239,8 +239,10 @@ static StmtPtr buildInfileClass() {
         rlArgs.push_back(ExprPtr(new IntegerLiteral(132)));
         inimageBody.push_back(StmtPtr(new RefAssignment(
             "image", ExprPtr(new ProcedureCall("inreadtext", std::move(rlArgs))))));
-        auto cond = ExprPtr(new BinaryOp(BinaryOp::EQ, id("image"),
-                                         ExprPtr(new NoneLiteral())));
+        // EOF is a genuine NULL image (raw pointer test) — NOT image = NOTEXT,
+        // which is content equality and true for a blank line (length-0 text).
+        ExprList noneArgs; noneArgs.push_back(id("image"));
+        auto cond = ExprPtr(new ProcedureCall("__isnone", std::move(noneArgs)));
         auto thenS = StmtPtr(new Assignment("endfile",
                                             ExprPtr(new BooleanLiteral(true))));
         inimageBody.push_back(StmtPtr(new IfStatement(std::move(cond),

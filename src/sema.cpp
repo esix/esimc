@@ -14,7 +14,7 @@ std::string lower(std::string s) {
 // drawing + simulation procedures, environment constants, file primitives, and
 // the special pseudo-variables sysin/sysout/__lastitem.
 const char* const BUILTINS[] = {
-    "abs","sign","entier","round","trunc","truncate","mod",
+    "abs","sign","entier","round","trunc","truncate","mod","rem",
     "sqrt","sin","cos","tan","arctan","arcsin","arccos","exp","ln","log","log10",
     "max","min","maxval","minval","maxint","minint","maxreal","minreal","pi",
     "char","rank","digit","letter","isodigit","isoletter","lowcase","upcase",
@@ -22,10 +22,10 @@ const char* const BUILTINS[] = {
     "randint","uniform","normal","negexp","poisson","erlang","draw",
     "discrete","linear","histd","histo",
     "time","current","hold","passivate","cancel","wait","accum","simterm",
-    "lowerbound","upperbound","infrac","breakoutimage","outchar","error",
+    "lowerbound","upperbound","infrac","breakoutimage","outchar","outfrac","error",
     "inopen","inclose","inreadline","inreadtext","outopen","outclose",
     "finint","finreal","flastitem","fouttext","foutint","foutimage",
-    "sysin","sysout","__lastitem","detach","resume",
+    "sysin","sysout","__lastitem","detach","resume","__isnone",
 };
 }
 
