@@ -5,6 +5,7 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Passes/StandardInstrumentations.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/FileSystem.h>
@@ -122,6 +123,17 @@ void CodeGenContext::emitNonLocalGotoSetup(llvm::Function* func, Statement* body
     for (auto& l : nlLabels)
         sw->addCase(llvm::ConstantInt::get(i32Ty, nonLocalLabelIds[l]), getOrCreateLabel(l));
     builder->SetInsertPoint(bodyStart);
+
+    // A local variable modified before the longjmp and read after it must survive
+    // the non-local return. Under -O2, mem2reg would promote such locals to
+    // registers and they'd hold stale values across the setjmp (the C "must be
+    // volatile" hazard). Keep this function's locals in memory by disabling
+    // optimization for it. `main` is exempt: its top-level variables are globals
+    // (already in memory), so it stays fully optimized.
+    if (func->getName() != "main") {
+        func->addFnAttr(llvm::Attribute::OptimizeNone);
+        func->addFnAttr(llvm::Attribute::NoInline);
+    }
 }
 
 // Build the value to pass for a LABEL argument named `labelName`:
@@ -621,11 +633,17 @@ void CodeGenContext::generateCode(Program& program) {
 
 void CodeGenContext::optimizeModule() {
     if (!optimize) return;
-    llvm::PassBuilder pb;
+    // StandardInstrumentations registers the pass-skip checks — crucially the
+    // optnone check, so functions marked OptimizeNone (e.g. those using non-local
+    // GOTO, whose locals must survive a setjmp) are left unoptimized.
+    llvm::PassInstrumentationCallbacks pic;
+    llvm::StandardInstrumentations si(*llvmContext, /*DebugLogging=*/false);
+    llvm::PassBuilder pb(nullptr, llvm::PipelineTuningOptions(), std::nullopt, &pic);
     llvm::LoopAnalysisManager lam;
     llvm::FunctionAnalysisManager fam;
     llvm::CGSCCAnalysisManager cgam;
     llvm::ModuleAnalysisManager mam;
+    si.registerCallbacks(pic, &mam);
     pb.registerModuleAnalyses(mam);
     pb.registerCGSCCAnalyses(cgam);
     pb.registerFunctionAnalyses(fam);
