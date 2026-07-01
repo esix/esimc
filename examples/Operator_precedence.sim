@@ -1,0 +1,32 @@
+! Operator precedence and associativity: Boolean (AND > OR), exponentiation
+! (** left-associative, binds tighter than unary minus), and arithmetic ;
+BEGIN
+    BOOLEAN t, f;
+    t := TRUE; f := FALSE;
+
+    ! AND binds tighter than OR: t OR t AND f = t OR (t AND f) = TRUE ;
+    OUTTEXT("bool: ");
+    IF t OR t AND f THEN OUTTEXT("A") ELSE OUTTEXT("a");
+    IF f OR t AND t THEN OUTTEXT("B") ELSE OUTTEXT("b");
+    IF (t OR t) AND f THEN OUTTEXT("C") ELSE OUTTEXT("c");
+    OUTIMAGE;
+
+    ! ** is left-associative: 2**3**2 = (2**3)**2 = 64 ;
+    OUTTEXT("power: ");
+    OUTINT(2 ** 3 ** 2, 6);    ! 64
+    OUTINT(2 ** 2 ** 3, 6);    ! 64
+    OUTIMAGE;
+
+    ! unary minus binds looser than **: -2**2 = -(2**2) = -4 ;
+    OUTTEXT("neg:   ");
+    OUTINT(-2 ** 2, 6);        ! -4
+    OUTINT(-3 ** 2, 6);        ! -9
+    OUTINT((0 - 2) ** 2, 6);   ! 4
+    OUTIMAGE;
+
+    ! ** binds tighter than * ; * tighter than + ;
+    OUTTEXT("arith: ");
+    OUTINT(2 + 3 * 4, 6);      ! 14
+    OUTINT(2 * 3 ** 2, 6);     ! 18
+    OUTIMAGE
+END.

@@ -187,7 +187,8 @@ static std::vector<ParamSpec> mergeParams(
 %token <sval> T_IDENT T_TEXTLIT
 
 /* Non-terminal types */
-%type <expr> expr comparison additive multiplicative power unary postfix primary
+%type <expr> expr or_else_expr and_then_expr eqv_expr imp_expr or_expr and_expr
+%type <expr> comparison additive multiplicative power unary postfix primary
 %type <stmt> statement block
 %type <stmt> declaration array_decl ref_declaration
 %type <stmt> label_decl labeled_stmt goto_stmt switch_decl
@@ -1052,29 +1053,50 @@ expr_stmt
 
 /* ---- Expressions ---- */
 
+/* Boolean operator precedence, tightest to loosest (Simula Standard Boolean
+   grammar): NOT (in `unary`) > AND > OR > IMP > EQV > AND THEN > OR ELSE.
+   Each level is left-associative. */
 expr
-    : comparison
-    | expr T_AND comparison {
-        $$ = new BinaryOp(BinaryOp::AND, ExprPtr($1), ExprPtr($3));
-      }
-    | expr T_OR comparison {
-        $$ = new BinaryOp(BinaryOp::OR, ExprPtr($1), ExprPtr($3));
-      }
-    | expr T_ANDTHEN comparison {
-        $$ = new BinaryOp(BinaryOp::ANDTHEN, ExprPtr($1), ExprPtr($3));
-      }
-    | expr T_ORELSE comparison {
+    : or_else_expr
+    ;
+or_else_expr
+    : and_then_expr
+    | or_else_expr T_ORELSE and_then_expr {
         $$ = new BinaryOp(BinaryOp::ORELSE, ExprPtr($1), ExprPtr($3));
       }
-    | expr T_EQV comparison {
+    ;
+and_then_expr
+    : eqv_expr
+    | and_then_expr T_ANDTHEN eqv_expr {
+        $$ = new BinaryOp(BinaryOp::ANDTHEN, ExprPtr($1), ExprPtr($3));
+      }
+    ;
+eqv_expr
+    : imp_expr
+    | eqv_expr T_EQV imp_expr {
         /* EQV = logical equivalence = NOT (a XOR b) */
         $$ = new UnaryOp(UnaryOp::NOT, ExprPtr(
             new BinaryOp(BinaryOp::NE, ExprPtr($1), ExprPtr($3))));
       }
-    | expr T_IMP comparison {
+    ;
+imp_expr
+    : or_expr
+    | imp_expr T_IMP or_expr {
         /* IMP = logical implication = NOT a OR b */
         $$ = new BinaryOp(BinaryOp::OR,
             ExprPtr(new UnaryOp(UnaryOp::NOT, ExprPtr($1))), ExprPtr($3));
+      }
+    ;
+or_expr
+    : and_expr
+    | or_expr T_OR and_expr {
+        $$ = new BinaryOp(BinaryOp::OR, ExprPtr($1), ExprPtr($3));
+      }
+    ;
+and_expr
+    : comparison
+    | and_expr T_AND comparison {
+        $$ = new BinaryOp(BinaryOp::AND, ExprPtr($1), ExprPtr($3));
       }
     ;
 
@@ -1131,34 +1153,36 @@ additive
     ;
 
 multiplicative
-    : power
-    | multiplicative T_STAR power {
+    : unary
+    | multiplicative T_STAR unary {
         $$ = new BinaryOp(BinaryOp::MUL, ExprPtr($1), ExprPtr($3));
       }
-    | multiplicative T_SLASH power {
+    | multiplicative T_SLASH unary {
         $$ = new BinaryOp(BinaryOp::DIV, ExprPtr($1), ExprPtr($3));
         $$->line = @2.first_line;
       }
-    | multiplicative T_IDIV power {
+    | multiplicative T_IDIV unary {
         $$ = new BinaryOp(BinaryOp::IDIV, ExprPtr($1), ExprPtr($3));
         $$->line = @2.first_line;
       }
     ;
 
-power
-    : unary
-    | unary T_POWER power {
-        $$ = new BinaryOp(BinaryOp::POWER, ExprPtr($1), ExprPtr($3));
+/* Unary minus / NOT bind LOOSER than ** so -2**2 = -(2**2), and ** is left-
+   associative so 2**3**2 = (2**3)**2, per the ALGOL/Simula arithmetic grammar. */
+unary
+    : power
+    | T_MINUS unary {
+        $$ = new UnaryOp(UnaryOp::NEG, ExprPtr($2));
+      }
+    | T_NOT unary {
+        $$ = new UnaryOp(UnaryOp::NOT, ExprPtr($2));
       }
     ;
 
-unary
+power
     : postfix
-    | T_MINUS postfix {
-        $$ = new UnaryOp(UnaryOp::NEG, ExprPtr($2));
-      }
-    | T_NOT postfix {
-        $$ = new UnaryOp(UnaryOp::NOT, ExprPtr($2));
+    | power T_POWER postfix {
+        $$ = new BinaryOp(BinaryOp::POWER, ExprPtr($1), ExprPtr($3));
       }
     ;
 

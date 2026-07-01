@@ -1,0 +1,4 @@
+bool: ABc
+power:     64    64
+neg:       -4    -9     4
+arith:     14    18
