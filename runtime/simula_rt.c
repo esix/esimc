@@ -648,11 +648,15 @@ static void frac_to_str(int64_t v, int64_t d, char* out) {
     out[j] = '\0';
 }
 
+/* The numeric editing procedures edit the item right-justified across the whole
+ * frame and then set POS to LENGTH+1 (internally pos == length), per the Simula
+ * standard — mirroring how the de-editing GET procedures advance POS. */
 void simula_text_putint(SimulaText* t, int64_t v) {
     if (t == NULL) return;
     char buf[32];
     snprintf(buf, sizeof buf, "%lld", (long long)v);
     edit_into(t->frame + t->start, t->length, buf);
+    t->pos = t->length;
 }
 
 void simula_text_putfix(SimulaText* t, double r, int64_t d) {
@@ -661,6 +665,7 @@ void simula_text_putfix(SimulaText* t, double r, int64_t d) {
     if (d < 0) d = 0;
     snprintf(buf, sizeof buf, "%.*f", (int)d, r);
     edit_into(t->frame + t->start, t->length, buf);
+    t->pos = t->length;
 }
 
 void simula_text_putreal(SimulaText* t, double r, int64_t d) {
@@ -671,6 +676,7 @@ void simula_text_putreal(SimulaText* t, double r, int64_t d) {
     for (char* p = buf; *p; p++)
         if (*p == 'e' || *p == 'E') *p = '&';
     edit_into(t->frame + t->start, t->length, buf);
+    t->pos = t->length;
 }
 
 void simula_text_putfrac(SimulaText* t, int64_t v, int64_t d) {
@@ -678,6 +684,7 @@ void simula_text_putfrac(SimulaText* t, int64_t v, int64_t d) {
     char out[64];
     frac_to_str(v, d, out);
     edit_into(t->frame + t->start, t->length, out);
+    t->pos = t->length;
 }
 
 /* ================================================================
