@@ -4770,21 +4770,31 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
     ctx.builder->SetInsertPoint(condBB);
 
     auto curVal = ctx.builder->CreateLoad(varTy, varPtr, var);
-    auto limitV = coerce(limit->codegen(ctx));
-    // Simula FOR-STEP-UNTIL: continuation depends on the step's sign. Positive
-    // step -> loop while cur <= limit; negative -> while cur >= limit.
-    auto stepSign = coerce(step->codegen(ctx));
+    auto limitRaw = limit->codegen(ctx);
+    auto stepRaw = step->codegen(ctx);
+    // Simula FOR-STEP-UNTIL: continuation is (V - C)*sign(B) <= 0, an arithmetic
+    // relation. If the limit or step is REAL, compare in REAL against the
+    // un-rounded limit even when V is INTEGER — rounding the limit to V's type
+    // would change the iteration count (e.g. UNTIL 4.6 must stop at 4, not 5).
+    bool cmpFloat = isFloat || (limitRaw && limitRaw->getType()->isDoubleTy())
+                            || (stepRaw && stepRaw->getType()->isDoubleTy());
     llvm::Value *stepNonNeg, *leCond, *geCond;
-    if (isFloat) {
-        auto z = llvm::ConstantFP::get(varTy, 0.0);
-        stepNonNeg = ctx.builder->CreateFCmpOGE(stepSign, z, "stepsign");
-        leCond = ctx.builder->CreateFCmpOLE(curVal, limitV, "forcmp_le");
-        geCond = ctx.builder->CreateFCmpOGE(curVal, limitV, "forcmp_ge");
+    if (cmpFloat) {
+        auto doubleTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
+        auto toD = [&](llvm::Value* v) {
+            return v->getType()->isDoubleTy() ? v
+                 : ctx.builder->CreateSIToFP(v, doubleTy, "tofp");
+        };
+        auto cur = toD(curVal), lim = toD(limitRaw), stp = toD(stepRaw);
+        auto z = llvm::ConstantFP::get(doubleTy, 0.0);
+        stepNonNeg = ctx.builder->CreateFCmpOGE(stp, z, "stepsign");
+        leCond = ctx.builder->CreateFCmpOLE(cur, lim, "forcmp_le");
+        geCond = ctx.builder->CreateFCmpOGE(cur, lim, "forcmp_ge");
     } else {
         auto z = llvm::ConstantInt::get(varTy, 0);
-        stepNonNeg = ctx.builder->CreateICmpSGE(stepSign, z, "stepsign");
-        leCond = ctx.builder->CreateICmpSLE(curVal, limitV, "forcmp_le");
-        geCond = ctx.builder->CreateICmpSGE(curVal, limitV, "forcmp_ge");
+        stepNonNeg = ctx.builder->CreateICmpSGE(stepRaw, z, "stepsign");
+        leCond = ctx.builder->CreateICmpSLE(curVal, limitRaw, "forcmp_le");
+        geCond = ctx.builder->CreateICmpSGE(curVal, limitRaw, "forcmp_ge");
     }
     auto condV = ctx.builder->CreateSelect(stepNonNeg, leCond, geCond, "forcmp");
     ctx.builder->CreateCondBr(condV, bodyBB, afterBB);
