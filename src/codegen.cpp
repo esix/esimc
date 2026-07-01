@@ -6044,10 +6044,18 @@ llvm::Value* OutFixStatement::codegen(CodeGenContext& ctx) {
     if (!dec) return nullptr;
     auto w = width->codegen(ctx);
     if (!w) return nullptr;
-    auto fmt = ctx.builder->CreateGlobalString("%*.*f", "fixfmt");
-    auto widthI32 = ctx.builder->CreateTrunc(w, llvm::Type::getInt32Ty(*ctx.llvmContext), "width32");
-    auto decI32 = ctx.builder->CreateTrunc(dec, llvm::Type::getInt32Ty(*ctx.llvmContext), "dec32");
-    return ctx.builder->CreateCall(ctx.printfFunc, {fmt, widthI32, decI32, val});
+    auto doubleTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    if (!val->getType()->isDoubleTy())
+        val = ctx.builder->CreateSIToFP(val, doubleTy, "tofp");
+    if (!dec->getType()->isIntegerTy(64)) dec = ctx.builder->CreateSExtOrTrunc(dec, i64Ty);
+    if (!w->getType()->isIntegerTy(64)) w = ctx.builder->CreateSExtOrTrunc(w, i64Ty);
+    // Route through the runtime editor so an item wider than w fills the field
+    // with '*' (matching OUTINT/OUTREAL) instead of expanding as printf %*.*f does.
+    auto fn = ctx.module->getOrInsertFunction("simula_outfix",
+        llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx.llvmContext),
+            {doubleTy, i64Ty, i64Ty}, false));
+    return ctx.builder->CreateCall(fn, {val, dec, w});
 }
 
 llvm::Value* OutTextStatement::codegen(CodeGenContext& ctx) {

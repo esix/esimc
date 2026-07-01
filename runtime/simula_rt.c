@@ -778,6 +778,18 @@ void simula_outreal(double v, int64_t d, int64_t w) {
     printf("%*s", (int)w, buf);
 }
 
+/* OUTFIX(v, d, w): fixed-point item with d decimals, right-justified in a field
+ * of width w, filling the field with '*' on overflow (like OUTINT/OUTREAL). */
+void simula_outfix(double v, int64_t d, int64_t w) {
+    char buf[64];
+    if (d < 0) d = 0;
+    snprintf(buf, sizeof buf, "%.*f", (int)d, v);
+    int n = (int)strlen(buf);
+    if (w <= 0) { fputs(buf, stdout); return; }
+    if (n > w) { for (int64_t i = 0; i < w; i++) putchar('*'); return; }
+    printf("%*s", (int)w, buf);
+}
+
 /* OUTFRAC(v, d, w): grouped item, like PUTFRAC, in a width-w field. */
 void simula_outfrac(int64_t v, int64_t d, int64_t w) {
     char out[64];
