@@ -5842,16 +5842,23 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
             if (dynamic_cast<InnerStatement*>(cd->bodyStmts[i].get())) return i;
         return cd->bodyStmts.size();
     };
+    // While emitting each prefix-chain segment, currentClassName is that segment's
+    // own class so an unqualified non-virtual method call inside an inherited base
+    // body resolves to the textually-visible (base) declaration, not a subclass
+    // override. (Virtual quantities still dispatch on currentThis's actual class.)
     std::vector<size_t> splits;
     for (auto* cd : chain) {
         splits.push_back(innerSplit(cd));
+        ctx.currentClassName = cd->name;
         emitClassStmts(cd->bodyStmts, 0, splits.back());
     }
     for (size_t i = chain.size(); i-- > 0; ) {
         size_t postFrom = splits[i] < chain[i]->bodyStmts.size() ? splits[i] + 1
                                                                  : splits[i];
+        ctx.currentClassName = chain[i]->name;
         emitClassStmts(chain[i]->bodyStmts, postFrom, chain[i]->bodyStmts.size());
     }
+    ctx.currentClassName = name;
 
     if (!ctx.builder->GetInsertBlock()->getTerminator()) {
         ctx.builder->CreateRetVoid();
