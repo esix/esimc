@@ -977,12 +977,16 @@ void simula_sim_cancel(void* obj) {
 void simula_sim_activate(void* obj, double t, int64_t prior, int64_t reactivate) {
     if (obj == NULL) return;
     if (simula_sim_terminated(obj)) return;
-    if (sim_has_notice(obj) || obj == sim_current_obj) {
+    int is_self = (obj == sim_current_obj);
+    if (sim_has_notice(obj) || is_self) {
         if (!reactivate) return;
         sim_remove_notice(obj);
     }
     sim_state_of(obj);
     sim_insert(obj, t, (int)prior);
+    /* REACTIVATE current AT/DELAY t reschedules self, so the active phase must
+       terminate and control pass to the scheduler — exactly hold(t). */
+    if (is_self) simula_coro_detach(sim_coro_of(obj));
 }
 
 /* ACTIVATE ... BEFORE/AFTER other: adopt the other's evtime and rank. */
@@ -990,11 +994,12 @@ void simula_sim_activate_rel(void* obj, void* other, int64_t before,
                              int64_t reactivate) {
     if (obj == NULL || other == NULL) return;
     if (simula_sim_terminated(obj)) return;
+    int is_self = (obj == sim_current_obj);
     SimNotice* on = NULL;
     for (SimNotice* n = sim_sqs; n; n = n->next)
         if (n->obj == other) { on = n; break; }
     if (on == NULL) return;  /* other idle: no effect (standard) */
-    if (sim_has_notice(obj) || obj == sim_current_obj) {
+    if (sim_has_notice(obj) || is_self) {
         if (!reactivate) return;
         sim_remove_notice(obj);
         /* re-find: removal may have changed links */
@@ -1013,6 +1018,8 @@ void simula_sim_activate_rel(void* obj, void* other, int64_t before,
     } else {
         nn->next = on->next; on->next = nn;
     }
+    /* REACTIVATE current BEFORE/AFTER other reschedules self -> yield. */
+    if (is_self) simula_coro_detach(sim_coro_of(obj));
 }
 
 /* Run queued events from the main context until the SQS is exhausted or
