@@ -3001,6 +3001,28 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // Inner MethodCall like A.NEXT(0) — a subscripted REF-array field element:
+    // resolve the inner object's class, then that class's field's ref class.
+    if (clsName.empty()) {
+        if (auto* mc = dynamic_cast<MethodCall*>(object.get())) {
+            std::string innerCls;
+            if (auto* id = dynamic_cast<Identifier*>(mc->object.get()))
+                innerCls = ctx.resolveRefType(id->name);
+            else if (dynamic_cast<ThisExpression*>(mc->object.get()))
+                innerCls = ctx.currentClassName;
+            std::string sc = innerCls;
+            while (!sc.empty() && clsName.empty()) {
+                auto cit = ctx.classes.find(sc);
+                if (cit == ctx.classes.end()) break;
+                for (auto& f : cit->second.fields)
+                    if (f.name == mc->method && !f.refClassName.empty())
+                        { clsName = f.refClassName; break; }
+                sc = cit->second.parentName;
+            }
+            if (clsName.empty()) clsName = ctx.resolveRefType(mc->method);
+        }
+    }
+
     if (clsName.empty()) {
         ctx.errorAt(line) << "cannot determine class type for member access '." << member << "'\n";
         return nullptr;
