@@ -89,6 +89,18 @@ static std::vector<ParamSpec> mergeParams(
                         }
                     }
                 }
+            } else if (sp.first == -11) {
+                /* REF(Class) ARRAY spec: first element is the class name, the rest
+                   are param names. Element type is a pointer (TEXT-encoded). */
+                for (size_t si = 1; si < sp.second.size(); si++) {
+                    if (matchName(sp.second[si], n)) {
+                        type = VarDeclaration::TEXT;
+                        isArray = true;
+                        arrayElem = VarDeclaration::TEXT;
+                        refClass = sp.second[0];
+                        goto found;
+                    }
+                }
             } else if (sp.first <= -20) {
                 /* Array spec: encode (-20 - elem*1000) */
                 int elemTy = (-(sp.first + 20)) / 1000;
@@ -609,6 +621,14 @@ typed_param_list
         $$ = new std::vector<ParamSpec>();
         $$->push_back({$5, VarDeclaration::TEXT, $3});
       }
+    | T_REF T_LPAREN T_IDENT T_RPAREN T_ARRAY T_IDENT {
+        /* REF(Class) ARRAY parameter — pointer, REF elements */
+        $$ = new std::vector<ParamSpec>();
+        ParamSpec ps;
+        ps.name = $6; ps.type = VarDeclaration::TEXT; ps.isArray = true;
+        ps.arrayElemType = VarDeclaration::TEXT; ps.refClassName = $3;
+        $$->push_back(ps);
+      }
     | typed_param_list T_COMMA type_name T_IDENT {
         $1->push_back({$4, $3});
         $$ = $1;
@@ -621,6 +641,13 @@ typed_param_list
       }
     | typed_param_list T_COMMA T_REF T_LPAREN T_IDENT T_RPAREN T_IDENT {
         $1->push_back({$7, VarDeclaration::TEXT, $5});
+        $$ = $1;
+      }
+    | typed_param_list T_COMMA T_REF T_LPAREN T_IDENT T_RPAREN T_ARRAY T_IDENT {
+        ParamSpec ps;
+        ps.name = $8; ps.type = VarDeclaration::TEXT; ps.isArray = true;
+        ps.arrayElemType = VarDeclaration::TEXT; ps.refClassName = $5;
+        $1->push_back(ps);
         $$ = $1;
       }
     ;
@@ -655,6 +682,15 @@ param_specs
         for (auto& s : *$6) names.push_back(s); // param names
         $1->push_back({-10, std::move(names)});
         delete $6;
+        $$ = $1;
+      }
+    | param_specs T_REF T_LPAREN T_IDENT T_RPAREN T_ARRAY ident_list T_SEMI {
+        /* REF(Class) ARRAY parameter spec — code -11, first name = class */
+        std::vector<std::string> names;
+        names.push_back(std::string($4));
+        for (auto& s : *$7) names.push_back(s);
+        $1->push_back({-11, std::move(names)});
+        delete $7;
         $$ = $1;
       }
     | param_specs T_PROCEDURE T_IDENT T_SEMI {

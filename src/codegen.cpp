@@ -5308,6 +5308,9 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
                 info.basePtr = fresh;
             }
             ctx.arrays[p.name] = info;
+            // REF(Class) ARRAY parameter: register the element class so
+            // remote access on an element (a(i).attr) resolves.
+            if (!p.refClassName.empty()) ctx.refTypes[p.name] = p.refClassName;
             continue;
         }
         if (p.isLabel) {
