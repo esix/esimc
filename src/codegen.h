@@ -69,6 +69,8 @@ struct ArrayInfo {
     // Dynamic second-dimension lower bound (runtime value stored in __lo2 alloca)
     bool hasDynLo2 = false;
     bool hasDynStride = false;
+    // Dynamic third-dimension bounds (runtime values in __lo3 / __stride2 allocas)
+    bool hasDynStride2 = false;
     bool isTextElem = false;  // element type is TEXT (descriptor): := copies in place
 };
 

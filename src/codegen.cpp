@@ -1526,11 +1526,17 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             auto col = ctx.builder->CreateSub(idxVal2, lo2, "col_adj");
             adjusted = ctx.builder->CreateAdd(row, col, "flat_idx");
             // 3D: flat = (prev) * size3 + (k - lo3)
-            if (args.size() >= 3 && info.stride2 != 0) {
+            if (args.size() >= 3 && (info.stride2 != 0 || info.hasDynStride2)) {
                 auto idxVal3 = coerceIndex(ctx, args[2]->codegen(ctx));
                 if (!idxVal3) return nullptr;
-                auto s3 = llvm::ConstantInt::get(i64Ty, info.stride2);
-                auto lo3 = llvm::ConstantInt::get(i64Ty, info.lowerBound3);
+                llvm::Value *s3, *lo3;
+                if (info.hasDynStride2) {
+                    s3 = ctx.builder->CreateLoad(i64Ty, ctx.locals[name + "__stride2"], "stride2");
+                    lo3 = ctx.builder->CreateLoad(i64Ty, ctx.locals[name + "__lo3"], "lo3");
+                } else {
+                    s3 = llvm::ConstantInt::get(i64Ty, info.stride2);
+                    lo3 = llvm::ConstantInt::get(i64Ty, info.lowerBound3);
+                }
                 ctx.emitDimCheck(idxVal3, lo3, s3, line);  // dim 3
                 auto plane = ctx.builder->CreateMul(adjusted, s3, "plane_off");
                 auto dep = ctx.builder->CreateSub(idxVal3, lo3, "dep_adj");
@@ -3917,13 +3923,14 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
         }
     }
 
-    // Evaluate third dimension bounds (3D arrays, constant bounds only)
+    // Evaluate third dimension bounds (3D arrays)
+    llvm::Value* lo3Val = nullptr, *hi3Val = nullptr;
     long long lo3 = 0, hi3 = 0;
     bool has3D = (lowerBound3 != nullptr && upperBound3 != nullptr);
     bool constBounds3 = false;
     if (has3D) {
-        auto lo3Val = lowerBound3->codegen(ctx);
-        auto hi3Val = upperBound3->codegen(ctx);
+        lo3Val = lowerBound3->codegen(ctx);
+        hi3Val = upperBound3->codegen(ctx);
         if (lo3Val && hi3Val)
             if (auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(lo3Val))
                 if (auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(hi3Val)) {
@@ -4018,6 +4025,17 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
             }
             sizeVal = ctx.builder->CreateMul(sizeVal, strideVal, "totalsize");
         }
+        // If 3D, compute the dim-3 size and fold it into the allocation too, so the
+        // heap block is fully sized and the third subscript addresses real storage.
+        llvm::Value* stride2Val = nullptr;
+        if (has3D && lo3Val && hi3Val) {
+            stride2Val = constBounds3
+                ? llvm::ConstantInt::get(i64Ty, hi3 - lo3 + 1)
+                : ctx.builder->CreateAdd(
+                    ctx.builder->CreateSub(hi3Val, lo3Val, "range3"),
+                    llvm::ConstantInt::get(i64Ty, 1), "stride2");
+            sizeVal = ctx.builder->CreateMul(sizeVal, stride2Val, "totalsize3");
+        }
 
         auto elemSize = ctx.module->getDataLayout().getTypeAllocSize(elemTy);
         auto byteSize = ctx.builder->CreateMul(sizeVal,
@@ -4065,6 +4083,17 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
             ctx.locals[name + "__stride"] = strAlloca;
             info.hasDynLo2 = true;
             info.hasDynStride = true;
+        }
+        if (has3D && stride2Val) {
+            // Store dynamic lo3 and dim-3 size for 3D access.
+            auto lo3Alloca = ctx.createEntryBlockAlloca(func, name + "__lo3", i64Ty);
+            ctx.builder->CreateStore(lo3Val ? lo3Val : llvm::ConstantInt::get(i64Ty, lo3),
+                                     lo3Alloca);
+            ctx.locals[name + "__lo3"] = lo3Alloca;
+            auto str2Alloca = ctx.createEntryBlockAlloca(func, name + "__stride2", i64Ty);
+            ctx.builder->CreateStore(stride2Val, str2Alloca);
+            ctx.locals[name + "__stride2"] = str2Alloca;
+            info.hasDynStride2 = true;
         }
 
         ctx.arrays[name] = info;
@@ -4119,11 +4148,17 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
         auto col = ctx.builder->CreateSub(idxVal2, lo2, "col_adj");
         adjusted = ctx.builder->CreateAdd(row, col, "flat_idx");
         // 3D: flat = (prev) * size3 + (k - lo3)
-        if (index3 && info.stride2 != 0) {
+        if (index3 && (info.stride2 != 0 || info.hasDynStride2)) {
             auto idxVal3 = coerceIndex(ctx, index3->codegen(ctx));
             if (!idxVal3) return nullptr;
-            auto s3 = llvm::ConstantInt::get(i64Ty, info.stride2);
-            auto lo3 = llvm::ConstantInt::get(i64Ty, info.lowerBound3);
+            llvm::Value *s3, *lo3;
+            if (info.hasDynStride2) {
+                s3 = ctx.builder->CreateLoad(i64Ty, ctx.locals[name + "__stride2"], "stride2");
+                lo3 = ctx.builder->CreateLoad(i64Ty, ctx.locals[name + "__lo3"], "lo3");
+            } else {
+                s3 = llvm::ConstantInt::get(i64Ty, info.stride2);
+                lo3 = llvm::ConstantInt::get(i64Ty, info.lowerBound3);
+            }
             ctx.emitDimCheck(idxVal3, lo3, s3, line);  // dim 3
             auto plane = ctx.builder->CreateMul(adjusted, s3, "plane_off");
             auto dep = ctx.builder->CreateSub(idxVal3, lo3, "dep_adj");
