@@ -905,6 +905,18 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
         return ctx.builder->CreateLoad(npit->second.second, npit->second.first, name);
     }
 
+    // A formal PROCEDURE parameter named on its own means "call it". An untyped
+    // procedure yields no value, so a bare mention is a no-arg invocation.
+    if (ctx.procParamNames.count(name)) {
+        auto pit = ctx.locals.find(name);
+        if (pit != ctx.locals.end()) {
+            auto fp = ctx.builder->CreateLoad(pit->second->getAllocatedType(), pit->second, name);
+            auto fnTy = llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx.llvmContext), false);
+            ctx.builder->CreateCall(fnTy, fp, {});
+            return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), 0);
+        }
+    }
+
     auto it = ctx.locals.find(name);
     if (it != ctx.locals.end()) {
         return ctx.builder->CreateLoad(it->second->getAllocatedType(),
@@ -2708,6 +2720,24 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         // Check if the callee expects a pointer at this position (NAME or ARRAY param)
         if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isPointerTy()) {
             if (auto* id = dynamic_cast<Identifier*>(arg.get())) {
+                // A formal PROCEDURE parameter re-passed along: forward its
+                // stored function pointer rather than invoking it.
+                if (ctx.procParamNames.count(id->name)) {
+                    auto pit = ctx.locals.find(id->name);
+                    if (pit != ctx.locals.end()) {
+                        auto fp = ctx.builder->CreateLoad(pit->second->getAllocatedType(),
+                                                          pit->second, id->name);
+                        argsV.push_back(fp); paramIdx++; continue;
+                    }
+                }
+                // A bare procedure name passed as a formal PROCEDURE parameter:
+                // pass the function pointer instead of auto-invoking it (which
+                // Identifier::codegen would do for a parameterless procedure).
+                if (auto* pf = ctx.module->getFunction(id->name)) {
+                    bool isVar = ctx.locals.count(id->name) || ctx.globals.count(id->name)
+                              || ctx.arrays.count(id->name) || ctx.nameParams.count(id->name);
+                    if (!isVar) { argsV.push_back(pf); paramIdx++; continue; }
+                }
                 // If it's an array, pass: ptr, lo, hi, lo2, stride
                 auto ait2 = ctx.arrays.find(id->name);
                 if (ait2 != ctx.arrays.end()) {
@@ -5174,10 +5204,12 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto savedJmpBuf = ctx.currentJmpBuf;
     auto savedNonLocalIds = ctx.nonLocalLabelIds;
     auto savedLabelParamNames = ctx.labelParamNames;
+    auto savedProcParamNames = ctx.procParamNames;
     auto savedTextVars = ctx.textVars;
     ctx.currentJmpBuf = nullptr;
     ctx.nonLocalLabelIds.clear();
     ctx.labelParamNames.clear();
+    ctx.procParamNames.clear();
 
     // Create entry block
     auto entry = llvm::BasicBlock::Create(*ctx.llvmContext, "entry", func);
@@ -5337,6 +5369,8 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         ctx.builder->CreateStore(incoming, alloca);
         ctx.locals[p.name] = alloca;
         ++argIt;
+        // A formal PROCEDURE parameter is a function pointer, not a TEXT value.
+        if (p.isProcedure) { ctx.procParamNames.insert(p.name); continue; }
         // Register REF class name for member access resolution
         if (!p.refClassName.empty()) {
             ctx.refTypes[p.name] = p.refClassName;
@@ -5537,6 +5571,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     ctx.currentJmpBuf = savedJmpBuf;
     ctx.nonLocalLabelIds = savedNonLocalIds;
     ctx.labelParamNames = savedLabelParamNames;
+    ctx.procParamNames = savedProcParamNames;
     ctx.textVars = savedTextVars;
 
     return func;

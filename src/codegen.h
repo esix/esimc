@@ -121,6 +121,7 @@ public:
     llvm::Value* currentJmpBuf = nullptr;            // ptr to this function's jmp_buf
     std::map<std::string, int> nonLocalLabelIds;     // local label name -> setjmp id
     std::set<std::string> labelParamNames;           // names of LABEL params in scope
+    std::set<std::string> procParamNames;            // names of formal PROCEDURE params in scope
     llvm::StructType* labelRecordType = nullptr;     // { ptr jmpbuf, i64 id }
     llvm::Function* setjmpFunc = nullptr;
     llvm::Function* longjmpFunc = nullptr;

@@ -35,6 +35,7 @@ struct ParamSpec {
     bool isName = false; // NAME (pass-by-reference) parameter
     bool isLabel = false; // LABEL parameter (non-local goto target)
     bool isValue = false; // VALUE parameter (callee gets a private copy)
+    bool isProcedure = false; // formal PROCEDURE parameter (a function pointer)
 };
 
 // ============================================================

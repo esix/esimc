@@ -38,6 +38,7 @@ static std::vector<ParamSpec> mergeParams(
         bool isName = false;
         bool isLabel = false;
         bool isValue = false;
+        bool isProcedure = false;
         /* First pass: check NAME/VALUE markers */
         for (auto& sp : specs) {
             if (sp.first == -30 || sp.first == -31) {
@@ -87,6 +88,15 @@ static std::vector<ParamSpec> mergeParams(
                             refClass = sp.second[0]; // class name
                             goto found;
                         }
+                    }
+                }
+            } else if (sp.first == -12) {
+                /* PROCEDURE parameter: a function pointer (TEXT-encoded). */
+                for (auto& sn : sp.second) {
+                    if (matchName(sn, n)) {
+                        type = VarDeclaration::TEXT;
+                        isProcedure = true;
+                        goto found;
                     }
                 }
             } else if (sp.first == -11) {
@@ -142,6 +152,7 @@ static std::vector<ParamSpec> mergeParams(
         ps.name = n; ps.type = type; ps.refClassName = refClass;
         ps.isArray = isArray; ps.arrayElemType = arrayElem;
         ps.isName = isName; ps.isLabel = isLabel; ps.isValue = isValue;
+        ps.isProcedure = isProcedure;
         result.push_back(ps);
     }
     return result;
@@ -694,10 +705,10 @@ param_specs
         $$ = $1;
       }
     | param_specs T_PROCEDURE T_IDENT T_SEMI {
-        /* Procedure parameter spec: PROCEDURE name; */
+        /* Procedure parameter spec: PROCEDURE name; — code -12 (function pointer) */
         auto names = new std::vector<std::string>();
         names->push_back($3);
-        $1->push_back({VarDeclaration::TEXT, std::move(*names)});
+        $1->push_back({-12, std::move(*names)});
         delete names;
         $$ = $1;
       }
@@ -705,7 +716,7 @@ param_specs
         /* Procedure parameter spec with IS binding — ignored */
         auto names = new std::vector<std::string>();
         names->push_back($3);
-        $1->push_back({VarDeclaration::TEXT, std::move(*names)});
+        $1->push_back({-12, std::move(*names)});
         delete names;
         $$ = $1;
       }

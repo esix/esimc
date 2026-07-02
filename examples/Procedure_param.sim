@@ -1,0 +1,23 @@
+! Formal PROCEDURE parameters: no-arg call, parameterized call, and
+! passing a procedure parameter along to a further procedure. ;
+BEGIN
+  INTEGER g;
+
+  PROCEDURE bump; g := g + 1;
+
+  PROCEDURE addk(k); INTEGER k; g := g + k;
+
+  ! p is called with no arguments ;
+  PROCEDURE apply(p); PROCEDURE p; p;
+
+  ! q is called with an argument ;
+  PROCEDURE applyk(q); PROCEDURE q; q(10);
+
+  ! r is forwarded, unchanged, to another procedure ;
+  PROCEDURE forward(r); PROCEDURE r; apply(r);
+
+  g := 0;
+  apply(bump);      OUTINT(g, 3); OUTIMAGE;
+  applyk(addk);     OUTINT(g, 3); OUTIMAGE;
+  forward(bump);    OUTINT(g, 3); OUTIMAGE
+END.
