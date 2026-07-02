@@ -134,6 +134,62 @@ static std::vector<ParamSpec> mergeParams(
     }
     return result;
 }
+
+/* Deep-copy an expression (used to re-read a chained-assignment middle part).
+   Returns nullptr for node kinds not expected in an assignment target/subscript. */
+static Expression* cloneExpr(Expression* e);
+static ExprList cloneArgs(const ExprList& args) {
+    ExprList out;
+    for (auto& a : args) out.push_back(ExprPtr(cloneExpr(a.get())));
+    return out;
+}
+static Expression* cloneExpr(Expression* e) {
+    if (!e) return nullptr;
+    if (auto* x = dynamic_cast<IntegerLiteral*>(e)) return new IntegerLiteral(x->value);
+    if (auto* x = dynamic_cast<RealLiteral*>(e))    return new RealLiteral(x->value);
+    if (auto* x = dynamic_cast<TextLiteral*>(e))    return new TextLiteral(x->value);
+    if (auto* x = dynamic_cast<CharLiteral*>(e))    return new CharLiteral(x->value);
+    if (auto* x = dynamic_cast<BooleanLiteral*>(e)) return new BooleanLiteral(x->value);
+    if (dynamic_cast<NoneLiteral*>(e))              return new NoneLiteral();
+    if (dynamic_cast<ThisExpression*>(e))           return new ThisExpression();
+    if (auto* x = dynamic_cast<Identifier*>(e))     return new Identifier(x->name);
+    if (auto* x = dynamic_cast<UnaryOp*>(e))        return new UnaryOp(x->op, ExprPtr(cloneExpr(x->operand.get())));
+    if (auto* x = dynamic_cast<BinaryOp*>(e))       return new BinaryOp(x->op, ExprPtr(cloneExpr(x->lhs.get())), ExprPtr(cloneExpr(x->rhs.get())));
+    if (auto* x = dynamic_cast<ProcedureCall*>(e))  return new ProcedureCall(x->name, cloneArgs(x->args));
+    if (auto* x = dynamic_cast<MemberAccess*>(e))   return new MemberAccess(ExprPtr(cloneExpr(x->object.get())), x->member);
+    if (auto* x = dynamic_cast<MethodCall*>(e))     return new MethodCall(ExprPtr(cloneExpr(x->object.get())), x->method, cloneArgs(x->args));
+    if (auto* x = dynamic_cast<QuaExpression*>(e))  return new QuaExpression(ExprPtr(cloneExpr(x->object.get())), x->className);
+    return nullptr;
+}
+
+/* Lower `lhs := rhs` to the right assignment node by lhs kind (mirrors the
+   single-assignment rule). Takes ownership of lhs and rhs. */
+static Statement* lowerAssign(Expression* lhs, Expression* rhs) {
+    if (auto* id = dynamic_cast<Identifier*>(lhs)) {
+        auto* s = new Assignment(id->name, ExprPtr(rhs)); delete lhs; return s;
+    }
+    if (auto* call = dynamic_cast<ProcedureCall*>(lhs)) {
+        ExprPtr i1(call->args.empty() ? nullptr : call->args[0].release());
+        ExprPtr i2(call->args.size() >= 2 ? call->args[1].release() : nullptr);
+        ExprPtr i3(call->args.size() >= 3 ? call->args[2].release() : nullptr);
+        auto* s = new ArrayAssignment(call->name, std::move(i1), ExprPtr(rhs), false,
+                                      std::move(i2), std::move(i3));
+        delete lhs; return s;
+    }
+    if (auto* ma = dynamic_cast<MemberAccess*>(lhs)) {
+        auto* s = new MemberAssignment(ExprPtr(ma->object.release()), ma->member,
+                                       ExprPtr(rhs), false);
+        delete lhs; return s;
+    }
+    if (auto* mc = dynamic_cast<MethodCall*>(lhs)) {
+        ExprPtr i1(mc->args.empty() ? nullptr : mc->args[0].release());
+        ExprPtr i2(mc->args.size() >= 2 ? mc->args[1].release() : nullptr);
+        auto* s = new MemberArrayAssignment(ExprPtr(mc->object.release()), mc->method,
+                                            std::move(i1), ExprPtr(rhs), false, std::move(i2));
+        delete lhs; return s;
+    }
+    delete rhs; delete lhs; return new CompoundStmt(StmtList());
+}
 %}
 
 %locations
@@ -949,22 +1005,15 @@ expr_stmt
         $$ = new ExprStatement(ExprPtr($1));
       }
     | postfix T_ASSIGN postfix T_ASSIGN expr {
-        /* Chained assignment: a := b := expr — assign expr to both */
-        auto stmts = new StmtList();
-        Identifier* id2 = dynamic_cast<Identifier*>($3);
-        if (id2) {
-            stmts->push_back(StmtPtr(new Assignment(id2->name, ExprPtr($5))));
-            /* Now assign b's value to a */
-            Identifier* id1 = dynamic_cast<Identifier*>($1);
-            if (id1) {
-                stmts->push_back(StmtPtr(new Assignment(id1->name,
-                    ExprPtr(new Identifier(id2->name)))));
-                delete $1;
-            }
-            delete $3;
-        }
-        $$ = new CompoundStmt(std::move(*stmts));
-        delete stmts;
+        /* Chained assignment X1 := X2 := E: evaluate E once (into X2), then read
+           X2 into X1. Any left-part kind (variable, array element, field) works. */
+        StmtList stmts;
+        Expression* readX2 = cloneExpr($3);        /* fresh read of X2 */
+        stmts.push_back(StmtPtr(lowerAssign($3, $5)));           /* X2 := E */
+        if (readX2)
+            stmts.push_back(StmtPtr(lowerAssign($1, readX2)));  /* X1 := X2 */
+        else { delete $1; }
+        $$ = new CompoundStmt(std::move(stmts));
       }
     | postfix T_ASSIGN expr {
         /* Determine assignment type from LHS node */

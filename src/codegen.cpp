@@ -3671,6 +3671,25 @@ llvm::Value* InCharExpression::codegen(CodeGenContext& ctx) {
 // Statement codegen
 // ============================================================
 
+// A statement handled in the block's declaration pass: a Var/Array/Ref/Label
+// declaration, or a CompoundStmt of ONLY declarations (the parser lowers a
+// multi-identifier declaration like "INTEGER a,b,c" to such a group). A
+// CompoundStmt containing statements — e.g. a chained assignment "a:=b:=E",
+// lowered to a CompoundStmt of assignments — must run in program order in the
+// execution pass, not be hoisted to block entry.
+static bool isDeclarationStmt(Statement* s) {
+    if (dynamic_cast<VarDeclaration*>(s) || dynamic_cast<ArrayDeclaration*>(s) ||
+        dynamic_cast<RefDeclaration*>(s) || dynamic_cast<LabelDeclaration*>(s))
+        return true;
+    if (auto* cs = dynamic_cast<CompoundStmt*>(s)) {
+        if (cs->statements.empty()) return false;
+        for (auto& inner : cs->statements)
+            if (!isDeclarationStmt(inner.get())) return false;
+        return true;
+    }
+    return false;
+}
+
 llvm::Value* Block::codegen(CodeGenContext& ctx) {
     auto saved = ctx.saveScope();
     auto savedRefTypes = ctx.refTypes;
@@ -3693,11 +3712,7 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
     // First pass: process all declarations (vars, arrays, refs, labels)
     // so that procedures declared later in the block can reference them
     for (auto& stmt : statements) {
-        if (dynamic_cast<VarDeclaration*>(stmt.get()) ||
-            dynamic_cast<CompoundStmt*>(stmt.get()) ||
-            dynamic_cast<ArrayDeclaration*>(stmt.get()) ||
-            dynamic_cast<RefDeclaration*>(stmt.get()) ||
-            dynamic_cast<LabelDeclaration*>(stmt.get())) {
+        if (isDeclarationStmt(stmt.get())) {
             stmt->codegen(ctx);
         }
     }
@@ -3756,11 +3771,7 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
     // since the variables already exist)
     llvm::Value* last = nullptr;
     for (auto& stmt : statements) {
-        if (dynamic_cast<VarDeclaration*>(stmt.get()) ||
-            dynamic_cast<CompoundStmt*>(stmt.get()) ||
-            dynamic_cast<ArrayDeclaration*>(stmt.get()) ||
-            dynamic_cast<RefDeclaration*>(stmt.get()) ||
-            dynamic_cast<LabelDeclaration*>(stmt.get())) {
+        if (isDeclarationStmt(stmt.get())) {
             continue; // already processed
         }
         last = stmt->codegen(ctx);
