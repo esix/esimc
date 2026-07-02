@@ -420,6 +420,51 @@ std::string CodeGenContext::resolveRefType(const std::string& varName) {
     return "";
 }
 
+std::string CodeGenContext::resolveObjectRefClass(Expression* e) {
+    if (!e) return "";
+    if (auto* id = dynamic_cast<Identifier*>(e)) {
+        auto c = resolveRefType(id->name);
+        if (!c.empty()) return c;
+        if (currentThis && !currentClassName.empty()) {
+            std::string sc = currentClassName;
+            while (!sc.empty()) {
+                auto cit = classes.find(sc);
+                if (cit == classes.end()) break;
+                for (auto& fi : cit->second.fields)
+                    if (fi.name == id->name && !fi.refClassName.empty()) return fi.refClassName;
+                sc = cit->second.parentName;
+            }
+        }
+        return "";
+    }
+    if (dynamic_cast<ThisExpression*>(e)) return currentClassName;
+    if (auto* qua = dynamic_cast<QuaExpression*>(e)) return qua->className;
+    if (auto* ne = dynamic_cast<NewExpression*>(e)) return ne->className;
+    // MemberAccess (obj.field / obj.method) and MethodCall (obj.method(...)): the
+    // qualification is the accessed member/method's REF field or return class,
+    // relative to the inner object's class (resolved recursively for deep chains).
+    Expression* inner = nullptr; std::string memberName;
+    if (auto* ma = dynamic_cast<MemberAccess*>(e)) { inner = ma->object.get(); memberName = ma->member; }
+    else if (auto* mc = dynamic_cast<MethodCall*>(e)) { inner = mc->object.get(); memberName = mc->method; }
+    if (inner) {
+        std::string sc = resolveObjectRefClass(inner);
+        while (!sc.empty()) {
+            auto cit = classes.find(sc);
+            if (cit == classes.end()) break;
+            for (auto& fi : cit->second.fields)
+                if (fi.name == memberName && !fi.refClassName.empty()) return fi.refClassName;
+            if (cit->second.decl)
+                for (auto& st : cit->second.decl->bodyStmts)
+                    if (auto* pd = dynamic_cast<ProcedureDecl*>(st.get()))
+                        if (pd->name == memberName && !pd->returnRefClass.empty()) return pd->returnRefClass;
+            sc = cit->second.parentName;
+        }
+        return "";
+    }
+    if (auto* pc = dynamic_cast<ProcedureCall*>(e)) return resolveRefType(pc->name);
+    return "";
+}
+
 std::set<int> CodeGenContext::getClassIdSet(const std::string& className) {
     std::set<int> ids;
     auto it = classes.find(className);
@@ -3022,14 +3067,25 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
             }
             if (auto* th = dynamic_cast<ThisExpression*>(ma->object.get()))
                 outerCls = ctx.currentClassName;
+            // Intermediate object may itself be a member access (deeper chain);
+            // recursively determine its qualification.
+            if (outerCls.empty())
+                outerCls = ctx.resolveObjectRefClass(ma->object.get());
             if (!outerCls.empty()) {
                 std::string sc = outerCls;
                 while (!sc.empty() && clsName.empty()) {
                     auto cit = ctx.classes.find(sc);
                     if (cit == ctx.classes.end()) break;
+                    // The intermediate member may be a REF field OR a no-arg
+                    // REF-returning method (e.g. P.GETNEXT.V, L.FIRST.SUC).
                     for (auto& fi : cit->second.fields)
                         if (fi.name == ma->member && !fi.refClassName.empty())
                             { clsName = fi.refClassName; break; }
+                    if (clsName.empty() && cit->second.decl)
+                        for (auto& st : cit->second.decl->bodyStmts)
+                            if (auto* pd = dynamic_cast<ProcedureDecl*>(st.get()))
+                                if (pd->name == ma->member && !pd->returnRefClass.empty())
+                                    { clsName = pd->returnRefClass; break; }
                     sc = cit->second.parentName;
                 }
             }
@@ -3049,9 +3105,16 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
             while (!sc.empty() && clsName.empty()) {
                 auto cit = ctx.classes.find(sc);
                 if (cit == ctx.classes.end()) break;
+                // A REF-array field, or a REF-returning method — both name the
+                // class of the accessed element/result (e.g. L.FIRST.SUC, P.GETNEXT.V).
                 for (auto& f : cit->second.fields)
                     if (f.name == mc->method && !f.refClassName.empty())
                         { clsName = f.refClassName; break; }
+                if (clsName.empty() && cit->second.decl)
+                    for (auto& st : cit->second.decl->bodyStmts)
+                        if (auto* pd = dynamic_cast<ProcedureDecl*>(st.get()))
+                            if (pd->name == mc->method && !pd->returnRefClass.empty())
+                                { clsName = pd->returnRefClass; break; }
                 sc = cit->second.parentName;
             }
             if (clsName.empty()) clsName = ctx.resolveRefType(mc->method);

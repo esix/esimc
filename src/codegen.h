@@ -16,6 +16,7 @@ class Program;
 class VarDeclaration;
 class ClassDecl;
 class Statement;
+class Expression;
 
 struct ClassInfo {
     std::string name;
@@ -242,6 +243,10 @@ public:
     int getFieldIndex(const std::string& className, const std::string& fieldName);
     llvm::Type* getFieldLLVMType(const std::string& className, const std::string& fieldName);
     std::string resolveRefType(const std::string& varName);
+    // Static qualification (REF class) of any object expression: identifier, THIS,
+    // QUA, NEW, a REF-returning proc/method call, or a chained member access
+    // (obj.field / obj.method / obj.proc.attr). "" if it can't be determined.
+    std::string resolveObjectRefClass(Expression* e);
     std::set<int> getClassIdSet(const std::string& className);
     // IDs of className and every class derived from it (for IN / WHEN matching)
     std::set<int> getDescendantIdSet(const std::string& className);
