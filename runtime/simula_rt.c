@@ -273,6 +273,17 @@ void* simula_alloc(int64_t size) {
  * front-end had no location for the site, so the line is omitted.
  * ================================================================ */
 
+void simula_expi_error(int64_t line) {
+    /* Simula 3.5: integer**integer (EXPI) is undefined for a negative exponent
+       (use a real base, e.g. 2.0 ** -3, for the reciprocal form). */
+    if (line > 0)
+        fprintf(stderr, "Runtime error at line %ld: integer ** negative exponent "
+                "(use a REAL base)\n", (long)line);
+    else
+        fprintf(stderr, "Runtime error: integer ** negative exponent (use a REAL base)\n");
+    exit(1);
+}
+
 void simula_div_zero(int64_t line) {
     if (line > 0)
         fprintf(stderr, "Runtime error at line %ld: integer division or MOD by zero\n",

@@ -1323,17 +1323,24 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
             auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
             auto ipowFunc = ctx.module->getOrInsertFunction("simula_ipow",
                 llvm::FunctionType::get(i64Ty, {i64Ty, i64Ty}, false));
-            // A statically-negative integer exponent yields a REAL: 1.0/base**(-exp)
-            // (Simula 3.5.1). Non-negative exponents stay exact integer arithmetic.
-            if (auto* rc = llvm::dyn_cast<llvm::ConstantInt>(R)) {
-                if (rc->getSExtValue() < 0) {
-                    auto negExp = llvm::ConstantInt::get(i64Ty, -rc->getSExtValue());
-                    auto denom = ctx.builder->CreateCall(ipowFunc, {L, negExp}, "ipow");
-                    auto denomF = ctx.builder->CreateSIToFP(denom, doubleTy, "tofp");
-                    return ctx.builder->CreateFDiv(
-                        llvm::ConstantFP::get(doubleTy, 1.0), denomF, "rpow");
-                }
-            }
+            // Simula 3.5: integer**integer is EXPI, which is a run-time error for a
+            // negative exponent (there is no integer reciprocal; a REAL base like
+            // 2.0**-3 is required for that). Check the exponent's sign at runtime so
+            // literal and variable exponents behave identically. The compare folds
+            // away under -O2 for a known non-negative constant exponent.
+            auto isNeg = ctx.builder->CreateICmpSLT(
+                R, llvm::ConstantInt::get(i64Ty, 0), "exp_neg");
+            auto* fn = ctx.builder->GetInsertBlock()->getParent();
+            auto* okBB  = llvm::BasicBlock::Create(*ctx.llvmContext, "expiok", fn);
+            auto* badBB = llvm::BasicBlock::Create(*ctx.llvmContext, "expibad", fn);
+            ctx.builder->CreateCondBr(isNeg, badBB, okBB);
+            ctx.builder->SetInsertPoint(badBB);
+            auto errFn = ctx.module->getOrInsertFunction("simula_expi_error",
+                llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx.llvmContext),
+                    {i64Ty}, false));
+            ctx.builder->CreateCall(errFn, {llvm::ConstantInt::get(i64Ty, line)});
+            ctx.builder->CreateUnreachable();
+            ctx.builder->SetInsertPoint(okBB);
             return ctx.builder->CreateCall(ipowFunc, {L, R}, "ipow");
         }
         auto Lf = L, Rf = R;
@@ -6083,6 +6090,7 @@ llvm::Value* DetachStatement::codegen(CodeGenContext& ctx) {
 llvm::Value* ResumeStatement::codegen(CodeGenContext& ctx) {
     auto obj = object->codegen(ctx);
     if (!obj) return nullptr;
+    ctx.emitNilCheck(obj, line);  // RESUME(NONE) is a NONE-reference access, not a crash
 
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
     auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
@@ -6097,6 +6105,7 @@ llvm::Value* ResumeStatement::codegen(CodeGenContext& ctx) {
 llvm::Value* CallStatement::codegen(CodeGenContext& ctx) {
     auto obj = object->codegen(ctx);
     if (!obj) return nullptr;
+    ctx.emitNilCheck(obj, line);  // CALL(NONE) is a NONE-reference access, not a crash
 
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
     auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);

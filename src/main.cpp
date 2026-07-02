@@ -445,8 +445,8 @@ BEGIN
 
     PROCEDURE PRECEDE(X); REF(LINK) X;
     BEGIN
-        IF X == NONE OR ELSE X.prev_ == NONE THEN GOTO prec_done;
         OUT;
+        IF X == NONE OR ELSE X.prev_ == NONE THEN GOTO prec_done;
         prev_  :- X.prev_;
         suc_   :- X;
         pred_  :- X.pred_;
@@ -459,8 +459,8 @@ BEGIN
 
     PROCEDURE FOLLOW(X); REF(LINK) X;
     BEGIN
-        IF X == NONE OR ELSE X.prev_ == NONE THEN GOTO foll_done;
         OUT;
+        IF X == NONE OR ELSE X.prev_ == NONE THEN GOTO foll_done;
         prev_  :- X.prev_;
         pred_  :- X;
         suc_   :- X.suc_;
