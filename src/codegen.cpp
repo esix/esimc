@@ -899,9 +899,15 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
                                         ctx.returnValueAlloca, name);
     }
 
-    // Check NAME parameters (load through pointer)
+    // Check NAME parameters. With a thunk present, re-evaluate the actual on this
+    // access (call-by-name) and refresh the shadow slot for getVarPtr consumers.
     auto npit = ctx.nameParams.find(name);
     if (npit != ctx.nameParams.end()) {
+        if (ctx.nameThunks.count(name)) {
+            auto v = ctx.emitNameThunkGet(name, npit->second.second);
+            ctx.builder->CreateStore(v, npit->second.first);
+            return v;
+        }
         return ctx.builder->CreateLoad(npit->second.second, npit->second.first, name);
     }
 
@@ -1185,6 +1191,243 @@ static llvm::Value* coerceIndex(CodeGenContext& ctx, llvm::Value* v) {
     if (v && v->getType()->isDoubleTy())
         return simulaRealToInt(ctx, v, llvm::Type::getInt64Ty(*ctx.llvmContext));
     return v;
+}
+
+// ---- Call-by-name (NAME parameter) thunks ----------------------------------
+//
+// A NAME parameter is passed as a pointer to a {env, getfn, setfn} struct. The
+// getfn re-evaluates the actual expression against the caller's *current* state
+// (so a subscript a(i) tracks a mutated i — Jensen's device), and setfn stores a
+// value into the actual's lvalue. env carries pointers to the caller variables
+// the actual mentions; the thunk functions reload them on each call.
+
+// Widen any scalar/pointer value to the i64 carrier used across the thunk ABI.
+static llvm::Value* packToI64(CodeGenContext& ctx, llvm::Value* v) {
+    auto& B = *ctx.builder;
+    auto i64 = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    auto t = v->getType();
+    if (t->isIntegerTy(64)) return v;
+    if (t->isIntegerTy(1))  return B.CreateZExt(v, i64);
+    if (t->isIntegerTy())   return B.CreateSExt(v, i64);
+    if (t->isDoubleTy())    return B.CreateBitCast(v, i64);
+    if (t->isPointerTy())   return B.CreatePtrToInt(v, i64);
+    return B.CreateSExt(v, i64);
+}
+
+// Narrow the i64 carrier back to the logical type expected at the use site.
+static llvm::Value* unpackFromI64(CodeGenContext& ctx, llvm::Value* v, llvm::Type* target) {
+    auto& B = *ctx.builder;
+    if (target->isIntegerTy(64)) return v;
+    if (target->isIntegerTy())   return B.CreateTrunc(v, target);
+    if (target->isDoubleTy())    return B.CreateBitCast(v, target);
+    if (target->isPointerTy())   return B.CreateIntToPtr(v, target);
+    return B.CreateTrunc(v, target);
+}
+
+llvm::StructType* CodeGenContext::getNameThunkType() {
+    if (!nameThunkTy) {
+        auto p = getRefType();
+        nameThunkTy = llvm::StructType::create(*llvmContext,
+            {p, p, p}, "SimulaNameThunk");
+    }
+    return nameThunkTy;
+}
+
+llvm::Value* CodeGenContext::emitNameThunkGet(const std::string& name, llvm::Type* type) {
+    auto it = nameThunks.find(name);
+    if (it == nameThunks.end()) return nullptr;
+    auto tt = getNameThunkType();
+    auto ptrTy = getRefType();
+    auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
+    auto env = builder->CreateLoad(ptrTy, builder->CreateStructGEP(tt, it->second, 0), "nt_env");
+    auto getfn = builder->CreateLoad(ptrTy, builder->CreateStructGEP(tt, it->second, 1), "nt_get");
+    auto fnTy = llvm::FunctionType::get(i64Ty, {ptrTy}, false);
+    auto raw = builder->CreateCall(fnTy, getfn, {env}, "nt_gv");
+    return unpackFromI64(*this, raw, type);
+}
+
+void CodeGenContext::emitNameThunkSet(const std::string& name, llvm::Value* val) {
+    auto it = nameThunks.find(name);
+    if (it == nameThunks.end()) return;
+    auto tt = getNameThunkType();
+    auto ptrTy = getRefType();
+    auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
+    auto env = builder->CreateLoad(ptrTy, builder->CreateStructGEP(tt, it->second, 0), "nt_env");
+    auto setfn = builder->CreateLoad(ptrTy, builder->CreateStructGEP(tt, it->second, 2), "nt_set");
+    auto fnTy = llvm::FunctionType::get(llvm::Type::getVoidTy(*llvmContext),
+                                        {ptrTy, i64Ty}, false);
+    builder->CreateCall(fnTy, setfn, {env, packToI64(*this, val)});
+}
+
+llvm::Value* CodeGenContext::emitArrayElemAddr(const ArrayInfo& ainfo, const std::string& name,
+                                    const std::vector<std::unique_ptr<Expression>>& idxArgs) {
+    if (idxArgs.empty()) return nullptr;
+    auto i64 = llvm::Type::getInt64Ty(*llvmContext);
+    auto idxVal = coerceIndex(*this, idxArgs[0]->codegen(*this));
+    if (!idxVal) return nullptr;
+    llvm::Value* lo;
+    auto loIt = locals.find(name + "__lo");
+    if (loIt != locals.end()) lo = builder->CreateLoad(i64, loIt->second, "lo");
+    else lo = llvm::ConstantInt::get(i64, ainfo.lowerBound);
+    auto adjusted = builder->CreateSub(idxVal, lo, "adj");
+    if (idxArgs.size() >= 2 && (ainfo.stride != 0 || ainfo.hasDynStride)) {
+        auto idx2 = coerceIndex(*this, idxArgs[1]->codegen(*this));
+        if (!idx2) return nullptr;
+        llvm::Value *stride, *lo2;
+        if (ainfo.hasDynStride) {
+            stride = builder->CreateLoad(i64, locals[name + "__stride"], "stride");
+            lo2 = builder->CreateLoad(i64, locals[name + "__lo2"], "lo2");
+        } else {
+            stride = llvm::ConstantInt::get(i64, ainfo.stride);
+            lo2 = llvm::ConstantInt::get(i64, ainfo.lowerBound2);
+        }
+        auto row = builder->CreateMul(adjusted, stride, "row");
+        auto col = builder->CreateSub(idx2, lo2, "col");
+        adjusted = builder->CreateAdd(row, col, "flat");
+    }
+    if (ainfo.isStackArray) {
+        auto arrTy = llvm::ArrayType::get(ainfo.elementType,
+            ainfo.size > 0 ? (size_t)ainfo.size : 1);
+        return builder->CreateGEP(arrTy, ainfo.basePtr,
+            {llvm::ConstantInt::get(i64, 0), adjusted}, name + "_elem");
+    }
+    return builder->CreateGEP(ainfo.elementType, ainfo.basePtr, adjusted, name + "_elem");
+}
+
+llvm::Value* CodeGenContext::buildNameThunk(Expression* actual) {
+    auto ptrTy = getRefType();
+    auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
+    auto i32Ty = llvm::Type::getInt32Ty(*llvmContext);
+    auto tt = getNameThunkType();
+
+    // 1. Gather the caller entities the actual might mention: every local (incl.
+    //    array-bound/pos shadows), every array (base pointer), and `this`.
+    struct Cap { int kind; std::string name; llvm::Value* ptr; llvm::Type* ty; ArrayInfo arr; };
+    std::vector<Cap> caps;
+    for (auto& kv : locals)
+        caps.push_back({0, kv.first, kv.second, kv.second->getAllocatedType(), ArrayInfo{}});
+    for (auto& kv : nameParams) {
+        if (locals.count(kv.first)) continue;
+        caps.push_back({0, kv.first, kv.second.first, kv.second.second, ArrayInfo{}});
+    }
+    for (auto& kv : arrays) {
+        ArrayInfo ai = kv.second;
+        llvm::Value* base = ai.basePtr;
+        if (!ai.isStackArray && !llvm::isa<llvm::GlobalVariable>(ai.basePtr)) {
+            auto pit = locals.find(kv.first);
+            if (pit != locals.end())
+                base = builder->CreateLoad(ptrTy, pit->second, kv.first + "_base");
+        }
+        caps.push_back({1, kv.first, base, nullptr, ai});
+    }
+    std::string capturedClass = currentClassName;
+    if (currentThis) caps.push_back({2, "__this", currentThis, nullptr, ArrayInfo{}});
+    size_t N = caps.size();
+
+    // 2. Materialise env = [N x ptr] on the caller stack.
+    auto curFn = builder->GetInsertBlock()->getParent();
+    auto envArrTy = llvm::ArrayType::get(ptrTy, N ? N : 1);
+    auto env = createEntryBlockAlloca(curFn, "nt_env", envArrTy);
+    for (size_t i = 0; i < N; i++) {
+        auto es = builder->CreateGEP(envArrTy, env,
+            {llvm::ConstantInt::get(i32Ty, 0), llvm::ConstantInt::get(i32Ty, i)}, "nt_es");
+        builder->CreateStore(caps[i].ptr, es);
+    }
+
+    // 3. Save caller codegen state; the thunk bodies rebuild their own scope.
+    auto savedBB = builder->GetInsertBlock();
+    auto savedIP = builder->GetInsertPoint();
+    auto savedLocals = locals; auto savedArrays = arrays;
+    auto savedNameParams = nameParams; auto savedNameThunks = nameThunks;
+    auto savedThis = currentThis; auto savedClass = currentClassName;
+    auto savedTextVars = textVars; auto savedRefTypes = refTypes;
+    auto savedProcName = currentProcName; auto savedRet = returnValueAlloca;
+    int id = nameThunkCounter++;
+
+    // Rebuild the caller scope inside a thunk function from its env argument.
+    // Scalars/bounds are reloaded into fresh locals on every call (so mutated
+    // caller values are seen); arrays point straight at the caller storage.
+    auto rebuild = [&](llvm::Function* fn, llvm::Value* envArg,
+                       std::map<std::string, llvm::Value*>& callerPtrs) {
+        locals.clear(); arrays.clear(); nameParams.clear(); nameThunks.clear();
+        currentThis = nullptr; currentClassName = "";
+        currentProcName = ""; returnValueAlloca = nullptr;
+        textVars = savedTextVars; refTypes = savedRefTypes;
+        for (size_t i = 0; i < N; i++) {
+            auto es = builder->CreateGEP(envArrTy, envArg,
+                {llvm::ConstantInt::get(i32Ty, 0), llvm::ConstantInt::get(i32Ty, i)}, "es");
+            auto p = builder->CreateLoad(ptrTy, es, "ep");
+            callerPtrs[caps[i].name] = p;
+            if (caps[i].kind == 0) {
+                auto fresh = createEntryBlockAlloca(fn, caps[i].name, caps[i].ty);
+                builder->CreateStore(builder->CreateLoad(caps[i].ty, p, caps[i].name), fresh);
+                locals[caps[i].name] = fresh;
+            } else if (caps[i].kind == 1) {
+                ArrayInfo ai = caps[i].arr; ai.basePtr = p;
+                arrays[caps[i].name] = ai;
+            } else {
+                currentThis = p; currentClassName = capturedClass;
+            }
+        }
+    };
+
+    // 4. get(env) -> i64 : the actual's current value.
+    auto getFnTy = llvm::FunctionType::get(i64Ty, {ptrTy}, false);
+    auto getFn = llvm::Function::Create(getFnTy, llvm::Function::InternalLinkage,
+        "nt_get_" + std::to_string(id), module.get());
+    {
+        builder->SetInsertPoint(llvm::BasicBlock::Create(*llvmContext, "entry", getFn));
+        std::map<std::string, llvm::Value*> callerPtrs;
+        rebuild(getFn, getFn->getArg(0), callerPtrs);
+        auto val = actual->codegen(*this);
+        if (!val) val = llvm::ConstantInt::get(i64Ty, 0);
+        builder->CreateRet(packToI64(*this, val));
+    }
+
+    // 5. set(env, v) : store v into the actual's lvalue (variable or array element).
+    auto setFnTy = llvm::FunctionType::get(llvm::Type::getVoidTy(*llvmContext),
+                                           {ptrTy, i64Ty}, false);
+    auto setFn = llvm::Function::Create(setFnTy, llvm::Function::InternalLinkage,
+        "nt_set_" + std::to_string(id), module.get());
+    {
+        builder->SetInsertPoint(llvm::BasicBlock::Create(*llvmContext, "entry", setFn));
+        std::map<std::string, llvm::Value*> callerPtrs;
+        rebuild(setFn, setFn->getArg(0), callerPtrs);
+        auto v = setFn->getArg(1);
+        if (auto* id2 = dynamic_cast<Identifier*>(actual)) {
+            auto cp = callerPtrs.find(id2->name);
+            if (cp != callerPtrs.end()) {
+                llvm::Type* vty = i64Ty;
+                for (auto& c : caps) if (c.kind == 0 && c.name == id2->name) vty = c.ty;
+                builder->CreateStore(unpackFromI64(*this, v, vty), cp->second);
+            } else {
+                auto [pp, pty] = getVarPtr(id2->name);
+                if (pp) builder->CreateStore(unpackFromI64(*this, v, pty), pp);
+            }
+        } else if (auto* pc = dynamic_cast<ProcedureCall*>(actual)) {
+            auto ait = arrays.find(pc->name);
+            if (ait != arrays.end() && !pc->args.empty()) {
+                auto addr = emitArrayElemAddr(ait->second, pc->name, pc->args);
+                if (addr)
+                    builder->CreateStore(unpackFromI64(*this, v, ait->second.elementType), addr);
+            }
+        }
+        builder->CreateRetVoid();
+    }
+
+    // 6. Restore caller state and hand back a stack thunk struct.
+    locals = savedLocals; arrays = savedArrays;
+    nameParams = savedNameParams; nameThunks = savedNameThunks;
+    currentThis = savedThis; currentClassName = savedClass;
+    textVars = savedTextVars; refTypes = savedRefTypes;
+    currentProcName = savedProcName; returnValueAlloca = savedRet;
+    builder->SetInsertPoint(savedBB, savedIP);
+
+    auto thunk = createEntryBlockAlloca(curFn, "nt", tt);
+    builder->CreateStore(env, builder->CreateStructGEP(tt, thunk, 0));
+    builder->CreateStore(getFn, builder->CreateStructGEP(tt, thunk, 1));
+    builder->CreateStore(setFn, builder->CreateStructGEP(tt, thunk, 2));
+    return thunk;
 }
 
 static void emitTextValueAssign(CodeGenContext& ctx, llvm::Value* slot,
@@ -2472,6 +2715,9 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             auto mLpiIt = ctx.labelParamIndices.find(mFuncName);
             const std::set<int>* mLabelIdx = (mLpiIt != ctx.labelParamIndices.end())
                 ? &mLpiIt->second : nullptr;
+            auto mNpiIt = ctx.nameParamIndices.find(mFuncName);
+            const std::set<int>* mNameIdx = (mNpiIt != ctx.nameParamIndices.end())
+                ? &mNpiIt->second : nullptr;
             // arg index in callee: 0 is 'this', so user args start at 1
             for (size_t ai = 0; ai < args.size(); ai++) {
                 size_t paramIdx = ai + 1;
@@ -2484,17 +2730,16 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                         }
                     }
                 }
-                // If callee expects ptr at this position and arg is an Identifier value,
-                // pass the variable's address (NAME parameter)
-                if (paramIdx < fnTy->getNumParams() &&
-                    fnTy->getParamType(paramIdx)->isPointerTy()) {
+                // NAME parameter: pass a {env,get,set} thunk (call-by-name).
+                if (mNameIdx && mNameIdx->count((int)ai)) {
                     if (auto* id = dynamic_cast<Identifier*>(args[ai].get())) {
-                        auto [ptr, ty] = ctx.getVarPtr(id->name);
-                        if (ptr && !ty->isPointerTy()) {
-                            argsV.push_back(ptr);
-                            continue;
-                        }
+                        auto tk = ctx.nameThunks.find(id->name);
+                        if (tk != ctx.nameThunks.end()) { argsV.push_back(tk->second); continue; }
                     }
+                    auto thunk = ctx.buildNameThunk(args[ai].get());
+                    if (!thunk) return nullptr;
+                    argsV.push_back(thunk);
+                    continue;
                 }
                 auto v = args[ai]->codegen(ctx);
                 if (!v) return nullptr;
@@ -2644,76 +2889,24 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                 }
             }
         }
-        // For NAME parameters: pass the address of the caller's storage even if
-        // the variable is itself a pointer type (e.g. REF). This is what makes
-        // assignments inside the callee propagate back to the caller's variable.
+        // For NAME parameters: pass a {env,get,set} thunk so the actual is
+        // re-evaluated on every access inside the callee (call-by-name / Jensen's
+        // device) and assignments to the formal reach the actual's lvalue.
         if (isNameParam) {
+            // Transitive call-by-name: passing a NAME formal onward as a NAME
+            // argument re-binds to the SAME actual, so forward its thunk directly
+            // (re-thunking would capture the stale shadow slot instead).
             if (auto* id = dynamic_cast<Identifier*>(arg.get())) {
-                auto [ptr, ty] = ctx.getVarPtr(id->name);
-                if (ptr) {
-                    argsV.push_back(ptr);
+                auto tk = ctx.nameThunks.find(id->name);
+                if (tk != ctx.nameThunks.end()) {
+                    argsV.push_back(tk->second);
                     paramIdx++;
                     continue;
                 }
             }
-            // Array element actual A(I): pass the element's address so callee
-            // writes reach the array. (The index is evaluated once at call
-            // time — full per-access thunk re-evaluation is not implemented.)
-            if (auto* pc = dynamic_cast<ProcedureCall*>(arg.get())) {
-                auto ait3 = ctx.arrays.find(pc->name);
-                if (ait3 != ctx.arrays.end() && !pc->args.empty()) {
-                    auto& ainfo = ait3->second;
-                    auto i64Ty3 = llvm::Type::getInt64Ty(*ctx.llvmContext);
-                    auto idxVal = coerceIndex(ctx, pc->args[0]->codegen(ctx));
-                    if (!idxVal) return nullptr;
-                    llvm::Value* loBound;
-                    auto loIt3 = ctx.locals.find(pc->name + "__lo");
-                    if (loIt3 != ctx.locals.end())
-                        loBound = ctx.builder->CreateLoad(i64Ty3, loIt3->second, "lo");
-                    else
-                        loBound = llvm::ConstantInt::get(i64Ty3, ainfo.lowerBound);
-                    auto adjusted = ctx.builder->CreateSub(idxVal, loBound, "adj_idx");
-                    if (pc->args.size() >= 2 && (ainfo.stride != 0 || ainfo.hasDynStride)) {
-                        auto idxVal2 = pc->args[1]->codegen(ctx);
-                        if (!idxVal2) return nullptr;
-                        llvm::Value *stride, *lo2;
-                        if (ainfo.hasDynStride) {
-                            stride = ctx.builder->CreateLoad(i64Ty3,
-                                ctx.locals[pc->name + "__stride"], "stride");
-                            lo2 = ctx.builder->CreateLoad(i64Ty3,
-                                ctx.locals[pc->name + "__lo2"], "lo2");
-                        } else {
-                            stride = llvm::ConstantInt::get(i64Ty3, ainfo.stride);
-                            lo2 = llvm::ConstantInt::get(i64Ty3, ainfo.lowerBound2);
-                        }
-                        auto row = ctx.builder->CreateMul(adjusted, stride, "row_off");
-                        auto col = ctx.builder->CreateSub(idxVal2, lo2, "col_adj");
-                        adjusted = ctx.builder->CreateAdd(row, col, "flat_idx");
-                    }
-                    llvm::Value* gep;
-                    if (ainfo.isStackArray) {
-                        auto arrTy = llvm::ArrayType::get(ainfo.elementType,
-                            ainfo.size > 0 ? (size_t)ainfo.size : 1);
-                        gep = ctx.builder->CreateGEP(arrTy, ainfo.basePtr,
-                            {llvm::ConstantInt::get(i64Ty3, 0), adjusted}, "name_elem");
-                    } else {
-                        gep = ctx.builder->CreateGEP(ainfo.elementType, ainfo.basePtr,
-                            adjusted, "name_elem");
-                    }
-                    argsV.push_back(gep);
-                    paramIdx++;
-                    continue;
-                }
-            }
-            // Any other expression: evaluate once into a temporary and pass
-            // its address (reads see the value; writes go to the temp). This
-            // avoids the null-pointer crash; true thunks are still missing.
-            auto v = arg->codegen(ctx);
-            if (!v) return nullptr;
-            auto curFunc = ctx.builder->GetInsertBlock()->getParent();
-            auto tmp = ctx.createEntryBlockAlloca(curFunc, "name_tmp", v->getType());
-            ctx.builder->CreateStore(v, tmp);
-            argsV.push_back(tmp);
+            auto thunk = ctx.buildNameThunk(arg.get());
+            if (!thunk) return nullptr;
+            argsV.push_back(thunk);
             paramIdx++;
             continue;
         }
@@ -3422,6 +3615,17 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
         return nullptr;
     }
 
+    // NAME parameters are part of the method's declared signature; find the set
+    // by walking the prefix chain from the static class so the arg loops below can
+    // pass a call-by-name thunk instead of a plain value.
+    const std::set<int>* mNameIdx = nullptr;
+    for (std::string sc = clsName; !sc.empty(); ) {
+        auto f = ctx.nameParamIndices.find(sc + "_" + method);
+        if (f != ctx.nameParamIndices.end()) { mNameIdx = &f->second; break; }
+        auto ci = ctx.classes.find(sc);
+        sc = (ci != ctx.classes.end()) ? ci->second.parentName : std::string();
+    }
+
     // Calling a method on NONE would segfault loading the vtable; guard it.
     // `this` and freshly-NEW'd receivers are never null, so skip those.
     if (!dynamic_cast<ThisExpression*>(object.get()) &&
@@ -3496,6 +3700,17 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
                 unsigned nParams = funcTy->getNumParams();
                 auto doubleTy3 = llvm::Type::getDoubleTy(*ctx.llvmContext);
                 for (size_t ai = 0; ai < args.size(); ai++) {
+                    if (mNameIdx && mNameIdx->count((int)ai)) {
+                        llvm::Value* thunk = nullptr;
+                        if (auto* id = dynamic_cast<Identifier*>(args[ai].get())) {
+                            auto tk = ctx.nameThunks.find(id->name);
+                            if (tk != ctx.nameThunks.end()) thunk = tk->second;
+                        }
+                        if (!thunk) thunk = ctx.buildNameThunk(args[ai].get());
+                        if (!thunk) return nullptr;
+                        argsV.push_back(thunk);
+                        continue;
+                    }
                     auto v = args[ai]->codegen(ctx);
                     if (!v) return nullptr;
                     unsigned paramIdx = ai + 1;
@@ -3582,6 +3797,17 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
     auto fnTy = methodFunc->getFunctionType();
     unsigned nParams = fnTy->getNumParams();
     for (size_t ai = 0; ai < args.size(); ai++) {
+        if (mNameIdx && mNameIdx->count((int)ai)) {
+            llvm::Value* thunk = nullptr;
+            if (auto* id = dynamic_cast<Identifier*>(args[ai].get())) {
+                auto tk = ctx.nameThunks.find(id->name);
+                if (tk != ctx.nameThunks.end()) thunk = tk->second;
+            }
+            if (!thunk) thunk = ctx.buildNameThunk(args[ai].get());
+            if (!thunk) return nullptr;
+            argsV.push_back(thunk);
+            continue;
+        }
         auto v = args[ai]->codegen(ctx);
         if (!v) return nullptr;
         unsigned pi = ai + 1;
@@ -4388,6 +4614,7 @@ llvm::Value* Assignment::codegen(CodeGenContext& ctx) {
                 val = ctx.builder->CreateTrunc(val, varTy);
         }
         ctx.builder->CreateStore(val, varPtr);
+        ctx.emitNameThunkSet(name, val);  // propagate to the actual (call-by-name)
         return val;
     }
 
@@ -4629,6 +4856,7 @@ llvm::Value* RefAssignment::codegen(CodeGenContext& ctx) {
     // now lives inside the descriptor, so producers (COPY/SUB/BLANKS) already
     // hand back pos=0 — no separate reset needed.
     ctx.builder->CreateStore(val, varPtr);
+    ctx.emitNameThunkSet(name, val);  // propagate to the actual (call-by-name)
     return val;
 }
 
@@ -4907,6 +5135,7 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
 
     auto startV = coerce(start->codegen(ctx));
     ctx.builder->CreateStore(startV, varPtr);
+    ctx.emitNameThunkSet(var, startV);  // by-name control var tracks the actual
 
     auto condBB = llvm::BasicBlock::Create(*ctx.llvmContext, "forcond", func);
     auto bodyBB = llvm::BasicBlock::Create(*ctx.llvmContext, "forbody");
@@ -4956,6 +5185,7 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
     auto nextVal = isFloat ? ctx.builder->CreateFAdd(curVal2, stepV, "forstep")
                            : ctx.builder->CreateAdd(curVal2, stepV, "forstep");
     ctx.builder->CreateStore(nextVal, varPtr2);
+    ctx.emitNameThunkSet(var, nextVal);  // by-name control var tracks the actual
     ctx.builder->CreateBr(condBB);
 
     func->insert(func->end(), afterBB);
@@ -4974,6 +5204,7 @@ llvm::Value* ForListStatement::codegen(CodeGenContext& ctx) {
         auto val = valExpr->codegen(ctx);
         if (!val) continue;
         ctx.builder->CreateStore(val, varPtr);
+        ctx.emitNameThunkSet(var, val);  // by-name control var tracks the actual
         body->codegen(ctx);
     }
     return nullptr;
@@ -4999,6 +5230,7 @@ llvm::Value* ForMultiRangeStatement::codegen(CodeGenContext& ctx) {
         };
         auto startV = coerce(range.start->codegen(ctx));
         ctx.builder->CreateStore(startV, varPtr);
+        ctx.emitNameThunkSet(var, startV);  // by-name control var tracks the actual
 
         auto condBB = llvm::BasicBlock::Create(*ctx.llvmContext, "fmr_cond", func);
         auto bodyBB = llvm::BasicBlock::Create(*ctx.llvmContext, "fmr_body");
@@ -5034,6 +5266,7 @@ llvm::Value* ForMultiRangeStatement::codegen(CodeGenContext& ctx) {
         auto next = isFloat ? ctx.builder->CreateFAdd(cur2, stepV, "fmr_step")
                             : ctx.builder->CreateAdd(cur2, stepV, "fmr_step");
         ctx.builder->CreateStore(next, varPtr);
+        ctx.emitNameThunkSet(var, next);  // by-name control var tracks the actual
         ctx.builder->CreateBr(condBB);
 
         func->insert(func->end(), afterBB);
@@ -5196,6 +5429,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto savedMethodThis = ctx.methodThis;
     auto savedMethodThisClassName = ctx.methodThisClassName;
     auto savedNameParams = ctx.nameParams;
+    auto savedNameThunks = ctx.nameThunks;
     auto savedArrays = ctx.arrays;
     auto savedLabelBlocks = ctx.labelBlocks;
     auto savedSwitches = ctx.switches;
@@ -5216,6 +5450,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     ctx.builder->SetInsertPoint(entry);
     ctx.locals.clear();
     ctx.nameParams.clear();
+    ctx.nameThunks.clear();
     // Keep arrays that use global storage (from main block)
     {
         auto savedArr = ctx.arrays;
@@ -5266,10 +5501,24 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     for (auto& p : params) {
         auto ty = ctx.getLLVMType(p.type);
         if (p.isName) {
-            // NAME param: arg is a pointer to the caller's storage.
-            ctx.nameParams[p.name] = {&*argIt, ty};
-            (&*argIt)->setName(p.name);
+            // NAME param: arg is a pointer to a {env,get,set} thunk. Keep a local
+            // shadow slot (so getVarPtr and TEXT ops keep a stable address) and
+            // register the thunk for by-name re-evaluation / write-back. The slot
+            // is primed with the actual's current value.
+            auto thunkPtr = &*argIt;
+            thunkPtr->setName(p.name + "_thunk");
             ++argIt;
+            auto slot = ctx.createEntryBlockAlloca(func, p.name, ty);
+            ctx.nameParams[p.name] = {slot, ty};
+            ctx.nameThunks[p.name] = thunkPtr;
+            // Prime the slot only for TEXT (whose cursor ops read the descriptor
+            // via getVarPtr). Priming a scalar would evaluate the actual once at
+            // entry — wrong for call-by-name (no access yet) and unsafe if the
+            // actual is only valid once the callee runs (e.g. Jensen's a(i)).
+            if (p.type == VarDeclaration::TEXT && p.refClassName.empty() && !p.isArray) {
+                if (auto iv = ctx.emitNameThunkGet(p.name, ty))
+                    ctx.builder->CreateStore(iv, slot);
+            }
             // A NAME TEXT param supports the TEXT cursor operations (SETPOS,
             // GETCHAR, PUTCHAR, MORE). Register it and give it a local position
             // counter so those member calls resolve. PUTCHAR writes through to
@@ -5564,6 +5813,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     ctx.methodThis = savedMethodThis;
     ctx.methodThisClassName = savedMethodThisClassName;
     ctx.nameParams = savedNameParams;
+    ctx.nameThunks = savedNameThunks;
     ctx.arrays = savedArrays;
     ctx.labelBlocks = savedLabelBlocks;
     ctx.switches = savedSwitches;

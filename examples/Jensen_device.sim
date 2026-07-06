@@ -1,0 +1,24 @@
+! Call-by-name (NAME parameters) and Jensen's device: the formal `term` is a
+! by-name expression re-evaluated on every access, so it tracks the controlled
+! variable `k` (itself by-name bound to the caller's `i`). ;
+BEGIN
+  INTEGER i;
+
+  INTEGER PROCEDURE sigma(k, lo, hi, term);
+    NAME k, term; INTEGER k, lo, hi, term;
+  BEGIN
+    INTEGER s;
+    s := 0;
+    FOR k := lo STEP 1 UNTIL hi DO s := s + term;
+    sigma := s
+  END;
+
+  INTEGER ARRAY a(1:5);
+  FOR i := 1 STEP 1 UNTIL 5 DO a(i) := i * i;
+
+  ! sum of a(i) for i=1..5 = 1+4+9+16+25 = 55 ;
+  OUTINT(sigma(i, 1, 5, a(i)), 5);
+  ! sum of i for i=1..10 = 55 ;
+  OUTINT(sigma(i, 1, 10, i), 5);
+  OUTIMAGE
+END.

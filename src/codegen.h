@@ -104,8 +104,17 @@ public:
     llvm::Value* methodThis = nullptr;
     std::string methodThisClassName;
 
-    // NAME parameters: name -> (pointer, value type) for pass-by-reference
+    // NAME parameters: name -> (slot pointer, value type). The slot is a local
+    // shadow that keeps existing NAME code (getVarPtr, TEXT ops) working. The
+    // actual by-name re-evaluation goes through nameThunks below.
     std::map<std::string, std::pair<llvm::Value*, llvm::Type*>> nameParams;
+    // Full call-by-name: name -> pointer to a {env, getfn, setfn} thunk struct.
+    // Reads call getfn(env) (re-evaluating the actual); assignments call
+    // setfn(env, v) (propagating to the actual's lvalue). This is what makes
+    // Jensen's device work: an expression actual is re-evaluated per access.
+    std::map<std::string, llvm::Value*> nameThunks;
+    llvm::StructType* nameThunkTy = nullptr;
+    int nameThunkCounter = 0;
     llvm::AllocaInst* returnValueAlloca = nullptr;
 
     // For each procedure name, which parameter indices are NAME (pass-by-reference).
@@ -267,6 +276,19 @@ public:
     // Variable access: returns a pointer to the variable (alloca or GEP for class fields)
     // and the LLVM type of the stored value. Returns {nullptr, nullptr} if not found.
     std::pair<llvm::Value*, llvm::Type*> getVarPtr(const std::string& name);
+
+    // Call-by-name (NAME parameter) thunk support.
+    llvm::StructType* getNameThunkType();
+    // Build a {env,get,set} thunk for `actual` in the current scope; returns a
+    // pointer to a stack-allocated thunk struct to pass as the NAME argument.
+    llvm::Value* buildNameThunk(Expression* actual);
+    // Emit a call to the thunk's getfn, returning the actual's current value as `type`.
+    llvm::Value* emitNameThunkGet(const std::string& name, llvm::Type* type);
+    // Emit a call to the thunk's setfn, propagating `val` to the actual's lvalue.
+    void emitNameThunkSet(const std::string& name, llvm::Value* val);
+    // Compute the address of an array element a(i[,j]) using current bounds.
+    llvm::Value* emitArrayElemAddr(const ArrayInfo& ainfo, const std::string& name,
+                                   const std::vector<std::unique_ptr<Expression>>& idxArgs);
 
     // Closure support: captured variables from outer scope
     // Maps function name -> list of captured variable names
