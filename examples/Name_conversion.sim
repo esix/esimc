@@ -1,0 +1,12 @@
+! Call-by-name with differing actual/formal types: values convert at the
+! thunk boundary (INTEGER<->REAL, ties-away-from-zero rounding on writes). ;
+BEGIN
+  INTEGER g; REAL r;
+  PROCEDURE showr(x); NAME x; REAL x;    OUTFIX(x, 1, 6);
+  PROCEDURE setr(x);  NAME x; REAL x;    x := 1.5;
+  PROCEDURE bumpi(x); NAME x; INTEGER x; x := x + 1;
+  g := 7;   showr(g);
+  g := 0;   setr(g);  OUTINT(g, 3);
+  r := 2.6; bumpi(r); OUTFIX(r, 1, 6);
+  OUTIMAGE
+END.

@@ -1224,6 +1224,25 @@ static llvm::Value* unpackFromI64(CodeGenContext& ctx, llvm::Value* v, llvm::Typ
     return B.CreateTrunc(v, target);
 }
 
+// Simula value conversion between scalar types (INTEGER<->REAL rounds ties away
+// from zero on real->integer, per the := rules). Used at the thunk boundary when
+// a NAME formal's type differs from the actual's type.
+static llvm::Value* convertScalar(CodeGenContext& ctx, llvm::Value* v, llvm::Type* dest) {
+    if (!v || !dest || v->getType() == dest) return v;
+    auto& B = *ctx.builder;
+    auto st = v->getType();
+    if (st->isIntegerTy() && dest->isDoubleTy())
+        return B.CreateSIToFP(v, dest, "toreal");
+    if (st->isDoubleTy() && dest->isIntegerTy())
+        return simulaRealToInt(ctx, v, dest);
+    if (st->isIntegerTy() && dest->isIntegerTy()) {
+        unsigned sw = st->getIntegerBitWidth(), dw = dest->getIntegerBitWidth();
+        if (sw < dw) return sw == 1 ? B.CreateZExt(v, dest) : B.CreateSExt(v, dest);
+        if (sw > dw) return B.CreateTrunc(v, dest);
+    }
+    return v;
+}
+
 llvm::StructType* CodeGenContext::getNameThunkType() {
     if (!nameThunkTy) {
         auto p = getRefType();
@@ -1294,7 +1313,7 @@ llvm::Value* CodeGenContext::emitArrayElemAddr(const ArrayInfo& ainfo, const std
     return builder->CreateGEP(ainfo.elementType, ainfo.basePtr, adjusted, name + "_elem");
 }
 
-llvm::Value* CodeGenContext::buildNameThunk(Expression* actual) {
+llvm::Value* CodeGenContext::buildNameThunk(Expression* actual, llvm::Type* formalTy) {
     auto ptrTy = getRefType();
     auto i64Ty = llvm::Type::getInt64Ty(*llvmContext);
     auto i32Ty = llvm::Type::getInt32Ty(*llvmContext);
@@ -1381,6 +1400,9 @@ llvm::Value* CodeGenContext::buildNameThunk(Expression* actual) {
         rebuild(getFn, getFn->getArg(0), callerPtrs);
         auto val = actual->codegen(*this);
         if (!val) val = llvm::ConstantInt::get(i64Ty, 0);
+        // The carrier always holds a FORMAL-typed value: convert (e.g. an
+        // INTEGER actual read through a REAL formal becomes 7.0, not raw bits).
+        val = convertScalar(*this, val, formalTy);
         builder->CreateRet(packToI64(*this, val));
     }
 
@@ -1393,23 +1415,30 @@ llvm::Value* CodeGenContext::buildNameThunk(Expression* actual) {
         builder->SetInsertPoint(llvm::BasicBlock::Create(*llvmContext, "entry", setFn));
         std::map<std::string, llvm::Value*> callerPtrs;
         rebuild(setFn, setFn->getArg(0), callerPtrs);
-        auto v = setFn->getArg(1);
+        // Incoming carrier holds a FORMAL-typed value; recover it, then convert
+        // to the actual lvalue's own type before storing (REAL 1.5 written back
+        // through an INTEGER actual rounds to 2).
+        auto vraw = setFn->getArg(1);
+        auto recover = [&](llvm::Type* lvTy) {
+            auto fv = unpackFromI64(*this, vraw, formalTy ? formalTy : lvTy);
+            return convertScalar(*this, fv, lvTy);
+        };
         if (auto* id2 = dynamic_cast<Identifier*>(actual)) {
             auto cp = callerPtrs.find(id2->name);
             if (cp != callerPtrs.end()) {
                 llvm::Type* vty = i64Ty;
                 for (auto& c : caps) if (c.kind == 0 && c.name == id2->name) vty = c.ty;
-                builder->CreateStore(unpackFromI64(*this, v, vty), cp->second);
+                builder->CreateStore(recover(vty), cp->second);
             } else {
                 auto [pp, pty] = getVarPtr(id2->name);
-                if (pp) builder->CreateStore(unpackFromI64(*this, v, pty), pp);
+                if (pp) builder->CreateStore(recover(pty), pp);
             }
         } else if (auto* pc = dynamic_cast<ProcedureCall*>(actual)) {
             auto ait = arrays.find(pc->name);
             if (ait != arrays.end() && !pc->args.empty()) {
                 auto addr = emitArrayElemAddr(ait->second, pc->name, pc->args);
                 if (addr)
-                    builder->CreateStore(unpackFromI64(*this, v, ait->second.elementType), addr);
+                    builder->CreateStore(recover(ait->second.elementType), addr);
             }
         }
         builder->CreateRetVoid();
@@ -2718,6 +2747,9 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             auto mNpiIt = ctx.nameParamIndices.find(mFuncName);
             const std::set<int>* mNameIdx = (mNpiIt != ctx.nameParamIndices.end())
                 ? &mNpiIt->second : nullptr;
+            auto mNftIt = ctx.nameParamFormalTypes.find(mFuncName);
+            const std::map<int, llvm::Type*>* mNameTys =
+                (mNftIt != ctx.nameParamFormalTypes.end()) ? &mNftIt->second : nullptr;
             // arg index in callee: 0 is 'this', so user args start at 1
             for (size_t ai = 0; ai < args.size(); ai++) {
                 size_t paramIdx = ai + 1;
@@ -2736,7 +2768,9 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                         auto tk = ctx.nameThunks.find(id->name);
                         if (tk != ctx.nameThunks.end()) { argsV.push_back(tk->second); continue; }
                     }
-                    auto thunk = ctx.buildNameThunk(args[ai].get());
+                    llvm::Type* fty = nullptr;
+                    if (mNameTys) { auto t = mNameTys->find((int)ai); if (t != mNameTys->end()) fty = t->second; }
+                    auto thunk = ctx.buildNameThunk(args[ai].get(), fty);
                     if (!thunk) return nullptr;
                     argsV.push_back(thunk);
                     continue;
@@ -2871,6 +2905,9 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
     auto npiIt = ctx.nameParamIndices.find(name);
     const std::set<int>* nameIdxSet = (npiIt != ctx.nameParamIndices.end())
         ? &npiIt->second : nullptr;
+    auto nftIt = ctx.nameParamFormalTypes.find(name);
+    const std::map<int, llvm::Type*>* nameTySet =
+        (nftIt != ctx.nameParamFormalTypes.end()) ? &nftIt->second : nullptr;
     auto lpiIt = ctx.labelParamIndices.find(name);
     const std::set<int>* labelIdxSet = (lpiIt != ctx.labelParamIndices.end())
         ? &lpiIt->second : nullptr;
@@ -2904,7 +2941,9 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                     continue;
                 }
             }
-            auto thunk = ctx.buildNameThunk(arg.get());
+            llvm::Type* fty = nullptr;
+            if (nameTySet) { auto t = nameTySet->find((int)userArgIdx); if (t != nameTySet->end()) fty = t->second; }
+            auto thunk = ctx.buildNameThunk(arg.get(), fty);
             if (!thunk) return nullptr;
             argsV.push_back(thunk);
             paramIdx++;
@@ -3619,9 +3658,15 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
     // by walking the prefix chain from the static class so the arg loops below can
     // pass a call-by-name thunk instead of a plain value.
     const std::set<int>* mNameIdx = nullptr;
+    const std::map<int, llvm::Type*>* mNameTys = nullptr;
     for (std::string sc = clsName; !sc.empty(); ) {
         auto f = ctx.nameParamIndices.find(sc + "_" + method);
-        if (f != ctx.nameParamIndices.end()) { mNameIdx = &f->second; break; }
+        if (f != ctx.nameParamIndices.end()) {
+            mNameIdx = &f->second;
+            auto ft = ctx.nameParamFormalTypes.find(sc + "_" + method);
+            if (ft != ctx.nameParamFormalTypes.end()) mNameTys = &ft->second;
+            break;
+        }
         auto ci = ctx.classes.find(sc);
         sc = (ci != ctx.classes.end()) ? ci->second.parentName : std::string();
     }
@@ -3706,7 +3751,11 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
                             auto tk = ctx.nameThunks.find(id->name);
                             if (tk != ctx.nameThunks.end()) thunk = tk->second;
                         }
-                        if (!thunk) thunk = ctx.buildNameThunk(args[ai].get());
+                        if (!thunk) {
+                            llvm::Type* fty = nullptr;
+                            if (mNameTys) { auto t = mNameTys->find((int)ai); if (t != mNameTys->end()) fty = t->second; }
+                            thunk = ctx.buildNameThunk(args[ai].get(), fty);
+                        }
                         if (!thunk) return nullptr;
                         argsV.push_back(thunk);
                         continue;
@@ -3803,7 +3852,11 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
                 auto tk = ctx.nameThunks.find(id->name);
                 if (tk != ctx.nameThunks.end()) thunk = tk->second;
             }
-            if (!thunk) thunk = ctx.buildNameThunk(args[ai].get());
+            if (!thunk) {
+                            llvm::Type* fty = nullptr;
+                            if (mNameTys) { auto t = mNameTys->find((int)ai); if (t != mNameTys->end()) fty = t->second; }
+                            thunk = ctx.buildNameThunk(args[ai].get(), fty);
+                        }
             if (!thunk) return nullptr;
             argsV.push_back(thunk);
             continue;
@@ -3903,7 +3956,33 @@ llvm::Value* InExpression::codegen(CodeGenContext& ctx) {
 // ---- Conditional expression ----
 
 llvm::Value* QuaExpression::codegen(CodeGenContext& ctx) {
-    return object->codegen(ctx);
+    auto obj = object->codegen(ctx);
+    if (!obj) return nullptr;
+    // X QUA C: runtime qualification check. X must be NONE (passes through) or
+    // an instance of C / a class prefixed by C; anything else is an error.
+    auto ids = ctx.getDescendantIdSet(className);
+    if (ids.empty()) {
+        ctx.errorAt(line) << "unknown class '" << className << "'\n";
+        return nullptr;
+    }
+    if (!obj->getType()->isPointerTy()) return obj;
+    auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+    auto isNone = ctx.builder->CreateICmpEQ(obj,
+        llvm::ConstantPointerNull::get(ptrTy), "qua_none");
+    auto match = classIdTest(ctx, obj, ids, "qua_check");
+    auto ok = ctx.builder->CreateOr(isNone, match, "qua_ok");
+    auto func = ctx.builder->GetInsertBlock()->getParent();
+    auto badBB = llvm::BasicBlock::Create(*ctx.llvmContext, "qua_bad", func);
+    auto okBB = llvm::BasicBlock::Create(*ctx.llvmContext, "qua_okbb", func);
+    ctx.builder->CreateCondBr(ok, okBB, badBB);
+    ctx.builder->SetInsertPoint(badBB);
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    auto errFn = ctx.module->getOrInsertFunction("simula_qua_error",
+        llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx.llvmContext), {i64Ty}, false));
+    ctx.builder->CreateCall(errFn, {llvm::ConstantInt::get(i64Ty, line)});
+    ctx.builder->CreateUnreachable();
+    ctx.builder->SetInsertPoint(okBB);
+    return obj;
 }
 
 llvm::Value* ConditionalExpr::codegen(CodeGenContext& ctx) {
@@ -5400,12 +5479,17 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     {
         std::set<int> nameIdx;
         std::set<int> labelIdx;
+        std::map<int, llvm::Type*> nameTys;
         for (size_t i = 0; i < params.size(); i++) {
-            if (params[i].isName) nameIdx.insert((int)i);
+            if (params[i].isName) {
+                nameIdx.insert((int)i);
+                nameTys[(int)i] = ctx.getLLVMType(params[i].type);
+            }
             if (params[i].isLabel) labelIdx.insert((int)i);
         }
         if (!nameIdx.empty()) {
             ctx.nameParamIndices[funcName] = nameIdx;
+            ctx.nameParamFormalTypes[funcName] = nameTys;
         }
         if (!labelIdx.empty()) {
             ctx.labelParamIndices[funcName] = labelIdx;

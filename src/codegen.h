@@ -121,6 +121,11 @@ public:
     // Call sites use this to pass the address of the caller's variable instead of
     // the value, even for ptr-typed variables (where the type alone is ambiguous).
     std::map<std::string, std::set<int>> nameParamIndices;
+    // For each procedure with NAME params, the formal's declared LLVM type per
+    // index. Thunks are built by the CALLER, which must convert between the
+    // actual's type and the formal's type (e.g. INTEGER actual, REAL formal) —
+    // the thunk ABI's i64 carrier always holds a formal-typed value.
+    std::map<std::string, std::map<int, llvm::Type*>> nameParamFormalTypes;
 
     // For each procedure name, which parameter indices are LABEL (non-local goto
     // targets). Call sites pass a {jmp_buf*, id} record; callees longjmp to it.
@@ -281,7 +286,9 @@ public:
     llvm::StructType* getNameThunkType();
     // Build a {env,get,set} thunk for `actual` in the current scope; returns a
     // pointer to a stack-allocated thunk struct to pass as the NAME argument.
-    llvm::Value* buildNameThunk(Expression* actual);
+    // formalTy is the callee formal's declared type: get() converts the actual's
+    // value to it, set() converts from it back to the actual's type.
+    llvm::Value* buildNameThunk(Expression* actual, llvm::Type* formalTy = nullptr);
     // Emit a call to the thunk's getfn, returning the actual's current value as `type`.
     llvm::Value* emitNameThunkGet(const std::string& name, llvm::Type* type);
     // Emit a call to the thunk's setfn, propagating `val` to the actual's lvalue.
