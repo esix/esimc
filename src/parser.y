@@ -213,6 +213,24 @@ static Statement* lowerAssign(Expression* lhs, Expression* rhs) {
     }
     delete rhs; delete lhs; return new CompoundStmt(StmtList());
 }
+
+/* Desugar a class-prefixed block  C BEGIN ... END  into
+     BEGIN REF(C) __pbN; __pbN :- NEW C; INSPECT __pbN DO <block> END
+   The prefix object is created (running C's body statements), then the block
+   body executes connected to it, so C's attributes are directly visible.
+   Exact for prefix classes with no statements after INNER. */
+static Statement* makePrefixedBlock(const std::string& cls, Statement* blk) {
+    static int pbCounter = 0;
+    std::string tmp = "__pb" + std::to_string(pbCounter++);
+    StmtList stmts;
+    stmts.push_back(StmtPtr(new RefDeclaration(cls, tmp)));
+    stmts.push_back(StmtPtr(new RefAssignment(tmp,
+        ExprPtr(new NewExpression(cls, ExprList())))));
+    stmts.push_back(StmtPtr(new InspectStatement(
+        ExprPtr(new Identifier(tmp)),
+        std::vector<InspectStatement::WhenClause>(), StmtPtr(blk))));
+    return new Block(std::move(stmts));
+}
 %}
 
 %locations
@@ -330,25 +348,25 @@ program
       }
     | top_level_decls T_IDENT block {
         /* prefix block: ClassName BEGIN ... END — execute block in class context */
-        $1->push_back(StmtPtr($3));
+        $1->push_back(StmtPtr(makePrefixedBlock($2, $3)));
         programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
         delete $1;
       }
     | top_level_decls T_IDENT block T_DOT {
-        $1->push_back(StmtPtr($3));
+        $1->push_back(StmtPtr(makePrefixedBlock($2, $3)));
         programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
         delete $1;
       }
     | T_IDENT block {
         /* prefix block at top: ClassName BEGIN ... END */
         auto stmts = new StmtList();
-        stmts->push_back(StmtPtr($2));
+        stmts->push_back(StmtPtr(makePrefixedBlock($1, $2)));
         programRoot = new Program(StmtPtr(new Block(std::move(*stmts))));
         delete stmts;
       }
     | T_IDENT block T_DOT {
         auto stmts = new StmtList();
-        stmts->push_back(StmtPtr($2));
+        stmts->push_back(StmtPtr(makePrefixedBlock($1, $2)));
         programRoot = new Program(StmtPtr(new Block(std::move(*stmts))));
         delete stmts;
       }
@@ -441,6 +459,10 @@ statement
     | inimage_stmt
     | virtual_spec
     | block
+    | T_IDENT block {
+        /* class-prefixed block as a statement: C BEGIN ... END */
+        $$ = makePrefixedBlock($1, $2);
+      }
     | expr_stmt
     ;
 

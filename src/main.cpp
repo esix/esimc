@@ -81,12 +81,36 @@ static std::string findExternalClassFile(const std::string& className,
     return "";
 }
 
+// Blank occurrences of `word` used as a block prefix (followed by BEGIN). An
+// inlined external class's declarations become top-level, so its prefix block
+// must degrade to a plain block (the class itself no longer exists).
+static void blankPrefixUse(std::string& src, const std::string& word) {
+    std::string lc = toLower(src), lw = toLower(word);
+    size_t p = 0;
+    while ((p = lc.find(lw, p)) != std::string::npos) {
+        bool b1 = p == 0 || !(std::isalnum((unsigned char)lc[p-1]) || lc[p-1] == '_');
+        size_t e = p + lw.size();
+        bool b2 = e >= lc.size() || !(std::isalnum((unsigned char)lc[e]) || lc[e] == '_');
+        if (b1 && b2) {
+            size_t q = e;
+            while (q < lc.size() && std::isspace((unsigned char)lc[q])) q++;
+            if (lc.compare(q, 5, "begin") == 0 &&
+                (q + 5 >= lc.size() ||
+                 !(std::isalnum((unsigned char)lc[q + 5]) || lc[q + 5] == '_'))) {
+                for (size_t k = p; k < e; k++) src[k] = ' ';
+            }
+        }
+        p = e;
+    }
+}
+
 // Inline EXTERNAL CLASS Name declarations by prepending the referenced file's
 // content (with EXTERNAL line replaced by an empty statement). Only handles the
 // simple form "EXTERNAL CLASS Name;" at file scope.
 static std::string preprocessExternals(const std::string& source,
                                        const fs::path& srcDir) {
     std::string out;
+    std::vector<std::string> inlinedClasses;
     out.reserve(source.size());
     size_t i = 0;
     auto skipSpaces = [&](size_t pos) {
@@ -179,6 +203,7 @@ static std::string preprocessExternals(const std::string& source,
                             out += "\n";
                             out += extracted;
                             out += "\n";
+                            inlinedClasses.push_back(className);
                             i = p + 1;
                             continue;
                         }
@@ -188,6 +213,7 @@ static std::string preprocessExternals(const std::string& source,
         }
         out += source[i++];
     }
+    for (auto& n : inlinedClasses) blankPrefixUse(out, n);
     return out;
 }
 

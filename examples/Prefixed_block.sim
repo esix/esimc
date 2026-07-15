@@ -1,0 +1,15 @@
+! A class-prefixed block: the block body runs connected to a fresh instance
+! of the prefix class, so its attributes and procedures are directly visible. ;
+BEGIN
+  CLASS counter;
+  BEGIN
+    INTEGER n;
+    PROCEDURE add(k); INTEGER k; n := n + k;
+    INTEGER PROCEDURE total; total := n;
+  END;
+
+  counter BEGIN
+    add(3); add(4);
+    OUTINT(total, 3); OUTIMAGE
+  END
+END.
