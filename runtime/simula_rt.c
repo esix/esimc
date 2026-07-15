@@ -24,13 +24,15 @@
 struct SimulaCoro {
     void* fiber;
     void* caller_fiber;
-    int state;  /* 0=new, 1=running, 2=detached, 3=terminated */
+    int state;      /* 0=new, 1=running, 2=detached, 3=terminated */
+    int via_resume; /* 1 = operating via RESUME; 0 = attached (NEW/CALL) */
 };
 
 static void (*_pending_func)(void*);
 static void* _pending_arg;
 static SimulaCoro* _pending_coro;
 static SimulaCoro* _coro_current = NULL;  /* currently running coroutine; NULL = main */
+static void* _main_fiber = NULL;          /* the main program's fiber */
 
 static VOID CALLBACK coro_fiber_proc(LPVOID param) {
     void (*func)(void*) = _pending_func;
@@ -40,7 +42,12 @@ static VOID CALLBACK coro_fiber_proc(LPVOID param) {
     func(arg);
 
     self->state = 3;
-    SwitchToFiber(self->caller_fiber);
+    /* Attached operation returns to the attacher; a component operating via
+     * RESUME terminates into the main program. */
+    if (self->via_resume && _main_fiber)
+        SwitchToFiber(_main_fiber);
+    else
+        SwitchToFiber(self->caller_fiber);
     /* never reached */
 }
 
@@ -65,14 +72,19 @@ void simula_coro_start(SimulaCoro* coro, void (*func)(void*), void* arg) {
     coro->caller_fiber = this_fiber;
     SimulaCoro* prev = _coro_current;
     coro->state = 1;
+    coro->via_resume = 0;  /* initial operation is ATTACHED to the creator */
     _coro_current = coro;
+    if (prev == NULL) _main_fiber = this_fiber;
     SwitchToFiber(coro->fiber);
     _coro_current = prev;
 }
 
 void simula_coro_detach(SimulaCoro* coro) {
     coro->state = 2;
-    SwitchToFiber(coro->caller_fiber);
+    if (coro->via_resume && _main_fiber)
+        SwitchToFiber(_main_fiber);
+    else
+        SwitchToFiber(coro->caller_fiber);
 }
 
 void simula_coro_resume(SimulaCoro* coro) {
@@ -87,13 +99,16 @@ void simula_coro_resume(SimulaCoro* coro) {
     }
     SimulaCoro* prev = _coro_current;
     coro->state = 1;
+    coro->via_resume = 1;
     _coro_current = coro;
     if (prev == NULL) {
-        // Main program resuming a coroutine (unchanged behavior).
+        // Main program resuming a coroutine.
         coro->caller_fiber = GetCurrentFiber();
+        _main_fiber = coro->caller_fiber;
     } else {
         // A coroutine resuming another: the resumer becomes detached so it can
-        // be resumed back (symmetric transfer); its DETACH target is unchanged.
+        // be resumed back (symmetric transfer). The resumed component's
+        // DETACH/termination goes to the main fiber, not back here.
         prev->state = 2;
     }
     SwitchToFiber(coro->fiber);
@@ -114,8 +129,10 @@ void simula_coro_call(SimulaCoro* coro) {
     }
     SimulaCoro* prev = _coro_current;
     coro->state = 1;
+    coro->via_resume = 0;  /* CALL attaches: DETACH/termination returns here */
     _coro_current = coro;
     coro->caller_fiber = GetCurrentFiber();
+    if (prev == NULL) _main_fiber = coro->caller_fiber;
     SwitchToFiber(coro->fiber);
     _coro_current = prev;
 }
@@ -141,13 +158,21 @@ struct SimulaCoro {
     ucontext_t context;
     ucontext_t caller_ctx;
     char* stack;
-    int state;  /* 0=new, 1=running, 2=detached, 3=terminated */
+    int state;      /* 0=new, 1=running, 2=detached, 3=terminated */
+    int via_resume; /* 1 = operating as a detached component (RESUME);
+                       0 = attached (initial operation at NEW, or CALL) */
 };
 
 static void (*_pending_func)(void*);
 static void* _pending_arg;
 static SimulaCoro* _pending_coro;
 static SimulaCoro* _coro_current = NULL;  /* currently running coroutine; NULL = main */
+/* The main program's most recent suspension point. Every time main transfers
+ * control away (NEW / RESUME / CALL), it saves its context somewhere; this
+ * points at that save. A detached component's DETACH or termination transfers
+ * HERE (Simula: control passes to the main program), never back into a stale
+ * frame of whoever resumed it. */
+static ucontext_t* _main_react = NULL;
 
 static void coro_trampoline(void) {
     void (*func)(void*) = _pending_func;
@@ -157,6 +182,10 @@ static void coro_trampoline(void) {
     func(arg);
 
     self->state = 3;
+    /* Attached operation returns to the attacher; a component operating via
+     * RESUME terminates into the main program's reactivation point. */
+    if (self->via_resume && _main_react)
+        setcontext(_main_react);
     setcontext(&self->caller_ctx);
 }
 
@@ -181,14 +210,22 @@ void simula_coro_start(SimulaCoro* coro, void (*func)(void*), void* arg) {
 
     SimulaCoro* prev = _coro_current;
     coro->state = 1;
+    coro->via_resume = 0;  /* initial operation is ATTACHED to the creator */
     _coro_current = coro;
+    if (prev == NULL) _main_react = &coro->caller_ctx;
     swapcontext(&coro->caller_ctx, &coro->context);
     _coro_current = prev;
 }
 
 void simula_coro_detach(SimulaCoro* coro) {
     coro->state = 2;
-    swapcontext(&coro->context, &coro->caller_ctx);
+    /* Detaching while attached returns to the attacher. Detaching while
+     * operating via RESUME suspends this component and transfers to the main
+     * program's current reactivation point. */
+    if (coro->via_resume && _main_react)
+        swapcontext(&coro->context, _main_react);
+    else
+        swapcontext(&coro->context, &coro->caller_ctx);
 }
 
 void simula_coro_resume(SimulaCoro* coro) {
@@ -203,15 +240,16 @@ void simula_coro_resume(SimulaCoro* coro) {
     }
     SimulaCoro* prev = _coro_current;
     coro->state = 1;
+    coro->via_resume = 1;
     _coro_current = coro;
     if (prev == NULL) {
-        // Main program resuming a coroutine: control returns here on DETACH
-        // (unchanged behavior; the SIMULATION scheduler relies on it).
+        // Main program resuming a coroutine: main's reactivation point is here.
+        _main_react = &coro->caller_ctx;
         swapcontext(&coro->caller_ctx, &coro->context);
     } else {
         // A coroutine resuming another: the resumer becomes detached so it can
-        // be resumed back (Simula RESUME is a symmetric transfer). Its DETACH
-        // target (caller_ctx) is left pointing at its own main program.
+        // be resumed back (Simula RESUME is a symmetric transfer). The resumed
+        // component's DETACH/termination goes to _main_react, not back here.
         prev->state = 2;
         swapcontext(&prev->context, &coro->context);
     }
@@ -234,7 +272,9 @@ void simula_coro_call(SimulaCoro* coro) {
     }
     SimulaCoro* prev = _coro_current;
     coro->state = 1;
+    coro->via_resume = 0;  /* CALL attaches: DETACH/termination returns here */
     _coro_current = coro;
+    if (prev == NULL) _main_react = &coro->caller_ctx;
     swapcontext(&coro->caller_ctx, &coro->context);
     _coro_current = prev;
 }
@@ -272,6 +312,16 @@ void* simula_alloc(int64_t size) {
  * prints a source-located diagnostic and aborts. A line of 0 means the
  * front-end had no location for the site, so the line is omitted.
  * ================================================================ */
+
+void simula_qua_error(int64_t line) {
+    /* X QUA C where X's class is neither C nor prefixed by C. */
+    if (line > 0)
+        fprintf(stderr, "Runtime error at line %ld: QUA qualification error "
+                "(object is not of the target class)\n", (long)line);
+    else
+        fprintf(stderr, "Runtime error: QUA qualification error\n");
+    exit(1);
+}
 
 void simula_expi_error(int64_t line) {
     /* Simula 3.5: integer**integer (EXPI) is undefined for a negative exponent
@@ -407,13 +457,16 @@ SimulaText* simula_text_strip(SimulaText* s) {
 
 /* SUB(start,len) with 1-based start; aliases the parent frame (no copy). */
 SimulaText* simula_text_sub(SimulaText* s, int64_t start, int64_t len) {
+    /* Standard: T.SUB(i,n) requires i >= 1, n >= 0 and i+n-1 <= T.LENGTH. */
+    int64_t tlen = s ? s->length : 0;
+    if (start < 1 || len < 0 || start - 1 + len > tlen) {
+        fprintf(stderr,
+                "Runtime error: SUB(%ld,%ld) out of range for text length %ld\n",
+                (long)start, (long)len, (long)tlen);
+        exit(1);
+    }
     if (s == NULL) return st_fresh(0);
-    int64_t idx = start - 1;
-    if (idx < 0) idx = 0;
-    if (idx > s->length) idx = s->length;
-    if (len < 0) len = 0;
-    if (idx + len > s->length) len = s->length - idx;
-    return st_new(s->frame, s->start + idx, len, 0, s->framelen);
+    return st_new(s->frame, s->start + (start - 1), len, 0, s->framelen);
 }
 
 /* MAIN: the whole underlying frame (per the standard, the main text). */

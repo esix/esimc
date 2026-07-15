@@ -1,0 +1,16 @@
+! Coroutine chains: a component operating via RESUME that detaches or
+! terminates passes control to the MAIN program, not to its resumer. ;
+BEGIN
+  CLASS worker(id); INTEGER id;
+  BEGIN
+    OUTINT(id, 3); DETACH;
+    OUTINT(id + 10, 3);
+    IF id = 1 THEN BEGIN RESUME(other); OUTINT(99, 3) END;
+    IF id = 2 THEN BEGIN DETACH; OUTINT(88, 3) END
+  END;
+  REF(worker) a, other;
+  a :- NEW worker(1);
+  other :- NEW worker(2);
+  RESUME(a);
+  OUTTEXT(" m"); OUTIMAGE
+END.
