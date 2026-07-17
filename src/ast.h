@@ -477,6 +477,25 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
+// General FOR statement: an ordered list of for-list elements driving one
+// controlled variable (Simula 4.4). Elements may freely mix plain values,
+// "value WHILE cond", and "A1 STEP A2 UNTIL A3" ranges.
+class ForGeneralStatement : public Statement {
+public:
+    struct Element {
+        int kind;            // 0 = value, 1 = value WHILE cond, 2 = step-until
+        ExprPtr value;       // the value / A1
+        ExprPtr cond;        // kind 1: WHILE condition
+        ExprPtr step, limit; // kind 2
+    };
+    std::string var;
+    std::vector<Element> elements;
+    StmtPtr body;
+    ForGeneralStatement(std::string v, std::vector<Element> els, StmtPtr b)
+        : var(std::move(v)), elements(std::move(els)), body(std::move(b)) {}
+    llvm::Value* codegen(CodeGenContext& context) override;
+};
+
 // PROCEDURE name(params); body
 class ProcedureDecl : public Statement {
 public:

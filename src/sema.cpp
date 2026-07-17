@@ -209,6 +209,7 @@ void SemanticAnalyzer::collectClasses(Statement* s) {
     if (auto* f = dynamic_cast<ForStatement*>(s)) { collectClasses(f->body.get()); return; }
     if (auto* f = dynamic_cast<ForListStatement*>(s)) { collectClasses(f->body.get()); return; }
     if (auto* f = dynamic_cast<ForMultiRangeStatement*>(s)) { collectClasses(f->body.get()); return; }
+    if (auto* f = dynamic_cast<ForGeneralStatement*>(s)) { collectClasses(f->body.get()); return; }
     if (auto* l = dynamic_cast<LabeledStatement*>(s)) { collectClasses(l->statement.get()); return; }
     if (auto* in = dynamic_cast<InspectStatement*>(s)) {
         for (auto& wc : in->whenClauses) collectClasses(wc.body.get());
@@ -356,6 +357,14 @@ void SemanticAnalyzer::checkStmt(Statement* s) {
     }
     if (auto* f = dynamic_cast<ForMultiRangeStatement*>(s)) {
         for (auto& r : f->ranges) { checkExpr(r.start.get()); checkExpr(r.step.get()); checkExpr(r.limit.get()); }
+        checkStmt(f->body.get());
+        return;
+    }
+    if (auto* f = dynamic_cast<ForGeneralStatement*>(s)) {
+        for (auto& e : f->elements) {
+            checkExpr(e.value.get()); checkExpr(e.cond.get());
+            checkExpr(e.step.get()); checkExpr(e.limit.get());
+        }
         checkStmt(f->body.get());
         return;
     }

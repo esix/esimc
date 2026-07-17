@@ -214,21 +214,24 @@ static Statement* lowerAssign(Expression* lhs, Expression* rhs) {
     delete rhs; delete lhs; return new CompoundStmt(StmtList());
 }
 
-/* Desugar a class-prefixed block  C BEGIN ... END  into
-     BEGIN REF(C) __pbN; __pbN :- NEW C; INSPECT __pbN DO <block> END
-   The prefix object is created (running C's body statements), then the block
-   body executes connected to it, so C's attributes are directly visible.
-   Exact for prefix classes with no statements after INNER. */
-static Statement* makePrefixedBlock(const std::string& cls, Statement* blk) {
+/* Desugar a class-prefixed block  C(args) BEGIN ... END  per Simula 4.10.3:
+   an instance of an anonymous subclass of the prefix whose body is the block.
+   The prefix body's statements run around the block statements at its INNER
+   point, block-local declarations become attributes, and the prefix's class
+   parameters are bound from the block-prefix actuals. */
+static Statement* makePrefixedBlock(const std::string& cls, Statement* blk,
+                                    ExprList* args = nullptr) {
     static int pbCounter = 0;
-    std::string tmp = "__pb" + std::to_string(pbCounter++);
+    std::string sub = "__pb" + std::to_string(pbCounter++) + "blk";
+    StmtList body;
+    body.push_back(StmtPtr(blk));
+    auto* cd = new ClassDecl(sub, cls, std::vector<ParamSpec>(), std::move(body));
     StmtList stmts;
-    stmts.push_back(StmtPtr(new RefDeclaration(cls, tmp)));
-    stmts.push_back(StmtPtr(new RefAssignment(tmp,
-        ExprPtr(new NewExpression(cls, ExprList())))));
-    stmts.push_back(StmtPtr(new InspectStatement(
-        ExprPtr(new Identifier(tmp)),
-        std::vector<InspectStatement::WhenClause>(), StmtPtr(blk))));
+    stmts.push_back(StmtPtr(cd));
+    ExprList actuals;
+    if (args) actuals = std::move(*args);
+    stmts.push_back(StmtPtr(new ExprStatement(
+        ExprPtr(new NewExpression(sub, std::move(actuals))))));
     return new Block(std::move(stmts));
 }
 %}
@@ -250,6 +253,8 @@ static Statement* makePrefixedBlock(const std::string& cls, Statement* blk) {
     int vartype;
     std::pair<std::string, int>* ventry;
     std::vector<std::pair<std::string, int>>* ventries;
+    ForGeneralStatement::Element* forel;
+    std::vector<ForGeneralStatement::Element>* forels;
 }
 
 /* Keywords */
@@ -290,6 +295,8 @@ static Statement* makePrefixedBlock(const std::string& cls, Statement* blk) {
 %type <stmt> declaration array_decl ref_declaration
 %type <stmt> label_decl labeled_stmt goto_stmt switch_decl
 %type <stmt> if_stmt while_stmt for_stmt
+%type <forel> for_element
+%type <forels> for_list_els
 %type <stmt> procedure_decl class_decl
 %type <stmt> inspect_stmt
 %type <stmt> detach_stmt resume_stmt call_stmt activate_stmt
@@ -369,6 +376,16 @@ program
         stmts->push_back(StmtPtr(makePrefixedBlock($1, $2)));
         programRoot = new Program(StmtPtr(new Block(std::move(*stmts))));
         delete stmts;
+      }
+    | top_level_decls T_IDENT T_LPAREN arg_list T_RPAREN block {
+        $1->push_back(StmtPtr(makePrefixedBlock($2, $6, $4)));
+        programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
+        delete $1; delete $4;
+      }
+    | top_level_decls T_IDENT T_LPAREN arg_list T_RPAREN block T_DOT {
+        $1->push_back(StmtPtr(makePrefixedBlock($2, $6, $4)));
+        programRoot = new Program(StmtPtr(new Block(std::move(*$1))));
+        delete $1; delete $4;
       }
     ;
 
@@ -462,6 +479,11 @@ statement
     | T_IDENT block {
         /* class-prefixed block as a statement: C BEGIN ... END */
         $$ = makePrefixedBlock($1, $2);
+      }
+    | T_IDENT T_LPAREN arg_list T_RPAREN block {
+        /* parameterized class-prefixed block: C(args) BEGIN ... END */
+        $$ = makePrefixedBlock($1, $5, $3);
+        delete $3;
       }
     | expr_stmt
     ;
@@ -781,21 +803,61 @@ while_stmt
     ;
 
 for_stmt
-    : T_FOR T_IDENT T_ASSIGN expr T_STEP expr T_UNTIL expr T_DO statement {
-        $$ = new ForStatement($2, ExprPtr($4), ExprPtr($6),
-                              ExprPtr($8), StmtPtr($10));
-      }
-    | T_FOR T_IDENT T_ASSIGN expr T_STEP expr T_UNTIL expr T_COMMA expr T_STEP expr T_UNTIL expr T_DO statement {
-        /* FOR var := r1, r2 DO body — multi-range form (2 ranges) */
-        std::vector<ForMultiRangeStatement::Range> ranges;
-        ranges.push_back({ExprPtr($4), ExprPtr($6), ExprPtr($8)});
-        ranges.push_back({ExprPtr($10), ExprPtr($12), ExprPtr($14)});
-        $$ = new ForMultiRangeStatement($2, std::move(ranges), StmtPtr($16));
-      }
-    | T_FOR T_IDENT T_ASSIGN arg_list_ne T_DO statement {
-        /* FOR var := expr, expr, ... DO body — value list form */
-        $$ = new ForListStatement($2, std::move(*$4), StmtPtr($6));
+    : T_FOR T_IDENT T_ASSIGN for_list_els T_DO statement {
+        /* General for-list (Simula 4.4): any mixture of value, value WHILE
+           cond, and STEP-UNTIL elements. Pure shapes lower to the specialized
+           legacy nodes; mixtures and WHILE elements use ForGeneralStatement. */
+        auto& els = *$4;
+        bool allValue = true, allStep = true;
+        for (auto& e : els) {
+            if (e.kind != 0) allValue = false;
+            if (e.kind != 2) allStep = false;
+        }
+        if (els.size() == 1 && els[0].kind == 2) {
+            $$ = new ForStatement($2, std::move(els[0].value),
+                                  std::move(els[0].step),
+                                  std::move(els[0].limit), StmtPtr($6));
+        } else if (allValue) {
+            ExprList vals;
+            for (auto& e : els) vals.push_back(std::move(e.value));
+            $$ = new ForListStatement($2, std::move(vals), StmtPtr($6));
+        } else if (allStep) {
+            std::vector<ForMultiRangeStatement::Range> ranges;
+            for (auto& e : els)
+                ranges.push_back({std::move(e.value), std::move(e.step),
+                                  std::move(e.limit)});
+            $$ = new ForMultiRangeStatement($2, std::move(ranges), StmtPtr($6));
+        } else {
+            $$ = new ForGeneralStatement($2, std::move(els), StmtPtr($6));
+        }
         delete $4;
+      }
+    ;
+
+for_list_els
+    : for_element {
+        $$ = new std::vector<ForGeneralStatement::Element>();
+        $$->push_back(std::move(*$1)); delete $1;
+      }
+    | for_list_els T_COMMA for_element {
+        $1->push_back(std::move(*$3)); delete $3;
+        $$ = $1;
+      }
+    ;
+
+for_element
+    : expr {
+        $$ = new ForGeneralStatement::Element();
+        $$->kind = 0; $$->value = ExprPtr($1);
+      }
+    | expr T_WHILE expr {
+        $$ = new ForGeneralStatement::Element();
+        $$->kind = 1; $$->value = ExprPtr($1); $$->cond = ExprPtr($3);
+      }
+    | expr T_STEP expr T_UNTIL expr {
+        $$ = new ForGeneralStatement::Element();
+        $$->kind = 2; $$->value = ExprPtr($1); $$->step = ExprPtr($3);
+        $$->limit = ExprPtr($5);
       }
     ;
 
