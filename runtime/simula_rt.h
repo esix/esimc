@@ -31,6 +31,7 @@ void* simula_alloc(int64_t size);
 SimulaText* simula_upcase(SimulaText* t);
 SimulaText* simula_lowcase(SimulaText* t);
 
+void simula_math_error(int64_t code, int64_t line);
 void simula_qua_error(int64_t line);
 void simula_expi_error(int64_t line);
 void simula_div_zero(int64_t line);
@@ -61,6 +62,8 @@ void    simula_outtext(SimulaText* s);                   /* write window to stdo
 /* SYSIN LASTITEM: skip whitespace and report whether end-of-file was reached
  * (look-ahead; the next non-blank char is pushed back so a later read sees it). */
 int64_t simula_lastitem(void);
+int64_t simula_inchar(void);   /* EOF yields the EM character (rank 25) */
+double simula_inreal(void);    /* accepts '&' as the lowten exponent mark */
 
 /* Numeric helpers */
 int64_t simula_ipow(int64_t base, int64_t exp);

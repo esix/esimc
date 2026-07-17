@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <math.h>
 
 /* ================================================================
  * Platform-specific coroutine backends
@@ -318,6 +319,21 @@ void* simula_alloc(int64_t size) {
  * front-end had no location for the site, so the line is omitted.
  * ================================================================ */
 
+void simula_math_error(int64_t code, int64_t line) {
+    const char* what =
+        code == 1 ? "SQRT of a negative argument" :
+        code == 2 ? "logarithm of a non-positive argument" :
+        code == 3 ? "EXP argument too large" :
+        code == 4 ? "** undefined for these operands (zero or negative base)" :
+        code == 5 ? "REAL value out of INTEGER range in conversion" :
+                    "arithmetic domain error";
+    if (line > 0)
+        fprintf(stderr, "Runtime error at line %ld: %s\n", (long)line, what);
+    else
+        fprintf(stderr, "Runtime error: %s\n", what);
+    exit(1);
+}
+
 void simula_qua_error(int64_t line) {
     /* X QUA C where X's class is neither C nor prefixed by C. */
     if (line > 0)
@@ -332,10 +348,10 @@ void simula_expi_error(int64_t line) {
     /* Simula 3.5: integer**integer (EXPI) is undefined for a negative exponent
        (use a real base, e.g. 2.0 ** -3, for the reciprocal form). */
     if (line > 0)
-        fprintf(stderr, "Runtime error at line %ld: integer ** negative exponent "
-                "(use a REAL base)\n", (long)line);
+        fprintf(stderr, "Runtime error at line %ld: integer ** undefined here "
+                "(negative exponent or 0**0; use a REAL base)\n", (long)line);
     else
-        fprintf(stderr, "Runtime error: integer ** negative exponent (use a REAL base)\n");
+        fprintf(stderr, "Runtime error: integer ** undefined here (negative exponent or 0**0)\n");
     exit(1);
 }
 
@@ -710,6 +726,15 @@ static void edit_into(char* base, int64_t width, const char* src) {
 }
 
 /* Build the grouped PUTFRAC/OUTFRAC string into `out`. */
+/* Simula rounding is ties AWAY FROM ZERO; C's printf rounds ties to even.
+ * Pre-round to d decimals so 0.125 -> 0.13, not 0.12. */
+static double round_away(double v, int64_t d) {
+    double s = pow(10.0, (double)d);
+    double x = v * s;
+    if (x >= 9.007199254740992e15 || x <= -9.007199254740992e15) return v;
+    return copysign(floor(fabs(x) + 0.5), v) / s;
+}
+
 static void frac_to_str(int64_t v, int64_t d, char* out) {
     char digits[32];
     int neg = v < 0;
@@ -730,7 +755,11 @@ static void frac_to_str(int64_t v, int64_t d, char* out) {
     }
     if (d > 0 && j < 60) {
         out[j++] = '.';
-        for (int i = intDigits; i < n && j < 62; i++) out[j++] = digits[i];
+        /* Grouped item: fraction digits are also grouped three by three. */
+        for (int i = intDigits; i < n && j < 62; i++) {
+            if (i > intDigits && (i - intDigits) % 3 == 0) out[j++] = ' ';
+            out[j++] = digits[i];
+        }
     }
     out[j] = '\0';
 }
@@ -750,7 +779,7 @@ void simula_text_putfix(SimulaText* t, double r, int64_t d) {
     if (t == NULL) return;
     char buf[64];
     if (d < 0) d = 0;
-    snprintf(buf, sizeof buf, "%.*f", (int)d, r);
+    snprintf(buf, sizeof buf, "%.*f", (int)d, round_away(r, d));
     edit_into(t->frame + t->start, t->length, buf);
     t->pos = t->length;
 }
@@ -870,7 +899,7 @@ void simula_outreal(double v, int64_t d, int64_t w) {
 void simula_outfix(double v, int64_t d, int64_t w) {
     char buf[64];
     if (d < 0) d = 0;
-    snprintf(buf, sizeof buf, "%.*f", (int)d, v);
+    snprintf(buf, sizeof buf, "%.*f", (int)d, round_away(v, d));
     int n = (int)strlen(buf);
     if (w <= 0) { fputs(buf, stdout); return; }
     if (n > w) { for (int64_t i = 0; i < w; i++) putchar('*'); return; }
@@ -886,6 +915,31 @@ void simula_outfrac(int64_t v, int64_t d, int64_t w) {
     char frame[64];
     edit_into(frame, width, out);
     fwrite(frame, 1, (size_t)width, stdout);
+}
+
+/* INCHAR: next character from SYSIN; at end of file the standard's image is
+ * filled with the EM character (ISO rank 25). */
+int64_t simula_inchar(void) {
+    int c = getchar();
+    return c == EOF ? 25 : c;
+}
+
+/* INREAL: read a real item from SYSIN. Accepts the lowten character '&' as
+ * the exponent mark (the same mark OUTREAL emits), as well as e/E. */
+double simula_inreal(void) {
+    int c;
+    while ((c = getchar()) != EOF &&
+           (c == ' ' || c == '\t' || c == '\n' || c == '\r'));
+    char buf[64]; size_t j = 0;
+    while (c != EOF && j < 62 &&
+           ((c >= '0' && c <= '9') || c == '.' || c == '+' || c == '-' ||
+            c == 'e' || c == 'E' || c == '&')) {
+        buf[j++] = (char)(c == '&' ? 'e' : c);
+        c = getchar();
+    }
+    if (c != EOF) ungetc(c, stdin);
+    buf[j] = '\0';
+    return strtod(buf, NULL);
 }
 
 /* INFRAC: read a grouped item from stdin (digits with embedded blanks
@@ -1113,11 +1167,15 @@ double simula_sim_evtime(void* obj) {
     for (SimNotice* n = sim_sqs; n; n = n->next)
         if (n->obj == obj) return n->evtime;
     if (obj == sim_current_obj) return sim_time_v;
-    return 0.0;
+    fprintf(stderr, "Runtime error: EVTIME of an idle process (no event notice)\n");
+    exit(1);
 }
 
 void simula_sim_cancel(void* obj) {
-    if (obj != NULL) sim_remove_notice(obj);
+    if (obj == NULL) return;
+    /* Standard: cancel(current) is passivate. */
+    if (obj == sim_current_obj) { simula_sim_passivate(); return; }
+    sim_remove_notice(obj);
 }
 
 /* ACTIVATE: schedule only if idle. REACTIVATE: always re-schedule. */
@@ -1145,7 +1203,15 @@ void simula_sim_activate_rel(void* obj, void* other, int64_t before,
     SimNotice* on = NULL;
     for (SimNotice* n = sim_sqs; n; n = n->next)
         if (n->obj == other) { on = n; break; }
-    if (on == NULL) return;  /* other idle: no effect (standard) */
+    if (on == NULL) {
+        /* Other is idle: plain ACTIVATE has no effect; REACTIVATE removes X's
+           event notice, leaving X passive (standard ACTIVAT: EVENT :- none). */
+        if (reactivate) {
+            sim_remove_notice(obj);
+            if (is_self) simula_coro_detach(sim_coro_of(obj));
+        }
+        return;
+    }
     if (sim_has_notice(obj) || is_self) {
         if (!reactivate) return;
         sim_remove_notice(obj);
