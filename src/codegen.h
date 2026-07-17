@@ -293,6 +293,9 @@ public:
     llvm::Value* emitNameThunkGet(const std::string& name, llvm::Type* type);
     // Emit a call to the thunk's setfn, propagating `val` to the actual's lvalue.
     void emitNameThunkSet(const std::string& name, llvm::Value* val);
+    // Re-evaluate a NAME TEXT formal's actual into its shadow slot (call-by-name
+    // for descriptor accesses that go through getVarPtr rather than Identifier).
+    void refreshNameText(const std::string& name);
     // Compute the address of an array element a(i[,j]) using current bounds.
     llvm::Value* emitArrayElemAddr(const ArrayInfo& ainfo, const std::string& name,
                                    const std::vector<std::unique_ptr<Expression>>& idxArgs);
