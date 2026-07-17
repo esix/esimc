@@ -438,88 +438,76 @@ static void maybeInjectInfile(Program* prog, const std::string& source) {
 // SIMSET prelude source: defines LINK and HEAD doubly-linked-list classes.
 // Injected verbatim when source starts with "SIMSET" or uses LINK/HEAD.
 static const char* SIMSET_PRELUDE = R"SIMSET(
-CLASS LINK;
+COMMENT Standard SIMSET: LINKAGE with siblings HEAD and LINK, lists as a
+        circular two-way ring in which the head is itself a ring node. The
+        ishead_ marker replaces the standard's "SUC IN LINK" test so LINKAGE
+        need not forward-reference LINK. ;
+CLASS LINKAGE;
 BEGIN
-    REF(LINK) suc_; REF(LINK) pred_; REF(HEAD) prev_;
+    REF(LINKAGE) suc_, pred_;
+    BOOLEAN ishead_;
 
-    REF(LINK) PROCEDURE SUC;   SUC   :- suc_;
-    REF(LINK) PROCEDURE PRED;  PRED  :- pred_;
+    REF(LINK) PROCEDURE SUC;
+        IF suc_ =/= NONE AND THEN (NOT suc_.ishead_) THEN SUC :- suc_;
 
+    REF(LINK) PROCEDURE PRED;
+        IF pred_ =/= NONE AND THEN (NOT pred_.ishead_) THEN PRED :- pred_;
+
+    REF(LINKAGE) PROCEDURE PREV; PREV :- pred_;
+END LINKAGE;
+
+LINKAGE CLASS HEAD;
+BEGIN
+    REF(LINK) PROCEDURE FIRST; FIRST :- SUC;
+    REF(LINK) PROCEDURE LAST;  LAST  :- PRED;
+
+    BOOLEAN PROCEDURE EMPTY; EMPTY := suc_ == THIS HEAD;
+
+    INTEGER PROCEDURE CARDINAL;
+    BEGIN
+        INTEGER i; REF(LINKAGE) p;
+        p :- suc_;
+        WHILE p =/= THIS HEAD DO BEGIN i := i + 1; p :- p.suc_ END;
+        CARDINAL := i;
+    END CARDINAL;
+
+    PROCEDURE CLEAR; WHILE FIRST =/= NONE DO FIRST.OUT;
+
+    ishead_ := TRUE;
+    suc_ :- THIS HEAD; pred_ :- THIS HEAD;
+END HEAD;
+
+LINKAGE CLASS LINK;
+BEGIN
     PROCEDURE OUT;
-    BEGIN
-        IF prev_ == NONE THEN GOTO link_out_done;
-        IF pred_ =/= NONE THEN pred_.suc_  :- suc_
-                          ELSE prev_.fst_  :- suc_;
-        IF suc_  =/= NONE THEN suc_.pred_  :- pred_
-                          ELSE prev_.lst_  :- pred_;
-        prev_.n_ := prev_.n_ - 1;
-        prev_ :- NONE; suc_ :- NONE; pred_ :- NONE;
-        link_out_done:
-    END OUT;
+        IF suc_ =/= NONE THEN
+        BEGIN
+            suc_.pred_ :- pred_; pred_.suc_ :- suc_;
+            suc_ :- NONE; pred_ :- NONE;
+        END;
 
-    PROCEDURE INTO(S); REF(HEAD) S;
+    PROCEDURE FOLLOW(X); REF(LINKAGE) X;
     BEGIN
         OUT;
-        prev_ :- S;
-        pred_ :- S.lst_;
-        suc_  :- NONE;
-        IF S.lst_ =/= NONE THEN S.lst_.suc_ :- THIS LINK
-                           ELSE S.fst_       :- THIS LINK;
-        S.lst_ :- THIS LINK;
-        S.n_ := S.n_ + 1;
-    END INTO;
+        IF X =/= NONE AND THEN X.suc_ =/= NONE THEN
+        BEGIN
+            pred_ :- X; suc_ :- X.suc_;
+            suc_.pred_ :- THIS LINK; X.suc_ :- THIS LINK;
+        END;
+    END FOLLOW;
 
-    PROCEDURE PRECEDE(X); REF(LINK) X;
+    PROCEDURE PRECEDE(X); REF(LINKAGE) X;
     BEGIN
         OUT;
-        IF X == NONE OR ELSE X.prev_ == NONE THEN GOTO prec_done;
-        prev_  :- X.prev_;
-        suc_   :- X;
-        pred_  :- X.pred_;
-        IF X.pred_ =/= NONE THEN X.pred_.suc_ :- THIS LINK
-                            ELSE X.prev_.fst_  :- THIS LINK;
-        X.pred_ :- THIS LINK;
-        X.prev_.n_ := X.prev_.n_ + 1;
-        prec_done:
+        IF X =/= NONE AND THEN X.suc_ =/= NONE THEN
+        BEGIN
+            suc_ :- X; pred_ :- X.pred_;
+            pred_.suc_ :- THIS LINK; X.pred_ :- THIS LINK;
+        END;
     END PRECEDE;
 
-    PROCEDURE FOLLOW(X); REF(LINK) X;
-    BEGIN
-        OUT;
-        IF X == NONE OR ELSE X.prev_ == NONE THEN GOTO foll_done;
-        prev_  :- X.prev_;
-        pred_  :- X;
-        suc_   :- X.suc_;
-        IF X.suc_ =/= NONE THEN X.suc_.pred_ :- THIS LINK
-                           ELSE X.prev_.lst_  :- THIS LINK;
-        X.suc_ :- THIS LINK;
-        X.prev_.n_ := X.prev_.n_ + 1;
-        foll_done:
-    END FOLLOW;
+    PROCEDURE INTO(S); REF(HEAD) S; PRECEDE(S);
 END LINK;
-
-LINK CLASS HEAD;
-BEGIN
-    REF(LINK) PROCEDURE FIRST;   FIRST   :- fst_;
-    REF(LINK) PROCEDURE LAST;    LAST    :- lst_;
-    INTEGER   PROCEDURE CARDINAL; CARDINAL := n_;
-    BOOLEAN   PROCEDURE EMPTY;   EMPTY   := fst_ == NONE;
-
-    PROCEDURE CLEAR;
-    BEGIN
-        REF(LINK) L, NXT;
-        L :- fst_;
-        WHILE L =/= NONE DO
-        BEGIN
-            NXT :- L.suc_;
-            L.prev_ :- NONE; L.suc_ :- NONE; L.pred_ :- NONE;
-            L :- NXT;
-        END;
-        fst_ :- NONE; lst_ :- NONE; n_ := 0;
-    END CLEAR;
-
-    REF(LINK) fst_; REF(LINK) lst_; INTEGER n_;
-END HEAD;
 )SIMSET";
 
 // PROCESS prelude for SIMULATION: a LINK subclass whose body detaches at

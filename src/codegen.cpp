@@ -1265,6 +1265,17 @@ llvm::Value* CodeGenContext::emitNameThunkGet(const std::string& name, llvm::Typ
     return unpackFromI64(*this, raw, type);
 }
 
+void CodeGenContext::refreshNameText(const std::string& name) {
+    // A NAME TEXT formal must re-evaluate its actual at every access
+    // (call-by-name): reload the shadow slot from the thunk so descriptor
+    // reads see the actual's CURRENT evaluation (e.g. u.SUB(i,2) after the
+    // callee changed i, which must yield a fresh subtext with POS = 1).
+    auto np = nameParams.find(name);
+    if (np == nameParams.end() || !nameThunks.count(name)) return;
+    if (auto v = emitNameThunkGet(name, np->second.second))
+        builder->CreateStore(v, np->second.first);
+}
+
 void CodeGenContext::emitNameThunkSet(const std::string& name, llvm::Value* val) {
     auto it = nameThunks.find(name);
     if (it == nameThunks.end()) return;
@@ -3253,6 +3264,7 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
     // Check for TEXT variable member access first
     if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
         if (ctx.textVars.count(ident->name)) {
+            ctx.refreshNameText(ident->name);
             auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
             auto [varPtr, varTy] = ctx.getVarPtr(ident->name);
             if (!varPtr) {
@@ -3527,6 +3539,7 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
     // Check for TEXT variable method call first
     if (auto* ident = dynamic_cast<Identifier*>(object.get())) {
         if (ctx.textVars.count(ident->name)) {
+            ctx.refreshNameText(ident->name);
             auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
             auto [varPtr, varTy] = ctx.getVarPtr(ident->name);
             if (!varPtr) {
@@ -4671,6 +4684,7 @@ llvm::Value* Assignment::codegen(CodeGenContext& ctx) {
 
     // TEXT variable: := is an in-place character copy, not a pointer rebind.
     if (ctx.textVars.count(name)) {
+        ctx.refreshNameText(name);
         auto [slot, slotTy] = ctx.getVarPtr(name);
         if (slot) {
             auto val = value->codegen(ctx);
@@ -5350,6 +5364,110 @@ llvm::Value* ForMultiRangeStatement::codegen(CodeGenContext& ctx) {
 
         func->insert(func->end(), afterBB);
         ctx.builder->SetInsertPoint(afterBB);
+    }
+    return nullptr;
+}
+
+// General for-list (Simula 4.4): elements execute in order against the same
+// controlled variable. Value elements assign once; "V WHILE B" elements loop
+// assign-test-body until B is false; STEP-UNTIL elements are the classic range.
+// The controlled variable keeps its last assigned value on exit.
+llvm::Value* ForGeneralStatement::codegen(CodeGenContext& ctx) {
+    auto func = ctx.builder->GetInsertBlock()->getParent();
+    auto [varPtr0, varTy0] = ctx.getVarPtr(var);
+    if (!varPtr0) {
+        ctx.errorAt(line) << "FOR variable '" << var << "' not declared\n";
+        return nullptr;
+    }
+    bool isFloat = varTy0->isDoubleTy();
+    auto coerce = [&](llvm::Value* v) -> llvm::Value* {
+        if (!v) return v;
+        if (isFloat && v->getType()->isIntegerTy())
+            return ctx.builder->CreateSIToFP(v, varTy0, "tofp");
+        if (!isFloat && v->getType()->isDoubleTy())
+            return simulaRealToInt(ctx, v, varTy0);
+        return v;
+    };
+    for (auto& el : elements) {
+        auto [varPtr, varTy] = ctx.getVarPtr(var);
+        if (el.kind == 0) {
+            auto v = coerce(el.value->codegen(ctx));
+            if (!v) return nullptr;
+            ctx.builder->CreateStore(v, varPtr);
+            ctx.emitNameThunkSet(var, v);
+            body->codegen(ctx);
+        } else if (el.kind == 1) {
+            auto condBB = llvm::BasicBlock::Create(*ctx.llvmContext, "fwl_cond", func);
+            auto bodyBB = llvm::BasicBlock::Create(*ctx.llvmContext, "fwl_body");
+            auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "fwl_end");
+            ctx.builder->CreateBr(condBB);
+            ctx.builder->SetInsertPoint(condBB);
+            auto v = coerce(el.value->codegen(ctx));
+            if (!v) return nullptr;
+            ctx.builder->CreateStore(v, varPtr);
+            ctx.emitNameThunkSet(var, v);
+            auto condV = el.cond->codegen(ctx);
+            if (!condV) condV = llvm::ConstantInt::getFalse(*ctx.llvmContext);
+            ctx.builder->CreateCondBr(condV, bodyBB, afterBB);
+            func->insert(func->end(), bodyBB);
+            ctx.builder->SetInsertPoint(bodyBB);
+            body->codegen(ctx);
+            if (!ctx.builder->GetInsertBlock()->getTerminator())
+                ctx.builder->CreateBr(condBB);
+            func->insert(func->end(), afterBB);
+            ctx.builder->SetInsertPoint(afterBB);
+        } else {
+            // STEP-UNTIL: same lowering as ForStatement (arithmetic
+            // continuation test (V-C)*sign(B) <= 0, REAL-aware compare).
+            auto startV = coerce(el.value->codegen(ctx));
+            if (!startV) return nullptr;
+            ctx.builder->CreateStore(startV, varPtr);
+            ctx.emitNameThunkSet(var, startV);
+            auto condBB = llvm::BasicBlock::Create(*ctx.llvmContext, "fgs_cond", func);
+            auto bodyBB = llvm::BasicBlock::Create(*ctx.llvmContext, "fgs_body");
+            auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "fgs_end");
+            ctx.builder->CreateBr(condBB);
+            ctx.builder->SetInsertPoint(condBB);
+            auto curVal = ctx.builder->CreateLoad(varTy, varPtr, var);
+            auto limitRaw = el.limit->codegen(ctx);
+            auto stepRaw = el.step->codegen(ctx);
+            if (!limitRaw || !stepRaw) return nullptr;
+            bool cmpFloat = isFloat || limitRaw->getType()->isDoubleTy()
+                                    || stepRaw->getType()->isDoubleTy();
+            llvm::Value *stepNonNeg, *leCond, *geCond;
+            if (cmpFloat) {
+                auto doubleTy = llvm::Type::getDoubleTy(*ctx.llvmContext);
+                auto toD = [&](llvm::Value* v) {
+                    return v->getType()->isDoubleTy() ? v
+                         : ctx.builder->CreateSIToFP(v, doubleTy, "tofp");
+                };
+                auto cur = toD(curVal), lim = toD(limitRaw), stp = toD(stepRaw);
+                auto z = llvm::ConstantFP::get(doubleTy, 0.0);
+                stepNonNeg = ctx.builder->CreateFCmpOGE(stp, z, "fgs_sign");
+                leCond = ctx.builder->CreateFCmpOLE(cur, lim, "fgs_le");
+                geCond = ctx.builder->CreateFCmpOGE(cur, lim, "fgs_ge");
+            } else {
+                auto z = llvm::ConstantInt::get(varTy, 0);
+                stepNonNeg = ctx.builder->CreateICmpSGE(stepRaw, z, "fgs_sign");
+                leCond = ctx.builder->CreateICmpSLE(curVal, limitRaw, "fgs_le");
+                geCond = ctx.builder->CreateICmpSGE(curVal, limitRaw, "fgs_ge");
+            }
+            auto condV = ctx.builder->CreateSelect(stepNonNeg, leCond, geCond, "fgs_cmp");
+            ctx.builder->CreateCondBr(condV, bodyBB, afterBB);
+            func->insert(func->end(), bodyBB);
+            ctx.builder->SetInsertPoint(bodyBB);
+            body->codegen(ctx);
+            auto [varPtr2, varTy2] = ctx.getVarPtr(var);
+            auto curVal2 = ctx.builder->CreateLoad(varTy2, varPtr2, var);
+            auto stepV = coerce(el.step->codegen(ctx));
+            auto nextVal = isFloat ? ctx.builder->CreateFAdd(curVal2, stepV, "fgs_step")
+                                   : ctx.builder->CreateAdd(curVal2, stepV, "fgs_step");
+            ctx.builder->CreateStore(nextVal, varPtr2);
+            ctx.emitNameThunkSet(var, nextVal);
+            ctx.builder->CreateBr(condBB);
+            func->insert(func->end(), afterBB);
+            ctx.builder->SetInsertPoint(afterBB);
+        }
     }
     return nullptr;
 }
@@ -6290,11 +6408,15 @@ llvm::Value* ClassDecl::codegen(CodeGenContext& ctx) {
             if (dynamic_cast<RefDeclaration*>(stmt.get())) continue;
             if (dynamic_cast<InnerStatement*>(stmt.get())) continue;
             if (auto* cs = dynamic_cast<CompoundStmt*>(stmt.get())) {
-                bool allVarDecl = true;
+                // Multi-identifier declarations ("REF(T) a, b", "INTEGER x, y")
+                // are lowered to a CompoundStmt of declarations. They are struct
+                // fields here — executing them would create shadowing locals.
+                bool allDecl = true;
                 for (auto& s : cs->statements) {
-                    if (!dynamic_cast<VarDeclaration*>(s.get())) { allVarDecl = false; break; }
+                    if (!dynamic_cast<VarDeclaration*>(s.get()) &&
+                        !dynamic_cast<RefDeclaration*>(s.get())) { allDecl = false; break; }
                 }
-                if (allVarDecl) continue;
+                if (allDecl) continue;
             }
             if (auto* ad = dynamic_cast<ArrayDeclaration*>(stmt.get())) {
                 ad->codegen(ctx);
