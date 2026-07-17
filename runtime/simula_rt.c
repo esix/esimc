@@ -89,13 +89,12 @@ void simula_coro_detach(SimulaCoro* coro) {
 
 void simula_coro_resume(SimulaCoro* coro) {
     if (coro->state == 3) {
-        fprintf(stderr, "simula_coro_resume: coroutine has terminated\n");
-        return;
+        fprintf(stderr, "Runtime error: RESUME of a terminated object\n");
+        exit(1);
     }
     if (coro->state != 2) {
-        fprintf(stderr, "simula_coro_resume: coroutine is not detached (state=%d)\n",
-                coro->state);
-        return;
+        fprintf(stderr, "Runtime error: RESUME of an object that is not detached\n");
+        exit(1);
     }
     SimulaCoro* prev = _coro_current;
     coro->state = 1;
@@ -105,11 +104,14 @@ void simula_coro_resume(SimulaCoro* coro) {
         // Main program resuming a coroutine.
         coro->caller_fiber = GetCurrentFiber();
         _main_fiber = coro->caller_fiber;
-    } else {
-        // A coroutine resuming another: the resumer becomes detached so it can
-        // be resumed back (symmetric transfer). The resumed component's
-        // DETACH/termination goes to the main fiber, not back here.
+    } else if (prev->via_resume) {
+        // A detached component resuming another: symmetric transfer; the
+        // resumed component's DETACH/termination goes to the main fiber.
         prev->state = 2;
+    } else {
+        // An ATTACHED component executing RESUME suspends the main component;
+        // its reactivation point is this fiber, right after the switch.
+        _main_fiber = prev->fiber;
     }
     SwitchToFiber(coro->fiber);
     _coro_current = prev;
@@ -119,13 +121,12 @@ void simula_coro_resume(SimulaCoro* coro) {
  * version for the full contract). */
 void simula_coro_call(SimulaCoro* coro) {
     if (coro->state == 3) {
-        fprintf(stderr, "simula_coro_call: coroutine has terminated\n");
-        return;
+        fprintf(stderr, "Runtime error: CALL of a terminated object\n");
+        exit(1);
     }
     if (coro->state != 2) {
-        fprintf(stderr, "simula_coro_call: coroutine is not detached (state=%d)\n",
-                coro->state);
-        return;
+        fprintf(stderr, "Runtime error: CALL of an object that is not detached\n");
+        exit(1);
     }
     SimulaCoro* prev = _coro_current;
     coro->state = 1;
@@ -230,13 +231,12 @@ void simula_coro_detach(SimulaCoro* coro) {
 
 void simula_coro_resume(SimulaCoro* coro) {
     if (coro->state == 3) {
-        fprintf(stderr, "simula_coro_resume: coroutine has terminated\n");
-        return;
+        fprintf(stderr, "Runtime error: RESUME of a terminated object\n");
+        exit(1);
     }
     if (coro->state != 2) {
-        fprintf(stderr, "simula_coro_resume: coroutine is not detached (state=%d)\n",
-                coro->state);
-        return;
+        fprintf(stderr, "Runtime error: RESUME of an object that is not detached\n");
+        exit(1);
     }
     SimulaCoro* prev = _coro_current;
     coro->state = 1;
@@ -246,11 +246,17 @@ void simula_coro_resume(SimulaCoro* coro) {
         // Main program resuming a coroutine: main's reactivation point is here.
         _main_react = &coro->caller_ctx;
         swapcontext(&coro->caller_ctx, &coro->context);
-    } else {
-        // A coroutine resuming another: the resumer becomes detached so it can
-        // be resumed back (Simula RESUME is a symmetric transfer). The resumed
-        // component's DETACH/termination goes to _main_react, not back here.
+    } else if (prev->via_resume) {
+        // A detached component resuming another: the resumer becomes detached so
+        // it can be resumed back (Simula RESUME is a symmetric transfer). The
+        // resumed component's DETACH/termination goes to _main_react.
         prev->state = 2;
+        swapcontext(&prev->context, &coro->context);
+    } else {
+        // An ATTACHED component (operating under CALL/NEW as part of the main
+        // component's chain) executing RESUME suspends the main component; its
+        // reactivation point is right after this resume statement.
+        _main_react = &prev->context;
         swapcontext(&prev->context, &coro->context);
     }
     _coro_current = prev;
@@ -262,13 +268,12 @@ void simula_coro_resume(SimulaCoro* coro) {
  * for X to detach (or terminate), whether the caller is a process or main. */
 void simula_coro_call(SimulaCoro* coro) {
     if (coro->state == 3) {
-        fprintf(stderr, "simula_coro_call: coroutine has terminated\n");
-        return;
+        fprintf(stderr, "Runtime error: CALL of a terminated object\n");
+        exit(1);
     }
     if (coro->state != 2) {
-        fprintf(stderr, "simula_coro_call: coroutine is not detached (state=%d)\n",
-                coro->state);
-        return;
+        fprintf(stderr, "Runtime error: CALL of an object that is not detached\n");
+        exit(1);
     }
     SimulaCoro* prev = _coro_current;
     coro->state = 1;
