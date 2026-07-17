@@ -36,6 +36,7 @@ struct ParamSpec {
     bool isLabel = false; // LABEL parameter (non-local goto target)
     bool isValue = false; // VALUE parameter (callee gets a private copy)
     bool isProcedure = false; // formal PROCEDURE parameter (a function pointer)
+    int procRetType = -1;     // typed formal PROCEDURE's result type, -1 = untyped
 };
 
 // ============================================================

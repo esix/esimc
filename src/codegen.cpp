@@ -99,6 +99,26 @@ void CodeGenContext::emitNonLocalGotoSetup(llvm::Function* func, Statement* body
         if (auto* w = dynamic_cast<WhileStatement*>(s)) { if (w->body) scan(w->body.get()); }
         if (auto* fs = dynamic_cast<ForStatement*>(s)) { if (fs->body) scan(fs->body.get()); }
         if (auto* es = dynamic_cast<ExprStatement*>(s)) { scanExpr(es->expr.get()); }
+        if (auto* pd = dynamic_cast<ProcedureDecl*>(s)) {
+            // A GOTO inside a nested procedure that names one of THIS
+            // function's labels is a non-local jump into us: give that label
+            // a setjmp dispatch entry, like a LABEL actual would.
+            std::function<void(Statement*)> deepScan = [&](Statement* n) {
+                if (!n) return;
+                if (auto* g = dynamic_cast<GotoStatement*>(n)) nonLocalTargets.insert(g->label);
+                if (auto* b2 = dynamic_cast<Block*>(n)) for (auto& st : b2->statements) deepScan(st.get());
+                if (auto* c2 = dynamic_cast<CompoundStmt*>(n)) for (auto& st : c2->statements) deepScan(st.get());
+                if (auto* i2 = dynamic_cast<IfStatement*>(n)) { deepScan(i2->thenBranch.get()); deepScan(i2->elseBranch.get()); }
+                if (auto* w2 = dynamic_cast<WhileStatement*>(n)) deepScan(w2->body.get());
+                if (auto* f2 = dynamic_cast<ForStatement*>(n)) deepScan(f2->body.get());
+                if (auto* f3 = dynamic_cast<ForListStatement*>(n)) deepScan(f3->body.get());
+                if (auto* f4 = dynamic_cast<ForMultiRangeStatement*>(n)) deepScan(f4->body.get());
+                if (auto* f5 = dynamic_cast<ForGeneralStatement*>(n)) deepScan(f5->body.get());
+                if (auto* l2 = dynamic_cast<LabeledStatement*>(n)) deepScan(l2->statement.get());
+                if (auto* p2 = dynamic_cast<ProcedureDecl*>(n)) deepScan(p2->body.get());
+            };
+            deepScan(pd->body.get());
+        }
     };
     scan(body);
 
@@ -117,6 +137,20 @@ void CodeGenContext::emitNonLocalGotoSetup(llvm::Function* func, Statement* body
     currentJmpBuf = createEntryBlockAlloca(func, "jmpbuf", bufTy);
     int nextId = 1;
     for (auto& l : nlLabels) nonLocalLabelIds[l] = nextId++;
+    // Publish each dispatch label in a module global so a statically nested
+    // procedure can longjmp here by name (direct non-local GOTO).
+    auto ptrTyG = llvm::PointerType::getUnqual(*llvmContext);
+    for (auto& l : nlLabels) {
+        auto gname = "__nlbuf_" + l;
+        auto* g = module->getNamedGlobal(gname);
+        if (!g) {
+            g = new llvm::GlobalVariable(*module, ptrTyG, false,
+                llvm::GlobalValue::InternalLinkage,
+                llvm::ConstantPointerNull::get(ptrTyG), gname);
+        }
+        builder->CreateStore(currentJmpBuf, g);
+        outerNlLabels[l] = {g, nonLocalLabelIds[l]};
+    }
     auto rc = builder->CreateCall(setjmpFunc, {currentJmpBuf}, "setjmp_rc");
     auto bodyStart = llvm::BasicBlock::Create(*llvmContext, "body_start", func);
     auto sw = builder->CreateSwitch(rc, bodyStart, (unsigned)nlLabels.size());
@@ -899,6 +933,36 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
                                         ctx.returnValueAlloca, name);
     }
 
+    // A formal PROCEDURE parameter named on its own means "call it" (Algol-style
+    // mention invocation). A typed formal yields the call's result; an untyped
+    // one yields nothing. The slot may be a local (own parameter) or a captured
+    // pointer from an enclosing procedure (static scoping).
+    if (ctx.procParamNames.count(name)) {
+        llvm::Value* slotPtr = nullptr; llvm::Type* slotTy = nullptr;
+        auto pit = ctx.locals.find(name);
+        if (pit != ctx.locals.end()) {
+            slotPtr = pit->second; slotTy = pit->second->getAllocatedType();
+        } else {
+            auto nit = ctx.nameParams.find(name);
+            if (nit != ctx.nameParams.end() && !ctx.nameThunks.count(name)) {
+                slotPtr = nit->second.first; slotTy = nit->second.second;
+            }
+        }
+        if (slotPtr) {
+            auto fp = ctx.builder->CreateLoad(slotTy, slotPtr, name);
+            auto rtIt = ctx.procParamRetTypes.find(name);
+            llvm::Type* retTy = (rtIt != ctx.procParamRetTypes.end() && rtIt->second >= 0)
+                ? ctx.getLLVMType(rtIt->second)
+                : llvm::Type::getVoidTy(*ctx.llvmContext);
+            auto fnTy = llvm::FunctionType::get(retTy, false);
+            auto call = ctx.builder->CreateCall(fnTy, fp, {});
+            if (retTy->isVoidTy())
+                return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), 0);
+            return call;
+        }
+    }
+
+
     // Check NAME parameters. With a thunk present, re-evaluate the actual on this
     // access (call-by-name) and refresh the shadow slot for getVarPtr consumers.
     auto npit = ctx.nameParams.find(name);
@@ -909,18 +973,6 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
             return v;
         }
         return ctx.builder->CreateLoad(npit->second.second, npit->second.first, name);
-    }
-
-    // A formal PROCEDURE parameter named on its own means "call it". An untyped
-    // procedure yields no value, so a bare mention is a no-arg invocation.
-    if (ctx.procParamNames.count(name)) {
-        auto pit = ctx.locals.find(name);
-        if (pit != ctx.locals.end()) {
-            auto fp = ctx.builder->CreateLoad(pit->second->getAllocatedType(), pit->second, name);
-            auto fnTy = llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx.llvmContext), false);
-            ctx.builder->CreateCall(fnTy, fp, {});
-            return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*ctx.llvmContext), 0);
-        }
     }
 
     auto it = ctx.locals.find(name);
@@ -1177,11 +1229,55 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
 // i.e. round to nearest with ties broken AWAY FROM ZERO — exactly llvm.round
 // (not floor(x+0.5), which rounds negative ties toward zero). Used at every
 // assignment/parameter/array-store coercion; explicit ENTIER/TRUNCATE differ.
+// Emit: if (bad) { simula_math_error(code, line); unreachable }. Codes are
+// defined in the runtime (1 SQRT, 2 LN/LOG, 3 EXP, 4 **, 5 real->integer).
+static void emitMathCheck(CodeGenContext& ctx, llvm::Value* bad, long long code,
+                          int line) {
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    auto* fn = ctx.builder->GetInsertBlock()->getParent();
+    auto* badBB = llvm::BasicBlock::Create(*ctx.llvmContext, "mth_bad", fn);
+    auto* okBB  = llvm::BasicBlock::Create(*ctx.llvmContext, "mth_ok", fn);
+    ctx.builder->CreateCondBr(bad, badBB, okBB);
+    ctx.builder->SetInsertPoint(badBB);
+    auto errFn = ctx.module->getOrInsertFunction("simula_math_error",
+        llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx.llvmContext),
+            {i64Ty, i64Ty}, false));
+    ctx.builder->CreateCall(errFn, {llvm::ConstantInt::get(i64Ty, code),
+                                    llvm::ConstantInt::get(i64Ty, line)});
+    ctx.builder->CreateUnreachable();
+    ctx.builder->SetInsertPoint(okBB);
+}
+
+// Real division by zero is a Simula runtime error (no inf/nan values exist).
+static void emitDivZeroCheck(CodeGenContext& ctx, llvm::Value* divisor, int line) {
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    auto zero = llvm::ConstantFP::get(divisor->getType(), 0.0);
+    auto isZero = ctx.builder->CreateFCmpOEQ(divisor, zero, "dz");
+    auto* fn = ctx.builder->GetInsertBlock()->getParent();
+    auto* badBB = llvm::BasicBlock::Create(*ctx.llvmContext, "dz_bad", fn);
+    auto* okBB  = llvm::BasicBlock::Create(*ctx.llvmContext, "dz_ok", fn);
+    ctx.builder->CreateCondBr(isZero, badBB, okBB);
+    ctx.builder->SetInsertPoint(badBB);
+    auto errFn = ctx.module->getOrInsertFunction("simula_div_zero",
+        llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx.llvmContext), {i64Ty}, false));
+    ctx.builder->CreateCall(errFn, {llvm::ConstantInt::get(i64Ty, line)});
+    ctx.builder->CreateUnreachable();
+    ctx.builder->SetInsertPoint(okBB);
+}
+
 static llvm::Value* simulaRealToInt(CodeGenContext& ctx, llvm::Value* v,
                                     llvm::Type* destTy) {
     auto roundF = llvm::Intrinsic::getOrInsertDeclaration(ctx.module.get(),
         llvm::Intrinsic::round, {v->getType()});
     auto rounded = ctx.builder->CreateCall(roundF, {v}, "rnd");
+    // Out-of-range (or NaN) real->integer conversion is a runtime error, not
+    // LLVM poison. Unordered compares make NaN take the error path.
+    auto dTy = v->getType();
+    auto tooBig = ctx.builder->CreateFCmpUGE(rounded,
+        llvm::ConstantFP::get(dTy, 9223372036854775808.0), "cv_hi");
+    auto tooSmall = ctx.builder->CreateFCmpULT(rounded,
+        llvm::ConstantFP::get(dTy, -9223372036854775808.0), "cv_lo");
+    emitMathCheck(ctx, ctx.builder->CreateOr(tooBig, tooSmall, "cv_bad"), 5, 0);
     return ctx.builder->CreateFPToSI(rounded, destTy, "rnd_toint");
 }
 
@@ -1670,6 +1766,11 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
             // away under -O2 for a known non-negative constant exponent.
             auto isNeg = ctx.builder->CreateICmpSLT(
                 R, llvm::ConstantInt::get(i64Ty, 0), "exp_neg");
+            // EXPI is also undefined for 0**0 (Simula 3.5.3).
+            auto zz = ctx.builder->CreateAnd(
+                ctx.builder->CreateICmpEQ(L, llvm::ConstantInt::get(i64Ty, 0)),
+                ctx.builder->CreateICmpEQ(R, llvm::ConstantInt::get(i64Ty, 0)), "expi_zz");
+            isNeg = ctx.builder->CreateOr(isNeg, zz, "expi_bad");
             auto* fn = ctx.builder->GetInsertBlock()->getParent();
             auto* okBB  = llvm::BasicBlock::Create(*ctx.llvmContext, "expiok", fn);
             auto* badBB = llvm::BasicBlock::Create(*ctx.llvmContext, "expibad", fn);
@@ -1683,11 +1784,23 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
             ctx.builder->SetInsertPoint(okBB);
             return ctx.builder->CreateCall(ipowFunc, {L, R}, "ipow");
         }
+        bool intExp = R->getType()->isIntegerTy();
         auto Lf = L, Rf = R;
         if (!Lf->getType()->isDoubleTy())
             Lf = ctx.builder->CreateSIToFP(L, doubleTy, "tofp");
         if (!Rf->getType()->isDoubleTy())
             Rf = ctx.builder->CreateSIToFP(R, doubleTy, "tofp");
+        auto zeroD = llvm::ConstantFP::get(doubleTy, 0.0);
+        auto baseZero = ctx.builder->CreateFCmpOEQ(Lf, zeroD, "pw_b0");
+        auto expNonPos = ctx.builder->CreateFCmpOLE(Rf, zeroD, "pw_enp");
+        llvm::Value* bad = ctx.builder->CreateAnd(baseZero, expNonPos, "pw_0np");
+        if (!intExp) {
+            // EXPR (real exponent) additionally requires a positive base:
+            // r**x with r<0 is undefined (exp(x*ln(r)) form, Simula 3.5.3).
+            auto baseNeg = ctx.builder->CreateFCmpOLT(Lf, zeroD, "pw_bneg");
+            bad = ctx.builder->CreateOr(bad, baseNeg, "pw_bad");
+        }
+        emitMathCheck(ctx, bad, 4, line);
         auto powFunc = ctx.module->getOrInsertFunction("pow",
             llvm::FunctionType::get(doubleTy, {doubleTy, doubleTy}, false));
         return ctx.builder->CreateCall(powFunc, {Lf, Rf}, "powtmp");
@@ -1738,8 +1851,12 @@ llvm::Value* BinaryOp::codegen(CodeGenContext& ctx) {
             case ADD: return ctx.builder->CreateFAdd(L, R, "addtmp");
             case SUB: return ctx.builder->CreateFSub(L, R, "subtmp");
             case MUL: return ctx.builder->CreateFMul(L, R, "multmp");
-            case DIV: return ctx.builder->CreateFDiv(L, R, "divtmp");
+            case DIV: {
+                emitDivZeroCheck(ctx, R, line);
+                return ctx.builder->CreateFDiv(L, R, "divtmp");
+            }
             case IDIV: {
+                emitDivZeroCheck(ctx, R, line);
                 auto d = ctx.builder->CreateFDiv(L, R, "divtmp");
                 return ctx.builder->CreateFPToSI(d, llvm::Type::getInt64Ty(*ctx.llvmContext), "idivtmp");
             }
@@ -2037,6 +2154,17 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         if (!val) return nullptr;
         if (val->getType()->isIntegerTy())
             val = ctx.builder->CreateSIToFP(val, doubleTy, "tofp");
+        // Domain checks: the standard's mathematical procedures are defined
+        // only on their mathematical domains (no inf/nan results).
+        auto zeroD = llvm::ConstantFP::get(doubleTy, 0.0);
+        std::string nm = intrin;
+        if (nm == "sqrt")
+            emitMathCheck(ctx, ctx.builder->CreateFCmpOLT(val, zeroD), 1, line);
+        else if (nm == "ln" || nm == "log2" || nm == "log10")
+            emitMathCheck(ctx, ctx.builder->CreateFCmpOLE(val, zeroD), 2, line);
+        else if (nm == "exp")
+            emitMathCheck(ctx, ctx.builder->CreateFCmpOGT(val,
+                llvm::ConstantFP::get(doubleTy, 709.782712893384)), 3, line);
         auto fn = llvm::Intrinsic::getOrInsertDeclaration(ctx.module.get(), id, {doubleTy});
         return ctx.builder->CreateCall(fn, {val}, intrin);
     };
@@ -2877,26 +3005,56 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
         }
     }
 
-    // Check if name is a local variable holding a function pointer (procedure parameter)
+    // Check if name is a variable holding a function pointer (a formal
+    // PROCEDURE parameter — possibly captured from an enclosing procedure).
     {
+        llvm::Value* slotPtr = nullptr;
         auto lit = ctx.locals.find(name);
-        if (lit != ctx.locals.end()) {
-            // It's a local — load the function pointer and call it indirectly
+        if (lit != ctx.locals.end()) slotPtr = lit->second;
+        else if (ctx.procParamNames.count(name)) {
+            auto nit = ctx.nameParams.find(name);
+            if (nit != ctx.nameParams.end() && !ctx.nameThunks.count(name))
+                slotPtr = nit->second.first;
+        }
+        if (slotPtr) {
             auto ptrTy2 = ctx.getRefType();
-            auto fnPtr = ctx.builder->CreateLoad(ptrTy2, lit->second, name + "_fn");
+            auto fnPtr = ctx.builder->CreateLoad(ptrTy2, slotPtr, name + "_fn");
             // Build a function type based on argument types
             std::vector<llvm::Value*> argsV;
             std::vector<llvm::Type*> argTys;
             for (auto& arg : args) {
+                // A formal PROCEDURE forwarded as an argument passes its
+                // function pointer, not the result of invoking it.
+                if (auto* aid = dynamic_cast<Identifier*>(arg.get())) {
+                    if (ctx.procParamNames.count(aid->name)) {
+                        llvm::Value* sp = nullptr;
+                        auto l2 = ctx.locals.find(aid->name);
+                        if (l2 != ctx.locals.end()) sp = l2->second;
+                        else {
+                            auto n2 = ctx.nameParams.find(aid->name);
+                            if (n2 != ctx.nameParams.end()) sp = n2->second.first;
+                        }
+                        if (sp) {
+                            argsV.push_back(ctx.builder->CreateLoad(ptrTy2, sp, aid->name));
+                            argTys.push_back(ptrTy2);
+                            continue;
+                        }
+                    }
+                }
                 auto v = arg->codegen(ctx);
                 if (!v) return nullptr;
                 argsV.push_back(v);
                 argTys.push_back(v->getType());
             }
-            // Assume return type matches the first arg (simplification)
-            llvm::Type* retTy = args.empty() ?
-                llvm::Type::getVoidTy(*ctx.llvmContext) :
-                argsV[0]->getType();
+            // Result type: the declared type of a typed formal PROCEDURE;
+            // fall back to the first argument's type (legacy heuristic).
+            llvm::Type* retTy;
+            auto rtIt = ctx.procParamRetTypes.find(name);
+            if (rtIt != ctx.procParamRetTypes.end() && rtIt->second >= 0)
+                retTy = ctx.getLLVMType(rtIt->second);
+            else
+                retTy = args.empty() ? llvm::Type::getVoidTy(*ctx.llvmContext)
+                                     : argsV[0]->getType();
             auto fnTy = llvm::FunctionType::get(retTy, argTys, false);
             if (retTy->isVoidTy())
                 return ctx.builder->CreateCall(fnTy, fnPtr, argsV);
@@ -2960,6 +3118,29 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             paramIdx++;
             continue;
         }
+        // A remote procedure attribute (x.p) used as an actual parameter would
+        // codegen as a void call below; reject it clearly instead of emitting
+        // invalid IR (bound-method PROCEDURE parameters are not supported).
+        if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isPointerTy() &&
+            (dynamic_cast<MemberAccess*>(arg.get()) || dynamic_cast<MethodCall*>(arg.get()))) {
+            if (auto* ma = dynamic_cast<MemberAccess*>(arg.get())) {
+                std::string ocls;
+                if (auto* oid = dynamic_cast<Identifier*>(ma->object.get()))
+                    ocls = ctx.resolveRefType(oid->name);
+                if (!ocls.empty()) {
+                    for (std::string c = ocls; !c.empty(); ) {
+                        auto ci = ctx.classes.find(c);
+                        if (ci == ctx.classes.end()) break;
+                        if (ci->second.methods.count(ma->member)) {
+                            ctx.errorAt(line) << "class procedure '" << ma->member
+                                << "' cannot be passed as a PROCEDURE parameter\n";
+                            return nullptr;
+                        }
+                        c = ci->second.parentName;
+                    }
+                }
+            }
+        }
         // Check if the callee expects a pointer at this position (NAME or ARRAY param)
         if (paramIdx < fnTy->getNumParams() && fnTy->getParamType(paramIdx)->isPointerTy()) {
             if (auto* id = dynamic_cast<Identifier*>(arg.get())) {
@@ -2979,7 +3160,16 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                 if (auto* pf = ctx.module->getFunction(id->name)) {
                     bool isVar = ctx.locals.count(id->name) || ctx.globals.count(id->name)
                               || ctx.arrays.count(id->name) || ctx.nameParams.count(id->name);
-                    if (!isVar) { argsV.push_back(pf); paramIdx++; continue; }
+                    if (!isVar) {
+                        auto cvIt = ctx.capturedVars.find(id->name);
+                        if (cvIt != ctx.capturedVars.end() && !cvIt->second.empty()) {
+                            ctx.errorAt(line) << "procedure '" << id->name
+                                << "' references enclosing variables and cannot be "
+                                   "passed as a PROCEDURE parameter\n";
+                            return nullptr;
+                        }
+                        argsV.push_back(pf); paramIdx++; continue;
+                    }
                 }
                 // If it's an array, pass: ptr, lo, hi, lo2, stride
                 auto ait2 = ctx.arrays.find(id->name);
@@ -3258,6 +3448,18 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
             auto litFn = ctx.module->getOrInsertFunction("simula_text_lit",
                 llvm::FunctionType::get(ptrTy, {ptrTy}, false));
             return ctx.builder->CreateCall(litFn, {buf}, "sysin_img");
+        }
+    }
+
+    // NOTEXT.attr (and other clearly-text expressions): TEXT attributes are
+    // defined on the NOTEXT value too (LENGTH=0, POS=1, MORE=FALSE, ...).
+    if (dynamic_cast<NoneLiteral*>(object.get()) || exprIsText(object.get(), ctx)) {
+        if (!dynamic_cast<Identifier*>(object.get())) {
+            auto obj0 = object->codegen(ctx);
+            if (obj0 && obj0->getType()->isPointerTy()) {
+                std::vector<llvm::Value*> noargs;
+                if (auto r = emitTextOp(ctx, obj0, member, noargs)) return r;
+            }
         }
     }
 
@@ -4067,14 +4269,20 @@ llvm::Value* InRealExpression::codegen(CodeGenContext& ctx) {
     auto func = ctx.builder->GetInsertBlock()->getParent();
     auto alloca = ctx.createEntryBlockAlloca(func, "inreal_tmp", doubleTy);
     ctx.builder->CreateStore(llvm::ConstantFP::get(doubleTy, 0.0), alloca);
-    auto fmt = ctx.builder->CreateGlobalString("%lf", "realinfmt");
-    ctx.builder->CreateCall(ctx.scanfFunc, {fmt, alloca});
-    return ctx.builder->CreateLoad(doubleTy, alloca, "inreal");
+    // simula_inreal accepts the lowten '&' exponent mark (scanf %lf does not).
+    auto rd = ctx.module->getOrInsertFunction("simula_inreal",
+        llvm::FunctionType::get(doubleTy, {}, false));
+    (void)alloca;
+    return ctx.builder->CreateCall(rd, {}, "inreal");
 }
 
 llvm::Value* InCharExpression::codegen(CodeGenContext& ctx) {
     auto i8Ty = llvm::Type::getInt8Ty(*ctx.llvmContext);
-    auto ch = ctx.builder->CreateCall(ctx.getcharFunc, {}, "getch");
+    auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+    // simula_inchar yields the EM character (rank 25) at end of file.
+    auto rd = ctx.module->getOrInsertFunction("simula_inchar",
+        llvm::FunctionType::get(i64Ty, {}, false));
+    auto ch = ctx.builder->CreateCall(rd, {}, "getch");
     return ctx.builder->CreateTrunc(ch, i8Ty, "inchar");
 }
 
@@ -4945,6 +5153,44 @@ llvm::Value* RefAssignment::codegen(CodeGenContext& ctx) {
     }
     auto val = value->codegen(ctx);
     if (!val) return nullptr;
+    // Standard 4.1.4 case 2: assigning a REF(super)-valued expression to a
+    // REF(sub) variable requires a runtime qualification check — the value
+    // must be NONE or an instance of sub (or a class prefixed by sub).
+    std::string tgtCls = ctx.resolveRefType(name);
+    if (!tgtCls.empty() && val->getType()->isPointerTy()) {
+        std::string srcCls = ctx.resolveObjectRefClass(value.get());
+        bool needCheck = false;
+        if (!srcCls.empty() && srcCls != tgtCls) {
+            for (std::string c = tgtCls; !c.empty(); ) {
+                auto it = ctx.classes.find(c);
+                if (it == ctx.classes.end()) break;
+                if (it->second.parentName == srcCls) { needCheck = true; break; }
+                c = it->second.parentName;
+            }
+        }
+        if (needCheck) {
+            auto ids = ctx.getDescendantIdSet(tgtCls);
+            if (!ids.empty()) {
+                auto ptrTy = llvm::PointerType::getUnqual(*ctx.llvmContext);
+                auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                auto isNone = ctx.builder->CreateICmpEQ(val,
+                    llvm::ConstantPointerNull::get(ptrTy), "ra_none");
+                auto match = classIdTest(ctx, val, ids, "ra_q");
+                auto ok = ctx.builder->CreateOr(isNone, match, "ra_ok");
+                auto* fn = ctx.builder->GetInsertBlock()->getParent();
+                auto* badBB = llvm::BasicBlock::Create(*ctx.llvmContext, "ra_bad", fn);
+                auto* okBB = llvm::BasicBlock::Create(*ctx.llvmContext, "ra_okbb", fn);
+                ctx.builder->CreateCondBr(ok, okBB, badBB);
+                ctx.builder->SetInsertPoint(badBB);
+                auto errFn = ctx.module->getOrInsertFunction("simula_qua_error",
+                    llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx.llvmContext),
+                        {i64Ty}, false));
+                ctx.builder->CreateCall(errFn, {llvm::ConstantInt::get(i64Ty, line)});
+                ctx.builder->CreateUnreachable();
+                ctx.builder->SetInsertPoint(okBB);
+            }
+        }
+    }
     // Reference assignment (T :- X): rebind to the same descriptor. The cursor
     // now lives inside the descriptor, so producers (COPY/SUB/BLANKS) already
     // hand back pos=0 — no separate reset needed.
@@ -5122,6 +5368,23 @@ llvm::Value* GotoStatement::codegen(CodeGenContext& ctx) {
         }
     }
 
+    // Direct non-local GOTO: the label belongs to an enclosing function that
+    // published a setjmp dispatch entry — longjmp into its live activation.
+    {
+        auto onl = ctx.outerNlLabels.find(label);
+        if (onl != ctx.outerNlLabels.end() && !ctx.labelBlocks.count(label)) {
+            auto ptrTy = ctx.getRefType();
+            auto i32Ty = llvm::Type::getInt32Ty(*ctx.llvmContext);
+            auto buf = ctx.builder->CreateLoad(ptrTy, onl->second.first, label + "_obuf");
+            ctx.builder->CreateCall(ctx.longjmpFunc,
+                {buf, llvm::ConstantInt::get(i32Ty, onl->second.second)});
+            ctx.builder->CreateUnreachable();
+            auto afterBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_goto", func);
+            ctx.builder->SetInsertPoint(afterBB);
+            return nullptr;
+        }
+    }
+
     // Local GOTO: branch to the label block in this function.
     // Use getOrCreateLabel so forward GOTO (jumping to a label not yet seen) works.
     auto labelBB = ctx.getOrCreateLabel(label);
@@ -5274,7 +5537,9 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
     // Re-get the pointer (class field GEP may have been invalidated)
     auto [varPtr2, varTy2] = ctx.getVarPtr(var);
     auto curVal2 = ctx.builder->CreateLoad(varTy2, varPtr2, var);
-    auto stepV = coerce(step->codegen(ctx));
+    // Reuse the step evaluated in the condition block (the standard's DELTA is
+    // evaluated once per round, not separately for test and increment).
+    auto stepV = coerce(stepRaw);
     auto nextVal = isFloat ? ctx.builder->CreateFAdd(curVal2, stepV, "forstep")
                            : ctx.builder->CreateAdd(curVal2, stepV, "forstep");
     ctx.builder->CreateStore(nextVal, varPtr2);
@@ -5355,7 +5620,7 @@ llvm::Value* ForMultiRangeStatement::codegen(CodeGenContext& ctx) {
         body->codegen(ctx);
 
         auto cur2 = ctx.builder->CreateLoad(varTy, varPtr, var);
-        auto stepV = coerce(range.step->codegen(ctx));
+        auto stepV = stepSign;  // step evaluated once per round, in the cond block
         auto next = isFloat ? ctx.builder->CreateFAdd(cur2, stepV, "fmr_step")
                             : ctx.builder->CreateAdd(cur2, stepV, "fmr_step");
         ctx.builder->CreateStore(next, varPtr);
@@ -5459,7 +5724,7 @@ llvm::Value* ForGeneralStatement::codegen(CodeGenContext& ctx) {
             body->codegen(ctx);
             auto [varPtr2, varTy2] = ctx.getVarPtr(var);
             auto curVal2 = ctx.builder->CreateLoad(varTy2, varPtr2, var);
-            auto stepV = coerce(el.step->codegen(ctx));
+            auto stepV = coerce(stepRaw);  // once per round, in the cond block
             auto nextVal = isFloat ? ctx.builder->CreateFAdd(curVal2, stepV, "fgs_step")
                                    : ctx.builder->CreateAdd(curVal2, stepV, "fgs_step");
             ctx.builder->CreateStore(nextVal, varPtr2);
@@ -5641,11 +5906,11 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     auto savedNonLocalIds = ctx.nonLocalLabelIds;
     auto savedLabelParamNames = ctx.labelParamNames;
     auto savedProcParamNames = ctx.procParamNames;
+    auto savedProcParamRetTypes = ctx.procParamRetTypes;
     auto savedTextVars = ctx.textVars;
     ctx.currentJmpBuf = nullptr;
     ctx.nonLocalLabelIds.clear();
     ctx.labelParamNames.clear();
-    ctx.procParamNames.clear();
 
     // Create entry block
     auto entry = llvm::BasicBlock::Create(*ctx.llvmContext, "entry", func);
@@ -5821,7 +6086,15 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         ctx.locals[p.name] = alloca;
         ++argIt;
         // A formal PROCEDURE parameter is a function pointer, not a TEXT value.
-        if (p.isProcedure) { ctx.procParamNames.insert(p.name); continue; }
+        if (p.isProcedure) {
+            ctx.procParamNames.insert(p.name);
+            if (p.procRetType >= 0) ctx.procParamRetTypes[p.name] = p.procRetType;
+            else ctx.procParamRetTypes.erase(p.name);
+            continue;
+        }
+        // A non-procedure parameter shadows any inherited formal-PROCEDURE name.
+        ctx.procParamNames.erase(p.name);
+        ctx.procParamRetTypes.erase(p.name);
         // Register REF class name for member access resolution
         if (!p.refClassName.empty()) {
             ctx.refTypes[p.name] = p.refClassName;
@@ -6024,6 +6297,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
     ctx.nonLocalLabelIds = savedNonLocalIds;
     ctx.labelParamNames = savedLabelParamNames;
     ctx.procParamNames = savedProcParamNames;
+    ctx.procParamRetTypes = savedProcParamRetTypes;
     ctx.textVars = savedTextVars;
 
     return func;

@@ -1,0 +1,16 @@
+! Direct non-local GOTO: a procedure jumping to a label of the enclosing
+! block unwinds back into that block's activation. ;
+BEGIN
+  INTEGER depth;
+  PROCEDURE dive;
+  BEGIN
+    depth := depth + 1;
+    OUTINT(depth, 3);
+    IF depth = 3 THEN GOTO done;
+    dive
+  END;
+  OUTTEXT("go"); OUTIMAGE;
+  dive;
+  OUTTEXT("never"); OUTIMAGE;
+  done: OUTTEXT(" out"); OUTIMAGE
+END.

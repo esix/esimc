@@ -1,0 +1,10 @@
+! General for-lists: value elements, value WHILE cond, STEP-UNTIL ranges,
+! freely mixed; the controlled variable keeps its last assigned value. ;
+BEGIN
+  INTEGER x, s;
+  FOR x := x + 1 WHILE x < 4 DO OUTINT(x, 3);
+  OUTINT(x, 3); OUTIMAGE;
+  s := 0;
+  FOR x := 9, 1 STEP 1 UNTIL 3, 20 WHILE FALSE, 7 DO s := s + x;
+  OUTINT(s, 4); OUTINT(x, 4); OUTIMAGE
+END.

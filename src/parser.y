@@ -39,6 +39,7 @@ static std::vector<ParamSpec> mergeParams(
         bool isLabel = false;
         bool isValue = false;
         bool isProcedure = false;
+        int procRetType = -1;
         /* First pass: check NAME/VALUE markers */
         for (auto& sp : specs) {
             if (sp.first == -30 || sp.first == -31) {
@@ -90,12 +91,15 @@ static std::vector<ParamSpec> mergeParams(
                         }
                     }
                 }
-            } else if (sp.first == -12) {
-                /* PROCEDURE parameter: a function pointer (TEXT-encoded). */
+            } else if (sp.first == -12 ||
+                       (sp.first <= -50 && sp.first >= -54)) {
+                /* PROCEDURE parameter: a function pointer (TEXT-encoded).
+                   Codes -50..-54 carry a result type: -50 - VarDeclaration::Type. */
                 for (auto& sn : sp.second) {
                     if (matchName(sn, n)) {
                         type = VarDeclaration::TEXT;
                         isProcedure = true;
+                        if (sp.first <= -50) procRetType = -50 - sp.first;
                         goto found;
                     }
                 }
@@ -153,6 +157,7 @@ static std::vector<ParamSpec> mergeParams(
         ps.isArray = isArray; ps.arrayElemType = arrayElem;
         ps.isName = isName; ps.isLabel = isLabel; ps.isValue = isValue;
         ps.isProcedure = isProcedure;
+        ps.procRetType = procRetType;
         result.push_back(ps);
     }
     return result;
@@ -748,12 +753,10 @@ param_specs
         delete $7;
         $$ = $1;
       }
-    | param_specs T_PROCEDURE T_IDENT T_SEMI {
-        /* Procedure parameter spec: PROCEDURE name; — code -12 (function pointer) */
-        auto names = new std::vector<std::string>();
-        names->push_back($3);
-        $1->push_back({-12, std::move(*names)});
-        delete names;
+    | param_specs T_PROCEDURE ident_list T_SEMI {
+        /* Procedure parameter spec: PROCEDURE g, h; — code -12 (function pointer) */
+        $1->push_back({-12, std::move(*$3)});
+        delete $3;
         $$ = $1;
       }
     | param_specs T_PROCEDURE T_IDENT T_IS virtual_is_rhs {
@@ -764,12 +767,10 @@ param_specs
         delete names;
         $$ = $1;
       }
-    | param_specs type_name T_PROCEDURE T_IDENT T_SEMI {
-        /* Typed procedure parameter: INTEGER PROCEDURE name; */
-        auto names = new std::vector<std::string>();
-        names->push_back($4);
-        $1->push_back({VarDeclaration::TEXT, std::move(*names)});
-        delete names;
+    | param_specs type_name T_PROCEDURE ident_list T_SEMI {
+        /* Typed procedure parameter: INTEGER PROCEDURE g, h; — code -50 - type */
+        $1->push_back({-50 - (int)$2, std::move(*$4)});
+        delete $4;
         $$ = $1;
       }
     | param_specs T_IDENT ident_list T_SEMI {

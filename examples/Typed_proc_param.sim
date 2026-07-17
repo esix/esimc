@@ -1,0 +1,14 @@
+! Typed formal PROCEDURE parameters: mention-invocation yields the result,
+! formals forward to other formals, and multi-identifier specs parse. ;
+BEGIN
+  INTEGER PROCEDURE f42; f42 := 42;
+  INTEGER PROCEDURE dblv(x); INTEGER x; dblv := 2 * x;
+  INTEGER PROCEDURE ident(x); INTEGER x; ident := x;
+  INTEGER PROCEDURE applyit(h, n); INTEGER PROCEDURE h; INTEGER n; applyit := h(n);
+  INTEGER PROCEDURE duo(g, h, n); INTEGER PROCEDURE g, h; INTEGER n; duo := g(h, n);
+  INTEGER PROCEDURE mention(f); INTEGER PROCEDURE f; mention := f;
+  OUTINT(mention(f42), 4);
+  OUTINT(applyit(dblv, 21), 4);
+  OUTINT(duo(applyit, ident, 7) + 1, 4);
+  OUTIMAGE
+END.

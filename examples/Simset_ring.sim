@@ -1,0 +1,22 @@
+! Standard SIMSET semantics: LINKAGE hierarchy with PREV, head-relative
+! FOLLOW/PRECEDE, INTO(NONE) as OUT, and H.SUC = first element. ;
+SIMSET
+BEGIN
+   REF(HEAD) H; REF(LINK) A, B, C; REF(LINKAGE) LG;
+   H :- NEW HEAD;
+   A :- NEW LINK; B :- NEW LINK; C :- NEW LINK;
+   A.INTO(H);
+   B.FOLLOW(H);
+   C.PRECEDE(H);
+   OUTINT(H.CARDINAL, 2);
+   IF H.FIRST == B THEN OUTTEXT(" fB");
+   IF H.LAST  == C THEN OUTTEXT(" lC");
+   IF B.SUC == A AND A.SUC == C THEN OUTTEXT(" chain");
+   IF H.SUC == B THEN OUTTEXT(" hsuc");
+   IF B.PREV == H THEN OUTTEXT(" prevhead");
+   IF NOT (H IN LINK) THEN OUTTEXT(" headnotlink");
+   A.INTO(NONE);
+   OUTINT(H.CARDINAL, 2);
+   IF A.SUC == NONE AND A.PRED == NONE THEN OUTTEXT(" aout");
+   OUTIMAGE
+END;

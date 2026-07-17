@@ -134,8 +134,14 @@ public:
     // Non-local GOTO state for the function currently being compiled:
     llvm::Value* currentJmpBuf = nullptr;            // ptr to this function's jmp_buf
     std::map<std::string, int> nonLocalLabelIds;     // local label name -> setjmp id
+    // Labels of ENCLOSING functions reachable by direct GOTO from nested
+    // procedures: label -> (module global holding the owner's live jmp_buf
+    // pointer, dispatch id). Static scoping: the owner is active whenever the
+    // nested procedure runs, so the global is valid at jump time.
+    std::map<std::string, std::pair<llvm::GlobalVariable*, int>> outerNlLabels;
     std::set<std::string> labelParamNames;           // names of LABEL params in scope
     std::set<std::string> procParamNames;            // names of formal PROCEDURE params in scope
+    std::map<std::string, int> procParamRetTypes;    // typed formal PROCEDURE result types (VarDeclaration::Type)
     llvm::StructType* labelRecordType = nullptr;     // { ptr jmpbuf, i64 id }
     llvm::Function* setjmpFunc = nullptr;
     llvm::Function* longjmpFunc = nullptr;
