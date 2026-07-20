@@ -334,6 +334,15 @@ void simula_math_error(int64_t code, int64_t line) {
     exit(1);
 }
 
+void simula_virtual_missing(int64_t line) {
+    if (line > 0)
+        fprintf(stderr, "Runtime error at line %ld: call of a virtual procedure "
+                "with no matching definition\n", (long)line);
+    else
+        fprintf(stderr, "Runtime error: call of an unmatched virtual procedure\n");
+    exit(1);
+}
+
 void simula_qua_error(int64_t line) {
     /* X QUA C where X's class is neither C nor prefixed by C. */
     if (line > 0)
@@ -357,10 +366,10 @@ void simula_expi_error(int64_t line) {
 
 void simula_div_zero(int64_t line) {
     if (line > 0)
-        fprintf(stderr, "Runtime error at line %ld: integer division or MOD by zero\n",
+        fprintf(stderr, "Runtime error at line %ld: division by zero\n",
                 (long)line);
     else
-        fprintf(stderr, "Runtime error: integer division or MOD by zero\n");
+        fprintf(stderr, "Runtime error: division by zero\n");
     exit(1);
 }
 
@@ -692,6 +701,14 @@ double simula_text_getreal(SimulaText* t) {
         } else break;
     }
     buf[j] = '\0';
+    /* A bare-exponent numeral like "&2" means 1e2 (Simula de-editing). */
+    char fixed[66];
+    if (buf[0] == 'e' || buf[0] == 'E' ||
+        ((buf[0] == '+' || buf[0] == '-') && (buf[1] == 'e' || buf[1] == 'E'))) {
+        int neg = buf[0] == '-';
+        snprintf(fixed, sizeof fixed, "%s1%s", neg ? "-" : "", buf + (buf[0] == 'e' || buf[0] == 'E' ? 0 : 1));
+        memcpy(buf, fixed, strlen(fixed) + 1);
+    }
     char* end = NULL;
     double v = strtod(buf, &end);
     if (end && end != buf) t->pos = startScan + (int64_t)(end - buf);
@@ -939,6 +956,13 @@ double simula_inreal(void) {
     }
     if (c != EOF) ungetc(c, stdin);
     buf[j] = '\0';
+    if (buf[0] == 'e' || buf[0] == 'E' ||
+        ((buf[0] == '+' || buf[0] == '-') && (buf[1] == 'e' || buf[1] == 'E'))) {
+        char fixed[66];
+        int neg = buf[0] == '-';
+        snprintf(fixed, sizeof fixed, "%s1%s", neg ? "-" : "", buf + (buf[0] == 'e' || buf[0] == 'E' ? 0 : 1));
+        memcpy(buf, fixed, strlen(fixed) + 1);
+    }
     return strtod(buf, NULL);
 }
 

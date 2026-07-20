@@ -133,6 +133,27 @@
                                   buf[j] = 0;
                                   yylval.dval = atof(buf); return T_REALLIT; }
 [0-9]+\.[0-9]+                  { yylval.dval = atof(yytext); return T_REALLIT; }
+\.[0-9]+((&&|&|[eE])[+-]?[0-9]+)? {
+                                  /* Real literal with empty integer part: .5, .25&3 */
+                                  char buf[66]; size_t j = 0; buf[j++] = '0';
+                                  for (char* p = yytext; *p && j < 62; p++) {
+                                      if (*p == '&') {
+                                          if (buf[j-1] != 'e') buf[j++] = 'e';
+                                      } else if (*p == 'E') buf[j++] = 'e';
+                                      else buf[j++] = *p;
+                                  }
+                                  buf[j] = 0;
+                                  yylval.dval = atof(buf); return T_REALLIT; }
+(&&|&)[+-]?[0-9]+               {
+                                  /* Bare-exponent numeral: &2 = 1e2 (lowten) */
+                                  char buf[66]; size_t j = 0; buf[j++] = '1';
+                                  for (char* p = yytext; *p && j < 62; p++) {
+                                      if (*p == '&') {
+                                          if (buf[j-1] != 'e') buf[j++] = 'e';
+                                      } else buf[j++] = *p;
+                                  }
+                                  buf[j] = 0;
+                                  yylval.dval = atof(buf); return T_REALLIT; }
 [0-9]+                          { yylval.ival = atoll(yytext); return T_INTLIT; }
 \"([^"\\]|\\.)*\"               { yytext[yyleng-1] = '\0';
                                   yylval.sval = strdup(yytext+1);

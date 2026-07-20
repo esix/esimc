@@ -99,8 +99,9 @@ void CodeGenContext::emitNonLocalGotoSetup(llvm::Function* func, Statement* body
         if (auto* w = dynamic_cast<WhileStatement*>(s)) { if (w->body) scan(w->body.get()); }
         if (auto* fs = dynamic_cast<ForStatement*>(s)) { if (fs->body) scan(fs->body.get()); }
         if (auto* es = dynamic_cast<ExprStatement*>(s)) { scanExpr(es->expr.get()); }
-        if (auto* pd = dynamic_cast<ProcedureDecl*>(s)) {
-            // A GOTO inside a nested procedure that names one of THIS
+        if (dynamic_cast<ProcedureDecl*>(s) || dynamic_cast<ClassDecl*>(s)) {
+            // A GOTO inside a nested procedure OR class body (incl. the
+            // anonymous subclass of a prefixed block) that names one of THIS
             // function's labels is a non-local jump into us: give that label
             // a setjmp dispatch entry, like a LABEL actual would.
             std::function<void(Statement*)> deepScan = [&](Statement* n) {
@@ -116,8 +117,11 @@ void CodeGenContext::emitNonLocalGotoSetup(llvm::Function* func, Statement* body
                 if (auto* f5 = dynamic_cast<ForGeneralStatement*>(n)) deepScan(f5->body.get());
                 if (auto* l2 = dynamic_cast<LabeledStatement*>(n)) deepScan(l2->statement.get());
                 if (auto* p2 = dynamic_cast<ProcedureDecl*>(n)) deepScan(p2->body.get());
+                if (auto* c3 = dynamic_cast<ClassDecl*>(n)) for (auto& st : c3->bodyStmts) deepScan(st.get());
             };
-            deepScan(pd->body.get());
+            if (auto* pd = dynamic_cast<ProcedureDecl*>(s)) deepScan(pd->body.get());
+            if (auto* cd = dynamic_cast<ClassDecl*>(s))
+                for (auto& st : cd->bodyStmts) deepScan(st.get());
         }
     };
     scan(body);
@@ -1129,6 +1133,25 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
                 auto vtPtr = ctx.builder->CreateLoad(ptrTy2, vtSlot, "vtptr");
                 auto fpSlot = ctx.builder->CreateStructGEP(ci.vtableType, vtPtr, vtIt->second, "fp_slot");
                 auto fp = ctx.builder->CreateLoad(ptrTy2, fpSlot, "method_fp");
+            {
+                // A virtual quantity with no matching definition anywhere in the
+                // prefix chain has a null vtable slot: diagnose, don't segfault.
+                auto isNull = ctx.builder->CreateICmpEQ(fp,
+                    llvm::ConstantPointerNull::get(
+                        llvm::PointerType::getUnqual(*ctx.llvmContext)), "virt_null");
+                auto* vf = ctx.builder->GetInsertBlock()->getParent();
+                auto* badBB = llvm::BasicBlock::Create(*ctx.llvmContext, "virt_bad", vf);
+                auto* okBB = llvm::BasicBlock::Create(*ctx.llvmContext, "virt_ok", vf);
+                ctx.builder->CreateCondBr(isNull, badBB, okBB);
+                ctx.builder->SetInsertPoint(badBB);
+                auto i64TyV = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                auto errFn = ctx.module->getOrInsertFunction("simula_virtual_missing",
+                    llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx.llvmContext),
+                        {i64TyV}, false));
+                ctx.builder->CreateCall(errFn, {llvm::ConstantInt::get(i64TyV, line)});
+                ctx.builder->CreateUnreachable();
+                ctx.builder->SetInsertPoint(okBB);
+            }
                 llvm::FunctionType* funcTy = nullptr;
                 for (auto& [cn, ci2] : ctx.classes) {
                     auto mm = ci2.methods.find(name);
@@ -2865,6 +2888,24 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             auto vtPtr = ctx.builder->CreateLoad(ptrTy2, vtSlot, "vtptr");
             auto fpSlot = ctx.builder->CreateStructGEP(ci.vtableType, vtPtr, vtIt->second, "fp_slot");
             auto fp = ctx.builder->CreateLoad(ptrTy2, fpSlot, "method_fp");
+
+            {
+                auto isNull = ctx.builder->CreateICmpEQ(fp,
+                    llvm::ConstantPointerNull::get(
+                        llvm::PointerType::getUnqual(*ctx.llvmContext)), "virt_null");
+                auto* vf = ctx.builder->GetInsertBlock()->getParent();
+                auto* badBB = llvm::BasicBlock::Create(*ctx.llvmContext, "virt_bad", vf);
+                auto* okBB = llvm::BasicBlock::Create(*ctx.llvmContext, "virt_ok", vf);
+                ctx.builder->CreateCondBr(isNull, badBB, okBB);
+                ctx.builder->SetInsertPoint(badBB);
+                auto i64TyV = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                auto errFn = ctx.module->getOrInsertFunction("simula_virtual_missing",
+                    llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx.llvmContext),
+                        {i64TyV}, false));
+                ctx.builder->CreateCall(errFn, {llvm::ConstantInt::get(i64TyV, line)});
+                ctx.builder->CreateUnreachable();
+                ctx.builder->SetInsertPoint(okBB);
+            }
             if (funcTy->getReturnType()->isVoidTy())
                 return ctx.builder->CreateCall(funcTy, fp, argVals);
             return ctx.builder->CreateCall(funcTy, fp, argVals, name + "_vret");
@@ -3635,6 +3676,24 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
                 auto fpSlot = ctx.builder->CreateStructGEP(cit2->second.vtableType, vtPtr,
                                                             vtIdx, "fp_slot");
                 auto fp = ctx.builder->CreateLoad(ptrTy2, fpSlot, "method_fp");
+
+            {
+                auto isNull = ctx.builder->CreateICmpEQ(fp,
+                    llvm::ConstantPointerNull::get(
+                        llvm::PointerType::getUnqual(*ctx.llvmContext)), "virt_null");
+                auto* vf = ctx.builder->GetInsertBlock()->getParent();
+                auto* badBB = llvm::BasicBlock::Create(*ctx.llvmContext, "virt_bad", vf);
+                auto* okBB = llvm::BasicBlock::Create(*ctx.llvmContext, "virt_ok", vf);
+                ctx.builder->CreateCondBr(isNull, badBB, okBB);
+                ctx.builder->SetInsertPoint(badBB);
+                auto i64TyV = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                auto errFn = ctx.module->getOrInsertFunction("simula_virtual_missing",
+                    llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx.llvmContext),
+                        {i64TyV}, false));
+                ctx.builder->CreateCall(errFn, {llvm::ConstantInt::get(i64TyV, line)});
+                ctx.builder->CreateUnreachable();
+                ctx.builder->SetInsertPoint(okBB);
+            }
                 // Find function type
                 llvm::FunctionType* funcTy = nullptr;
                 for (auto& [cn, ci2] : ctx.classes) {
@@ -3865,6 +3924,11 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
     }
 
     if (clsName.empty()) {
+        // Last resort: the general object-expression resolver (understands
+        // REF-returning procedure attributes like H.FIRST, nested chains, QUA).
+        clsName = ctx.resolveObjectRefClass(object.get());
+    }
+    if (clsName.empty()) {
         ctx.errorAt(line) << "cannot determine class type for method call '." << method << "'\n";
         return nullptr;
     }
@@ -3910,6 +3974,24 @@ llvm::Value* MethodCall::codegen(CodeGenContext& ctx) {
             auto fpSlot = ctx.builder->CreateStructGEP(cit->second.vtableType, vtPtr,
                                                         vtIdx, "fp_slot");
             auto fp = ctx.builder->CreateLoad(ptrTy2, fpSlot, "method_fp");
+
+            {
+                auto isNull = ctx.builder->CreateICmpEQ(fp,
+                    llvm::ConstantPointerNull::get(
+                        llvm::PointerType::getUnqual(*ctx.llvmContext)), "virt_null");
+                auto* vf = ctx.builder->GetInsertBlock()->getParent();
+                auto* badBB = llvm::BasicBlock::Create(*ctx.llvmContext, "virt_bad", vf);
+                auto* okBB = llvm::BasicBlock::Create(*ctx.llvmContext, "virt_ok", vf);
+                ctx.builder->CreateCondBr(isNull, badBB, okBB);
+                ctx.builder->SetInsertPoint(badBB);
+                auto i64TyV = llvm::Type::getInt64Ty(*ctx.llvmContext);
+                auto errFn = ctx.module->getOrInsertFunction("simula_virtual_missing",
+                    llvm::FunctionType::get(llvm::Type::getVoidTy(*ctx.llvmContext),
+                        {i64TyV}, false));
+                ctx.builder->CreateCall(errFn, {llvm::ConstantInt::get(i64TyV, line)});
+                ctx.builder->CreateUnreachable();
+                ctx.builder->SetInsertPoint(okBB);
+            }
 
             // Build the function type from the method we know about
             // Find ANY implementation to get the function type
@@ -5501,8 +5583,9 @@ llvm::Value* ForStatement::codegen(CodeGenContext& ctx) {
     ctx.builder->SetInsertPoint(condBB);
 
     auto curVal = ctx.builder->CreateLoad(varTy, varPtr, var);
-    auto limitRaw = limit->codegen(ctx);
+    // The standard's expansion evaluates DELTA := A2 before testing against A3.
     auto stepRaw = step->codegen(ctx);
+    auto limitRaw = limit->codegen(ctx);
     // Simula FOR-STEP-UNTIL: continuation is (V - C)*sign(B) <= 0, an arithmetic
     // relation. If the limit or step is REAL, compare in REAL against the
     // un-rounded limit even when V is INTEGER — rounding the limit to V's type
@@ -5598,8 +5681,8 @@ llvm::Value* ForMultiRangeStatement::codegen(CodeGenContext& ctx) {
         ctx.builder->SetInsertPoint(condBB);
 
         auto cur = ctx.builder->CreateLoad(varTy, varPtr, var);
-        auto limitV = coerce(range.limit->codegen(ctx));
         auto stepSign = coerce(range.step->codegen(ctx));
+        auto limitV = coerce(range.limit->codegen(ctx));
         llvm::Value *stepNonNeg, *leCond, *geCond;
         if (isFloat) {
             auto z = llvm::ConstantFP::get(varTy, 0.0);
@@ -5694,8 +5777,8 @@ llvm::Value* ForGeneralStatement::codegen(CodeGenContext& ctx) {
             ctx.builder->CreateBr(condBB);
             ctx.builder->SetInsertPoint(condBB);
             auto curVal = ctx.builder->CreateLoad(varTy, varPtr, var);
-            auto limitRaw = el.limit->codegen(ctx);
             auto stepRaw = el.step->codegen(ctx);
+            auto limitRaw = el.limit->codegen(ctx);
             if (!limitRaw || !stepRaw) return nullptr;
             bool cmpFloat = isFloat || limitRaw->getType()->isDoubleTy()
                                     || stepRaw->getType()->isDoubleTy();
