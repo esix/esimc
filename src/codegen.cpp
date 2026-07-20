@@ -340,6 +340,20 @@ llvm::Value* CodeGenContext::loadClassId(llvm::Value* obj) {
     return builder->CreateLoad(i64Ty, cidSlot, "classid");
 }
 
+std::pair<llvm::Value*, llvm::Type*> CodeGenContext::getCapturedPtr(const std::string& name) {
+    if (!currentThis || currentClassName.empty()) return {nullptr, nullptr};
+    auto cit = classes.find(currentClassName);
+    if (cit == classes.end()) return {nullptr, nullptr};
+    for (auto& cf : cit->second.capturedFields) {
+        if (cf.name != name) continue;
+        auto slot = builder->CreateStructGEP(cit->second.structType, currentThis,
+                                             cf.structIndex, "__cap_" + name);
+        auto ptr = builder->CreateLoad(getRefType(), slot, name + "_capp");
+        return {ptr, cf.valueType};
+    }
+    return {nullptr, nullptr};
+}
+
 std::pair<llvm::Value*, llvm::Type*> CodeGenContext::getVarPtr(const std::string& name) {
     // Check NAME parameters first (pass-by-reference)
     auto npit = nameParams.find(name);
@@ -360,6 +374,9 @@ std::pair<llvm::Value*, llvm::Type*> CodeGenContext::getVarPtr(const std::string
             auto fieldTy = ci.structType->getElementType(idx);
             return {gep, fieldTy};
         }
+        // Captured enclosing-scope variable (class nested in a procedure).
+        auto cap = getCapturedPtr(name);
+        if (cap.first) return cap;
     }
     // INSPECT connection: inside `INSPECT X DO`, X's attributes are connected
     // (currentThis = X), but the enclosing block's own object stays accessible.
@@ -994,6 +1011,11 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
             auto fieldTy = ci.structType->getElementType(idx);
             return ctx.builder->CreateLoad(fieldTy, gep, name);
         }
+        // Captured enclosing-scope variable (class nested in a procedure): load
+        // the hidden pointer field, then load the outer variable through it.
+        auto cap = ctx.getCapturedPtr(name);
+        if (cap.first)
+            return ctx.builder->CreateLoad(cap.second, cap.first, name);
     }
 
     // INSPECT connection: fall back to the enclosing block's object for names
@@ -3450,6 +3472,16 @@ llvm::Value* NewExpression::codegen(CodeGenContext& ctx) {
                 val = simulaRealToInt(ctx, val, destTy);
         }
         ctx.builder->CreateStore(val, fieldPtr);
+    }
+
+    // Fill captured-variable slots: store the address of each captured outer
+    // variable so the class body/methods share the enclosing scope's storage.
+    for (auto& cf : ci.capturedFields) {
+        auto [vp, vty] = ctx.getVarPtr(cf.name);
+        if (!vp) continue;  // not visible at this NEW site: leave null
+        auto slot = ctx.builder->CreateStructGEP(ci.structType, obj, cf.structIndex,
+                                                 "__cap_" + cf.name);
+        ctx.builder->CreateStore(vp, slot);
     }
 
     // Start the class body as a coroutine
@@ -6529,6 +6561,41 @@ void ClassDecl::declareSkeleton(CodeGenContext& ctx) {
                     ci.arrayMeta[ad2->name] = {staticLo, 0};
                 }
             }
+        }
+    }
+
+    // Lexical capture: a class declared inside a procedure shares the enclosing
+    // scope's variables (Simula blocks nest). Add a hidden pointer field per
+    // outer local so the body/methods can read/write the caller's storage; NEW
+    // fills these in. (At global/main scope ctx.locals is empty — outer names are
+    // globals, reached directly — so top-level classes capture nothing.)
+    {
+        // Inherit the prefix's captures so the subclass struct layout matches.
+        if (!parentName.empty()) {
+            auto pit = ctx.classes.find(parentName);
+            if (pit != ctx.classes.end()) {
+                for (auto& pcf : pit->second.capturedFields) {
+                    ClassInfo::CapturedField cf = pcf;
+                    cf.structIndex = (int)fieldTypes.size();
+                    ci.capturedFields.push_back(cf);
+                    fieldTypes.push_back(ctx.getRefType());
+                }
+            }
+        }
+        auto isAttr = [&](const std::string& nm) {
+            for (auto& f : ci.fields) if (f.name == nm) return true;
+            for (auto& c : ci.capturedFields) if (c.name == nm) return true;
+            return false;
+        };
+        for (auto& [vname, valloca] : ctx.locals) {
+            if (vname.find("__") != std::string::npos) continue;
+            if (isAttr(vname)) continue;
+            ClassInfo::CapturedField cf;
+            cf.name = vname;
+            cf.valueType = valloca->getAllocatedType();
+            cf.structIndex = (int)fieldTypes.size();
+            ci.capturedFields.push_back(cf);
+            fieldTypes.push_back(ctx.getRefType());
         }
     }
 

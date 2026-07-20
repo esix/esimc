@@ -53,6 +53,13 @@ struct ClassInfo {
     // AST node, so subclasses can re-emit the prefix chain's body statements
     // around their own (INNER semantics). Set during declareSkeleton.
     ClassDecl* decl = nullptr;
+
+    // Enclosing-scope variables captured by a class declared inside a procedure
+    // (lexical nesting). Each becomes a hidden pointer field storing the address
+    // of the outer variable; NEW fills them in, the body/methods read/write
+    // through them. name -> (value type, struct index of the hidden ptr field).
+    struct CapturedField { std::string name; llvm::Type* valueType; int structIndex; };
+    std::vector<CapturedField> capturedFields;
 };
 
 struct ArrayInfo {
@@ -287,6 +294,10 @@ public:
     // Variable access: returns a pointer to the variable (alloca or GEP for class fields)
     // and the LLVM type of the stored value. Returns {nullptr, nullptr} if not found.
     std::pair<llvm::Value*, llvm::Type*> getVarPtr(const std::string& name);
+
+    // If `name` is a captured outer variable of the current class context, load
+    // the hidden pointer field and return {address, value type}; else {null,null}.
+    std::pair<llvm::Value*, llvm::Type*> getCapturedPtr(const std::string& name);
 
     // Call-by-name (NAME parameter) thunk support.
     llvm::StructType* getNameThunkType();
