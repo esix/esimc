@@ -1,0 +1,18 @@
+! A class declared inside a procedure shares the enclosing scope's variables
+! (Simula lexical nesting): the block/class reads and writes the caller's
+! locals through hidden captured references. ;
+BEGIN
+  CLASS Accumulator; BEGIN INTEGER incr; incr := 1; INNER; END;
+
+  PROCEDURE run(base); INTEGER base;
+  BEGIN
+    INTEGER total;
+    total := base;
+    Accumulator BEGIN total := total + incr; END;   ! prefixed block: shares total ;
+    Accumulator BEGIN total := total + incr; END;
+    OUTINT(total, 5); OUTIMAGE;
+  END;
+
+  run(10);
+  run(100);
+END.

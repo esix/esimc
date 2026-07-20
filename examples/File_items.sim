@@ -1,0 +1,23 @@
+! INFILE item input driven by the image cursor: ININT / INTEXT / INCHAR all
+! de-edit the current image at POS, and OUTFILE editing writes formatted items. ;
+BEGIN
+  REF(OUTFILE) o; REF(INFILE) f;
+  INTEGER a, b; TEXT tag; CHARACTER c;
+
+  o :- NEW OUTFILE("/tmp/esimc_file_items.dat");
+  o.OPEN(BLANKS(80));
+  o.OUTINT(12, 4); o.OUTINT(30, 4); o.OUTIMAGE;
+  o.OUTTEXT("PQR"); o.OUTIMAGE;
+  o.OUTFIX(2.5, 2, 8); o.OUTIMAGE;
+  o.CLOSE;
+
+  f :- NEW INFILE("/tmp/esimc_file_items.dat");
+  f.OPEN(BLANKS(80));
+  f.INIMAGE;
+  a := f.ININT; b := f.ININT;         ! two ints from one image ;
+  OUTINT(a + b, 5); OUTIMAGE;
+  f.INIMAGE;
+  tag :- f.INTEXT(2); c := f.INCHAR;  ! "PQ" then 'R' from one image ;
+  OUTTEXT(tag); OUTCHAR(c); OUTIMAGE;
+  f.CLOSE;
+END.
