@@ -79,6 +79,12 @@ void simula_file_outimage(int64_t handle);
 int64_t simula_file_inint(int64_t handle);
 double simula_file_inreal(int64_t handle);
 int64_t simula_file_lastitem(int64_t handle);
+int64_t simula_text_moreitem(SimulaText* t);
+SimulaText* simula_text_intext(SimulaText* t, int64_t n);
+void simula_file_outfix(int64_t handle, double v, int64_t d, int64_t w);
+void simula_file_outreal(int64_t handle, double v, int64_t d, int64_t w);
+void simula_file_outfrac(int64_t handle, int64_t v, int64_t d, int64_t w);
+void simula_file_outchar(int64_t handle, int64_t c);
 
 /* SYSOUT/SYSIN editing-style I/O */
 void simula_outreal(double v, int64_t d, int64_t w);

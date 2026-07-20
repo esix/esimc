@@ -26,7 +26,8 @@ const char* const BUILTINS[] = {
     "lowerbound","upperbound","infrac","breakoutimage","outchar","outfrac","error",
     "inopen","inclose","inreadline","inreadtext","outopen","outclose",
     "finint","finreal","flastitem","fouttext","foutint","foutimage",
-    "sysin","sysout","__lastitem","detach","resume","__isnone",
+    "foutfix","foutreal","foutfrac","foutchar",
+    "sysin","sysout","__lastitem","detach","resume","__isnone","__ensure",
 };
 }
 

@@ -241,100 +241,112 @@ static std::string preprocessExternals(const std::string& source,
 //     PROCEDURE CLOSE; INCLOSE(FH);
 //   END;
 static StmtPtr buildInfileClass() {
-    auto id = [](const std::string& n) -> ExprPtr {
-        return ExprPtr(new Identifier(n));
-    };
-    // OPEN body
+    using B = BinaryOp;
+    auto id = [](const std::string& n) -> ExprPtr { return ExprPtr(new Identifier(n)); };
+    auto icall = [](const std::string& p, ExprList a) -> ExprPtr {
+        return ExprPtr(new ProcedureCall(p, std::move(a))); };
+    auto isnone = [&](const std::string& v) -> ExprPtr {
+        ExprList a; a.push_back(id(v)); return icall("__isnone", std::move(a)); };
+    auto mth = [](const std::string& obj, const std::string& m, ExprList a) -> ExprPtr {
+        return ExprPtr(new MethodCall(ExprPtr(new Identifier(obj)), m, std::move(a))); };
+    auto notE = [](ExprPtr e) { return ExprPtr(new UnaryOp(UnaryOp::NOT, std::move(e))); };
+
+    // OPEN(BUF): open the file, record the image width.
     StmtList openBody;
     {
-        ExprList opArgs; opArgs.push_back(id("filename"));
-        openBody.push_back(StmtPtr(new Assignment(
-            "fh", ExprPtr(new ProcedureCall("inopen", std::move(opArgs))))));
-        auto cond = ExprPtr(new BinaryOp(BinaryOp::EQ, id("fh"),
-                                         ExprPtr(new IntegerLiteral(0))));
-        auto thenS = StmtPtr(new Assignment("endfile",
-                                            ExprPtr(new BooleanLiteral(true))));
-        openBody.push_back(StmtPtr(new IfStatement(std::move(cond),
-                                                   std::move(thenS))));
+        ExprList a; a.push_back(id("filename"));
+        openBody.push_back(StmtPtr(new Assignment("fh", icall("inopen", std::move(a)))));
+        openBody.push_back(StmtPtr(new Assignment("width",
+            ExprPtr(new MemberAccess(id("buf"), "length")))));
+        openBody.push_back(StmtPtr(new IfStatement(
+            ExprPtr(new B(B::EQ, id("fh"), ExprPtr(new IntegerLiteral(0)))),
+            StmtPtr(new Assignment("endfile", ExprPtr(new BooleanLiteral(true)))))));
     }
-    // INIMAGE body
+    // INIMAGE: read one external record into IMAGE (cursor at 1); EOF -> ENDFILE.
     StmtList inimageBody;
     {
-        ExprList rlArgs;
-        rlArgs.push_back(id("fh"));
-        rlArgs.push_back(ExprPtr(new IntegerLiteral(132)));
-        inimageBody.push_back(StmtPtr(new RefAssignment(
-            "image", ExprPtr(new ProcedureCall("inreadtext", std::move(rlArgs))))));
-        // EOF is a genuine NULL image (raw pointer test) — NOT image = NOTEXT,
-        // which is content equality and true for a blank line (length-0 text).
-        ExprList noneArgs; noneArgs.push_back(id("image"));
-        auto cond = ExprPtr(new ProcedureCall("__isnone", std::move(noneArgs)));
-        auto thenS = StmtPtr(new Assignment("endfile",
-                                            ExprPtr(new BooleanLiteral(true))));
-        inimageBody.push_back(StmtPtr(new IfStatement(std::move(cond),
-                                                      std::move(thenS))));
+        ExprList a; a.push_back(id("fh")); a.push_back(id("width"));
+        inimageBody.push_back(StmtPtr(new RefAssignment("image",
+            icall("inreadtext", std::move(a)))));
+        inimageBody.push_back(StmtPtr(new IfStatement(isnone("image"),
+            StmtPtr(new Assignment("endfile", ExprPtr(new BooleanLiteral(true)))))));
     }
-    // ININT / INREAL / LASTITEM bodies (single assignment each)
-    auto oneCallBody = [&](const char* retName, const char* prim) {
+    // __ENSURE: skip to an image that still holds an item (crosses blank lines).
+    StmtList ensureBody;
+    {
+        auto cond = ExprPtr(new B(B::ANDTHEN, notE(id("endfile")),
+            ExprPtr(new B(B::ORELSE, isnone("image"),
+                          notE(mth("image", "moreitem", ExprList()))))));
+        ensureBody.push_back(StmtPtr(new WhileStatement(std::move(cond),
+            StmtPtr(new ExprStatement(icall("inimage", ExprList()))))));
+    }
+    // If the image is exhausted (or absent), advance to the next one.
+    auto refillIfEmpty = [&]() {
+        return StmtPtr(new IfStatement(
+            ExprPtr(new B(B::ORELSE, isnone("image"),
+                          notE(mth("image", "more", ExprList())))),
+            StmtPtr(new ExprStatement(icall("inimage", ExprList())))));
+    };
+    // INCHAR: next character; EM (rank 25) at end of file.
+    StmtList incharBody;
+    {
+        incharBody.push_back(refillIfEmpty());
+        ExprList c; c.push_back(ExprPtr(new IntegerLiteral(25)));
+        incharBody.push_back(StmtPtr(new IfStatement(id("endfile"),
+            StmtPtr(new Assignment("inchar", icall("char", std::move(c)))),
+            StmtPtr(new Assignment("inchar", mth("image", "getchar", ExprList()))))));
+    }
+    // ININT / INREAL / LASTITEM: de-edit the current image at its cursor.
+    auto deEdit = [&](const char* ret, const char* op) {
         StmtList b;
-        ExprList a; a.push_back(ExprPtr(new Identifier("fh")));
-        b.push_back(StmtPtr(new Assignment(retName,
-            ExprPtr(new ProcedureCall(prim, std::move(a))))));
+        b.push_back(StmtPtr(new ExprStatement(icall("__ensure", ExprList()))));
+        b.push_back(StmtPtr(new IfStatement(notE(id("endfile")),
+            StmtPtr(new Assignment(ret, mth("image", op, ExprList()))))));
         return b;
     };
-    auto inintBody = oneCallBody("inint", "finint");
-    auto inrealBody = oneCallBody("inreal", "finreal");
-    auto lastitemBody = oneCallBody("lastitem", "flastitem");
-    // INTEXT body
+    auto inintBody = deEdit("inint", "getint");
+    auto inrealBody = deEdit("inreal", "getreal");
+    StmtList lastitemBody;
+    {
+        lastitemBody.push_back(StmtPtr(new ExprStatement(icall("__ensure", ExprList()))));
+        lastitemBody.push_back(StmtPtr(new Assignment("lastitem", id("endfile"))));
+    }
+    // INTEXT(N): next N characters from the cursor, advancing it.
     StmtList intextBody;
     {
-        auto imageLen = ExprPtr(new MemberAccess(id("image"), "length"));
-        auto cond = ExprPtr(new BinaryOp(BinaryOp::LT, id("n"), std::move(imageLen)));
-        ExprList subArgs;
-        subArgs.push_back(ExprPtr(new IntegerLiteral(1)));
-        subArgs.push_back(id("n"));
-        auto thenS = StmtPtr(new RefAssignment("intext",
-            ExprPtr(new MethodCall(id("image"), "sub", std::move(subArgs)))));
-        auto elseS = StmtPtr(new RefAssignment("intext", id("image")));
-        intextBody.push_back(StmtPtr(new IfStatement(std::move(cond),
-            std::move(thenS), std::move(elseS))));
-        intextBody.push_back(StmtPtr(new ExprStatement(
-            ExprPtr(new ProcedureCall("inimage", ExprList())))));
+        intextBody.push_back(refillIfEmpty());
+        ExprList a; a.push_back(id("n"));
+        intextBody.push_back(StmtPtr(new IfStatement(notE(id("endfile")),
+            StmtPtr(new RefAssignment("intext", mth("image", "intext", std::move(a)))))));
     }
-    // CLOSE body
     StmtList closeBody;
     {
-        ExprList clArgs; clArgs.push_back(id("fh"));
-        closeBody.push_back(StmtPtr(new ExprStatement(
-            ExprPtr(new ProcedureCall("inclose", std::move(clArgs))))));
+        ExprList a; a.push_back(id("fh"));
+        closeBody.push_back(StmtPtr(new ExprStatement(icall("inclose", std::move(a)))));
     }
+
+    auto proc = [](const char* nm, bool typed, VarDeclaration::Type ty,
+                   std::vector<ParamSpec> ps, StmtList b) {
+        return StmtPtr(new ProcedureDecl(nm, typed, ty, std::move(ps),
+                                         StmtPtr(new Block(std::move(b))))); };
+    auto p1 = [](const char* nm, VarDeclaration::Type ty) {
+        std::vector<ParamSpec> ps; ParamSpec p; p.name = nm; p.type = ty;
+        ps.push_back(p); return ps; };
 
     StmtList body;
     body.push_back(StmtPtr(new VarDeclaration(VarDeclaration::INTEGER, "fh")));
+    body.push_back(StmtPtr(new VarDeclaration(VarDeclaration::INTEGER, "width")));
     body.push_back(StmtPtr(new VarDeclaration(VarDeclaration::TEXT, "image")));
     body.push_back(StmtPtr(new VarDeclaration(VarDeclaration::BOOLEAN, "endfile")));
-    {
-        std::vector<ParamSpec> ps; ParamSpec p; p.name = "buf"; p.type = VarDeclaration::TEXT;
-        ps.push_back(p);
-        body.push_back(StmtPtr(new ProcedureDecl("open", false, VarDeclaration::INTEGER,
-            std::move(ps), StmtPtr(new Block(std::move(openBody))))));
-    }
-    body.push_back(StmtPtr(new ProcedureDecl("inimage", false, VarDeclaration::INTEGER,
-        {}, StmtPtr(new Block(std::move(inimageBody))))));
-    body.push_back(StmtPtr(new ProcedureDecl("inint", true, VarDeclaration::INTEGER,
-        {}, StmtPtr(new Block(std::move(inintBody))))));
-    body.push_back(StmtPtr(new ProcedureDecl("inreal", true, VarDeclaration::REAL,
-        {}, StmtPtr(new Block(std::move(inrealBody))))));
-    body.push_back(StmtPtr(new ProcedureDecl("lastitem", true, VarDeclaration::BOOLEAN,
-        {}, StmtPtr(new Block(std::move(lastitemBody))))));
-    {
-        std::vector<ParamSpec> ps; ParamSpec p; p.name = "n"; p.type = VarDeclaration::INTEGER;
-        ps.push_back(p);
-        body.push_back(StmtPtr(new ProcedureDecl("intext", true, VarDeclaration::TEXT,
-            std::move(ps), StmtPtr(new Block(std::move(intextBody))))));
-    }
-    body.push_back(StmtPtr(new ProcedureDecl("close", false, VarDeclaration::INTEGER,
-        {}, StmtPtr(new Block(std::move(closeBody))))));
+    body.push_back(proc("open", false, VarDeclaration::INTEGER, p1("buf", VarDeclaration::TEXT), std::move(openBody)));
+    body.push_back(proc("inimage", false, VarDeclaration::INTEGER, {}, std::move(inimageBody)));
+    body.push_back(proc("__ensure", false, VarDeclaration::INTEGER, {}, std::move(ensureBody)));
+    body.push_back(proc("inchar", true, VarDeclaration::CHARACTER, {}, std::move(incharBody)));
+    body.push_back(proc("inint", true, VarDeclaration::INTEGER, {}, std::move(inintBody)));
+    body.push_back(proc("inreal", true, VarDeclaration::REAL, {}, std::move(inrealBody)));
+    body.push_back(proc("lastitem", true, VarDeclaration::BOOLEAN, {}, std::move(lastitemBody)));
+    body.push_back(proc("intext", true, VarDeclaration::TEXT, p1("n", VarDeclaration::INTEGER), std::move(intextBody)));
+    body.push_back(proc("close", false, VarDeclaration::INTEGER, {}, std::move(closeBody)));
 
     std::vector<ParamSpec> classParams;
     { ParamSpec p; p.name = "filename"; p.type = VarDeclaration::TEXT; classParams.push_back(p); }
@@ -381,6 +393,25 @@ static StmtPtr buildOutfileClass() {
         outimageBody.push_back(StmtPtr(new ExprStatement(
             ExprPtr(new ProcedureCall("foutimage", std::move(a))))));
     }
+    // OUTFIX(r,n,w) / OUTREAL(r,n,w) / OUTFRAC(v,n,w) / OUTCHAR(c): item editing
+    // straight to the file, mirroring the SYSOUT editing procedures.
+    auto edit3 = [&](const char* prim, const char* a1) {
+        StmtList b;
+        ExprList a; a.push_back(id("fh")); a.push_back(id(a1));
+        a.push_back(id("n")); a.push_back(id("w"));
+        b.push_back(StmtPtr(new ExprStatement(
+            ExprPtr(new ProcedureCall(prim, std::move(a))))));
+        return b;
+    };
+    auto outfixBody = edit3("foutfix", "r");
+    auto outrealBody = edit3("foutreal", "r");
+    auto outfracBody = edit3("foutfrac", "v");
+    StmtList outcharBody;
+    {
+        ExprList a; a.push_back(id("fh")); a.push_back(id("c"));
+        outcharBody.push_back(StmtPtr(new ExprStatement(
+            ExprPtr(new ProcedureCall("foutchar", std::move(a))))));
+    }
     StmtList closeBody;
     {
         ExprList a; a.push_back(id("fh"));
@@ -411,6 +442,25 @@ static StmtPtr buildOutfileClass() {
     }
     body.push_back(StmtPtr(new ProcedureDecl("outimage", false, VarDeclaration::INTEGER,
         {}, StmtPtr(new Block(std::move(outimageBody))))));
+    auto rnw = [](VarDeclaration::Type t1) {
+        std::vector<ParamSpec> ps;
+        ParamSpec a; a.name = (t1 == VarDeclaration::REAL) ? "r" : "v"; a.type = t1; ps.push_back(a);
+        ParamSpec b; b.name = "n"; b.type = VarDeclaration::INTEGER; ps.push_back(b);
+        ParamSpec c; c.name = "w"; c.type = VarDeclaration::INTEGER; ps.push_back(c);
+        return ps;
+    };
+    body.push_back(StmtPtr(new ProcedureDecl("outfix", false, VarDeclaration::INTEGER,
+        rnw(VarDeclaration::REAL), StmtPtr(new Block(std::move(outfixBody))))));
+    body.push_back(StmtPtr(new ProcedureDecl("outreal", false, VarDeclaration::INTEGER,
+        rnw(VarDeclaration::REAL), StmtPtr(new Block(std::move(outrealBody))))));
+    body.push_back(StmtPtr(new ProcedureDecl("outfrac", false, VarDeclaration::INTEGER,
+        rnw(VarDeclaration::INTEGER), StmtPtr(new Block(std::move(outfracBody))))));
+    {
+        std::vector<ParamSpec> ps; ParamSpec p; p.name = "c"; p.type = VarDeclaration::CHARACTER;
+        ps.push_back(p);
+        body.push_back(StmtPtr(new ProcedureDecl("outchar", false, VarDeclaration::INTEGER,
+            std::move(ps), StmtPtr(new Block(std::move(outcharBody))))));
+    }
     body.push_back(StmtPtr(new ProcedureDecl("close", false, VarDeclaration::INTEGER,
         {}, StmtPtr(new Block(std::move(closeBody))))));
 

@@ -874,9 +874,94 @@ int64_t simula_file_inint(int64_t handle) {
 
 double simula_file_inreal(int64_t handle) {
     FILE* f = (FILE*)(intptr_t)handle;
-    double v = 0.0;
-    if (f != NULL) { if (fscanf(f, "%lf", &v) != 1) v = 0.0; }
-    return v;
+    if (f == NULL) return 0.0;
+    int c;
+    while ((c = fgetc(f)) != EOF &&
+           (c == ' ' || c == '\t' || c == '\n' || c == '\r'));
+    char buf[64]; size_t j = 0;
+    while (c != EOF && j < 62 &&
+           ((c >= '0' && c <= '9') || c == '.' || c == '+' || c == '-' ||
+            c == 'e' || c == 'E' || c == '&')) {
+        buf[j++] = (char)(c == '&' ? 'e' : c);
+        c = fgetc(f);
+    }
+    if (c != EOF) ungetc(c, f);
+    buf[j] = '\0';
+    /* Bare-exponent numeral like "&2" means 1e2. */
+    if (buf[0] == 'e' || buf[0] == 'E' ||
+        ((buf[0] == '+' || buf[0] == '-') && (buf[1] == 'e' || buf[1] == 'E'))) {
+        char fixed[66];
+        int neg = buf[0] == '-';
+        snprintf(fixed, sizeof fixed, "%s1%s", neg ? "-" : "",
+                 buf + (buf[0] == 'e' || buf[0] == 'E' ? 0 : 1));
+        memcpy(buf, fixed, strlen(fixed) + 1);
+    }
+    return strtod(buf, NULL);
+}
+
+/* True when a non-blank character remains at/after the cursor. Used by INFILE's
+ * item procedures to decide whether the current image still has an item. */
+int64_t simula_text_moreitem(SimulaText* t) {
+    if (t == NULL) return 0;
+    const char* f = t->frame + t->start;
+    for (int64_t i = t->pos; i < t->length; i++)
+        if (f[i] != ' ' && f[i] != '\t') return 1;
+    return 0;
+}
+
+/* INTEXT(n): the next n characters from the cursor (clamped to what remains),
+ * advancing the cursor past them. Returns an alias, like SUB. */
+SimulaText* simula_text_intext(SimulaText* t, int64_t n) {
+    if (t == NULL) return st_fresh(0);
+    if (n < 0) n = 0;
+    int64_t avail = t->length - t->pos;
+    if (avail < 0) avail = 0;
+    if (n > avail) n = avail;
+    SimulaText* r = st_new(t->frame, t->start + t->pos, n, 0, t->framelen);
+    t->pos += n;
+    return r;
+}
+
+void simula_file_outfix(int64_t handle, double v, int64_t d, int64_t w) {
+    FILE* f = (FILE*)(intptr_t)handle;
+    if (f == NULL) return;
+    char buf[64];
+    if (d < 0) d = 0;
+    snprintf(buf, sizeof buf, "%.*f", (int)d, round_away(v, d));
+    int n = (int)strlen(buf);
+    if (w <= 0) { fputs(buf, f); return; }
+    if (n > w) { for (int64_t i = 0; i < w; i++) fputc('*', f); return; }
+    fprintf(f, "%*s", (int)w, buf);
+}
+
+void simula_file_outreal(int64_t handle, double v, int64_t d, int64_t w) {
+    FILE* f = (FILE*)(intptr_t)handle;
+    if (f == NULL) return;
+    char buf[64];
+    int prec = (int)(d > 0 ? d - 1 : 0);
+    snprintf(buf, sizeof buf, "%.*e", prec, v);
+    for (char* p = buf; *p; p++) if (*p == 'e' || *p == 'E') *p = '&';
+    int n = (int)strlen(buf);
+    if (w <= 0) { fputs(buf, f); return; }
+    if (n > w) { for (int64_t i = 0; i < w; i++) fputc('*', f); return; }
+    fprintf(f, "%*s", (int)w, buf);
+}
+
+void simula_file_outfrac(int64_t handle, int64_t v, int64_t d, int64_t w) {
+    FILE* f = (FILE*)(intptr_t)handle;
+    if (f == NULL) return;
+    char out[64];
+    frac_to_str(v, d, out);
+    int width = (int)(w > 0 && w < 60 ? w : 0);
+    if (width == 0) { fputs(out, f); return; }
+    char frame[64];
+    edit_into(frame, width, out);
+    fwrite(frame, 1, (size_t)width, f);
+}
+
+void simula_file_outchar(int64_t handle, int64_t c) {
+    FILE* f = (FILE*)(intptr_t)handle;
+    if (f != NULL) fputc((int)(unsigned char)c, f);
 }
 
 /* Look-ahead: skip blanks; true when only EOF remains. */

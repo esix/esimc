@@ -1699,6 +1699,15 @@ static llvm::Value* emitTextOp(CodeGenContext& ctx, llvm::Value* desc,
         return ctx.builder->CreateICmpNE(r, llvm::ConstantInt::get(i64Ty, 0), "moreb");
     }
     if (op == "pos")     return call0("simula_text_pos", i64Ty);
+    if (op == "moreitem") {
+        auto r = call0("simula_text_moreitem", i64Ty);
+        return ctx.builder->CreateICmpNE(r, llvm::ConstantInt::get(i64Ty, 0), "moreitemb");
+    }
+    if (op == "intext" && args.size() == 1) {
+        auto f = ctx.module->getOrInsertFunction("simula_text_intext",
+            llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty}, false));
+        return ctx.builder->CreateCall(f, {desc, toI(args[0])}, "intext");
+    }
     if (op == "getchar") return call0("simula_text_getchar", i8Ty);
     if (op == "strip")   return call0("simula_text_strip", ptrTy);
     if (op == "main")    return call0("simula_text_main", ptrTy);
@@ -2483,6 +2492,31 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             std::vector<llvm::Value*> vs; if (!evalAll(vs)) return nullptr;
             auto fn = ctx.module->getOrInsertFunction("simula_file_outimage",
                 llvm::FunctionType::get(voidTyF, {i64Ty}, false));
+            return ctx.builder->CreateCall(fn, vs);
+        }
+        if ((name == "foutfix" || name == "foutreal") && args.size() == 4) {
+            std::vector<llvm::Value*> vs; if (!evalAll(vs)) return nullptr;
+            if (!vs[1]->getType()->isDoubleTy())
+                vs[1] = ctx.builder->CreateSIToFP(vs[1], doubleTy, "tofp");
+            auto fn = ctx.module->getOrInsertFunction(
+                name == "foutfix" ? "simula_file_outfix" : "simula_file_outreal",
+                llvm::FunctionType::get(voidTyF, {i64Ty, doubleTy, i64Ty, i64Ty}, false));
+            return ctx.builder->CreateCall(fn, vs);
+        }
+        if (name == "foutfrac" && args.size() == 4) {
+            std::vector<llvm::Value*> vs; if (!evalAll(vs)) return nullptr;
+            if (vs[1]->getType()->isDoubleTy()) vs[1] = simulaRealToInt(ctx, vs[1], i64Ty);
+            auto fn = ctx.module->getOrInsertFunction("simula_file_outfrac",
+                llvm::FunctionType::get(voidTyF, {i64Ty, i64Ty, i64Ty, i64Ty}, false));
+            return ctx.builder->CreateCall(fn, vs);
+        }
+        if (name == "foutchar" && args.size() == 2) {
+            std::vector<llvm::Value*> vs; if (!evalAll(vs)) return nullptr;
+            if (vs[1]->getType()->isIntegerTy() &&
+                vs[1]->getType()->getIntegerBitWidth() < 64)
+                vs[1] = ctx.builder->CreateZExt(vs[1], i64Ty);
+            auto fn = ctx.module->getOrInsertFunction("simula_file_outchar",
+                llvm::FunctionType::get(voidTyF, {i64Ty, i64Ty}, false));
             return ctx.builder->CreateCall(fn, vs);
         }
         if (name == "finint" && args.size() == 1) {
