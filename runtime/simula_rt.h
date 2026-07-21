@@ -33,6 +33,7 @@ SimulaText* simula_lowcase(SimulaText* t);
 
 void simula_math_error(int64_t code, int64_t line);
 void simula_virtual_missing(int64_t line);
+void simula_name_assign_error(int64_t line);
 void simula_qua_error(int64_t line);
 void simula_expi_error(int64_t line);
 void simula_div_zero(int64_t line);

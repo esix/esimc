@@ -364,6 +364,18 @@ void simula_virtual_missing(int64_t line) {
     exit(1);
 }
 
+void simula_name_assign_error(int64_t line) {
+    /* Store through a NAME parameter whose actual is an expression, not a
+     * variable (Simula Standard 4.6.6 forbids the correspondence). */
+    if (line > 0)
+        fprintf(stderr, "Runtime error at line %ld: assignment to a name "
+                "parameter whose actual is not a variable\n", (long)line);
+    else
+        fprintf(stderr, "Runtime error: assignment to a name parameter "
+                "whose actual is not a variable\n");
+    exit(1);
+}
+
 void simula_qua_error(int64_t line) {
     /* X QUA C where X's class is neither C nor prefixed by C. */
     if (line > 0)

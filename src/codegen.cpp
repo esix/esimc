@@ -1601,23 +1601,35 @@ llvm::Value* CodeGenContext::buildNameThunk(Expression* actual, llvm::Type* form
             auto fv = unpackFromI64(*this, vraw, formalTy ? formalTy : lvTy);
             return convertScalar(*this, fv, lvTy);
         };
+        // Assignment to a name parameter is legal only when the actual is a
+        // variable (or array element). Any other actual makes the store an
+        // error (Simula Standard 4.6.6) — report it, don't discard silently.
+        bool storable = false;
         if (auto* id2 = dynamic_cast<Identifier*>(actual)) {
             auto cp = callerPtrs.find(id2->name);
             if (cp != callerPtrs.end()) {
                 llvm::Type* vty = i64Ty;
                 for (auto& c : caps) if (c.kind == 0 && c.name == id2->name) vty = c.ty;
                 builder->CreateStore(recover(vty), cp->second);
+                storable = true;
             } else {
                 auto [pp, pty] = getVarPtr(id2->name);
-                if (pp) builder->CreateStore(recover(pty), pp);
+                if (pp) { builder->CreateStore(recover(pty), pp); storable = true; }
             }
         } else if (auto* pc = dynamic_cast<ProcedureCall*>(actual)) {
             auto ait = arrays.find(pc->name);
             if (ait != arrays.end() && !pc->args.empty()) {
                 auto addr = emitArrayElemAddr(ait->second, pc->name, pc->args);
-                if (addr)
+                if (addr) {
                     builder->CreateStore(recover(ait->second.elementType), addr);
+                    storable = true;
+                }
             }
+        }
+        if (!storable) {
+            auto fn = module->getOrInsertFunction("simula_name_assign_error",
+                llvm::FunctionType::get(llvm::Type::getVoidTy(*llvmContext), {i64Ty}, false));
+            builder->CreateCall(fn, {llvm::ConstantInt::get(i64Ty, actual->line)});
         }
         builder->CreateRetVoid();
     }
@@ -4541,7 +4553,9 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
             std::vector<llvm::Type*> paramTypes;
             auto i64Ty3 = llvm::Type::getInt64Ty(*ctx.llvmContext);
             for (auto& p : pd->params) {
-                if (p.isName) {
+                // NAME arrays transmit like reference arrays: identification of
+                // the actual yields the same array object either way.
+                if (p.isName && !p.isArray) {
                     paramTypes.push_back(ptrTy);
                 } else if (p.isArray) {
                     // ptr, lo, hi, lo2, stride
@@ -5983,7 +5997,8 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         paramTypes.push_back(ctx.getRefType());
     }
     for (auto& p : params) {
-        if (p.isName) {
+        // NAME arrays transmit like reference arrays (same array object).
+        if (p.isName && !p.isArray) {
             paramTypes.push_back(ctx.getRefType()); // NAME = pointer
         } else if (p.isArray) {
             // ARRAY: ptr, lo1, hi1, lo2, stride (stride=1 for 1D; lo2 unused for 1D)
@@ -6084,7 +6099,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         std::set<int> labelIdx;
         std::map<int, llvm::Type*> nameTys;
         for (size_t i = 0; i < params.size(); i++) {
-            if (params[i].isName) {
+            if (params[i].isName && !params[i].isArray) {
                 nameIdx.insert((int)i);
                 nameTys[(int)i] = ctx.getLLVMType(params[i].type);
             }
@@ -6187,7 +6202,7 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
 
     for (auto& p : params) {
         auto ty = ctx.getLLVMType(p.type);
-        if (p.isName) {
+        if (p.isName && !p.isArray) {
             // NAME param: arg is a pointer to a {env,get,set} thunk. Keep a local
             // shadow slot (so getVarPtr and TEXT ops keep a stable address) and
             // register the thunk for by-name re-evaluation / write-back. The slot
@@ -6198,6 +6213,10 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
             auto slot = ctx.createEntryBlockAlloca(func, p.name, ty);
             ctx.nameParams[p.name] = {slot, ty};
             ctx.nameThunks[p.name] = thunkPtr;
+            // A NAME REF(C) formal keeps its declared qualification: attribute
+            // access, member assignment, and INSPECT through it must resolve.
+            if (!p.refClassName.empty())
+                ctx.refTypes[p.name] = p.refClassName;
             // Prime the slot only for TEXT (whose cursor ops read the descriptor
             // via getVarPtr). Priming a scalar would evaluate the actual once at
             // entry — wrong for call-by-name (no access yet) and unsafe if the
