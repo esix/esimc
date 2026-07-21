@@ -2093,6 +2093,21 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                 auto dep = ctx.builder->CreateSub(idxVal3, lo3, "dep_adj");
                 adjusted = ctx.builder->CreateAdd(plane, dep, "flat_idx3");
             }
+            // Dimensions 4+ (general N-dim arrays): fold each subscript in.
+            for (int k = 0; k < info.extraDims && (size_t)(3 + k) < args.size(); k++) {
+                auto idxK = coerceIndex(ctx, args[3 + k]->codegen(ctx));
+                if (!idxK) return nullptr;
+                auto dimTag = std::to_string(k + 4);
+                auto loIt2 = ctx.locals.find(name + "__lo" + dimTag);
+                auto nIt2 = ctx.locals.find(name + "__n" + dimTag);
+                if (loIt2 == ctx.locals.end() || nIt2 == ctx.locals.end()) break;
+                auto loK = ctx.builder->CreateLoad(i64Ty, loIt2->second, "lok");
+                auto nK = ctx.builder->CreateLoad(i64Ty, nIt2->second, "nk");
+                ctx.emitDimCheck(idxK, loK, nK, line);
+                adjusted = ctx.builder->CreateAdd(
+                    ctx.builder->CreateMul(adjusted, nK, "hyper_off"),
+                    ctx.builder->CreateSub(idxK, loK, "hyper_adj"), "flat_idxk");
+            }
         }
 
         llvm::Value* gep;
@@ -2639,11 +2654,16 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             lo = it != ctx.locals.end()
                 ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty, it->second, "lo2")
                 : (llvm::Value*)llvm::ConstantInt::get(i64Ty, info.lowerBound2);
-        } else {
+        } else if (dim == 3) {
             auto it = ctx.locals.find(id->name + "__lo3");
             lo = it != ctx.locals.end()
                 ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty, it->second, "lo3")
                 : (llvm::Value*)llvm::ConstantInt::get(i64Ty, info.lowerBound3);
+        } else {
+            auto it = ctx.locals.find(id->name + "__lo" + std::to_string(dim));
+            lo = it != ctx.locals.end()
+                ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty, it->second, "lok")
+                : (llvm::Value*)llvm::ConstantInt::get(i64Ty, 0);
         }
         if (name == "lowerbound") return lo;
 
@@ -2657,11 +2677,16 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
             extent = it != ctx.locals.end()
                 ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty, it->second, "stride")
                 : (llvm::Value*)llvm::ConstantInt::get(i64Ty, info.stride > 0 ? info.stride : 1);
-        } else {
+        } else if (dim == 3) {
             auto it = ctx.locals.find(id->name + "__stride2");
             extent = it != ctx.locals.end()
                 ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty, it->second, "stride2")
                 : (llvm::Value*)llvm::ConstantInt::get(i64Ty, info.stride2 > 0 ? info.stride2 : 1);
+        } else {
+            auto it = ctx.locals.find(id->name + "__n" + std::to_string(dim));
+            extent = it != ctx.locals.end()
+                ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty, it->second, "nk")
+                : (llvm::Value*)llvm::ConstantInt::get(i64Ty, 1);
         }
         return ctx.builder->CreateAdd(lo,
             ctx.builder->CreateSub(extent, llvm::ConstantInt::get(i64Ty, 1), "ext_m1"), "hi");
@@ -4773,8 +4798,10 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
                 }
     }
 
-    // Use fully-constant path only when ALL required bounds are compile-time constants
-    bool fullyConst = constBounds && (!has2D || constBounds2) && (!has3D || constBounds3);
+    // Use fully-constant path only when ALL required bounds are compile-time
+    // constants; 4+-dimensional arrays always take the dynamic path.
+    bool fullyConst = constBounds && (!has2D || constBounds2) && (!has3D || constBounds3) &&
+                      extraBounds.empty();
     if (fullyConst) {
         long long size = hi - lo + 1;
         if (size <= 0) size = 1;
@@ -4871,6 +4898,30 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
             sizeVal = ctx.builder->CreateMul(sizeVal, stride2Val, "totalsize3");
         }
 
+        // Dimensions 4+: per-dim lower bound and size kept in __lo<k>/__n<k>
+        // runtime slots (k = 4..); the total allocation folds each size in.
+        int nExtra = 0;
+        {
+            auto funcE = ctx.builder->GetInsertBlock()->getParent();
+            for (size_t k = 0; k < extraBounds.size(); k++) {
+                auto loK = extraBounds[k].first->codegen(ctx);
+                auto hiK = extraBounds[k].second->codegen(ctx);
+                if (!loK || !hiK) return nullptr;
+                auto nK = ctx.builder->CreateAdd(
+                    ctx.builder->CreateSub(hiK, loK, "rangek"),
+                    llvm::ConstantInt::get(i64Ty, 1), "sizek");
+                sizeVal = ctx.builder->CreateMul(sizeVal, nK, "totalsizek");
+                auto dimTag = std::to_string(k + 4);
+                auto loA = ctx.createEntryBlockAlloca(funcE, name + "__lo" + dimTag, i64Ty);
+                ctx.builder->CreateStore(loK, loA);
+                ctx.locals[name + "__lo" + dimTag] = loA;
+                auto nA = ctx.createEntryBlockAlloca(funcE, name + "__n" + dimTag, i64Ty);
+                ctx.builder->CreateStore(nK, nA);
+                ctx.locals[name + "__n" + dimTag] = nA;
+                nExtra++;
+            }
+        }
+
         auto elemSize = ctx.module->getDataLayout().getTypeAllocSize(elemTy);
         auto byteSize = ctx.builder->CreateMul(sizeVal,
             llvm::ConstantInt::get(i64Ty, elemSize), "bytes");
@@ -4929,6 +4980,7 @@ llvm::Value* ArrayDeclaration::codegen(CodeGenContext& ctx) {
             ctx.locals[name + "__stride2"] = str2Alloca;
             info.hasDynStride2 = true;
         }
+        info.extraDims = nExtra;
 
         ctx.arrays[name] = info;
         if (!refClassName.empty()) ctx.refTypes[name] = refClassName;
@@ -4997,6 +5049,21 @@ llvm::Value* ArrayAssignment::codegen(CodeGenContext& ctx) {
             auto plane = ctx.builder->CreateMul(adjusted, s3, "plane_off");
             auto dep = ctx.builder->CreateSub(idxVal3, lo3, "dep_adj");
             adjusted = ctx.builder->CreateAdd(plane, dep, "flat_idx3");
+        }
+        // Dimensions 4+ (general N-dim arrays): fold each subscript in.
+        for (int k = 0; k < info.extraDims && (size_t)k < extraIndices.size(); k++) {
+            auto idxK = coerceIndex(ctx, extraIndices[k]->codegen(ctx));
+            if (!idxK) return nullptr;
+            auto dimTag = std::to_string(k + 4);
+            auto loIt2 = ctx.locals.find(name + "__lo" + dimTag);
+            auto nIt2 = ctx.locals.find(name + "__n" + dimTag);
+            if (loIt2 == ctx.locals.end() || nIt2 == ctx.locals.end()) break;
+            auto loK = ctx.builder->CreateLoad(i64Ty, loIt2->second, "lok");
+            auto nK = ctx.builder->CreateLoad(i64Ty, nIt2->second, "nk");
+            ctx.emitDimCheck(idxK, loK, nK, line);
+            adjusted = ctx.builder->CreateAdd(
+                ctx.builder->CreateMul(adjusted, nK, "hyper_off"),
+                ctx.builder->CreateSub(idxK, loK, "hyper_adj"), "flat_idxk");
         }
     }
 
@@ -6031,6 +6098,9 @@ llvm::Value* ProcedureDecl::codegen(CodeGenContext& ctx) {
         auto i64TyC = llvm::Type::getInt64Ty(*ctx.llvmContext);
         for (auto& [aname, ainfo] : ctx.arrays) {
             if (llvm::isa<llvm::GlobalVariable>(ainfo.basePtr)) continue;
+            // 4+-dim arrays are not capturable (the closure protocol carries a
+            // 2D view); skipping them makes nested use an explicit error.
+            if (ainfo.extraDims > 0) continue;
             captured.push_back("__arr_" + aname);
             capturedTys.push_back(ptrTy);
             paramTypes.push_back(ptrTy);

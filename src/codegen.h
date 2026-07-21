@@ -79,6 +79,9 @@ struct ArrayInfo {
     bool hasDynStride = false;
     // Dynamic third-dimension bounds (runtime values in __lo3 / __stride2 allocas)
     bool hasDynStride2 = false;
+    // Dimensions beyond 3: count of extra dims, each with runtime __lo<k>/__n<k>
+    // allocas (k = 4..3+extraDims). 0 for ordinary <=3-dim arrays.
+    int extraDims = 0;
     bool isTextElem = false;  // element type is TEXT (descriptor): := copies in place
 };
 

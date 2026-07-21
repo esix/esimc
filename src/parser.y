@@ -17,6 +17,22 @@ void yyerror(const char* s);
 
 Program* programRoot = nullptr;
 
+/* Build an ArrayDeclaration from a flat bound-pair list (lo1,hi1,lo2,hi2,...).
+   The first three dimensions fill the legacy slots; any further pairs become
+   extraBounds (general N-dimensional arrays). Consumes `bounds`. */
+static Statement* makeArrayDecl(VarDeclaration::Type t, const std::string& nm,
+                                const std::string& refClass, ExprList* bounds) {
+    size_t nd = bounds->size() / 2;
+    auto take = [&](size_t i) { return ExprPtr((*bounds)[i].release()); };
+    auto* ad = new ArrayDeclaration(t, nm, take(0), take(1), refClass,
+        nd >= 2 ? take(2) : nullptr, nd >= 2 ? take(3) : nullptr,
+        nd >= 3 ? take(4) : nullptr, nd >= 3 ? take(5) : nullptr);
+    for (size_t k = 3; k < nd; k++)
+        ad->extraBounds.emplace_back(take(2*k), take(2*k + 1));
+    delete bounds;
+    return ad;
+}
+
 /* Merge a Simula-style ident_list with param_specs into a single ParamSpec vector.
    Names in the ident_list that don't appear in any spec get type INTEGER by default. */
 static std::vector<ParamSpec> mergeParams(
@@ -202,6 +218,8 @@ static Statement* lowerAssign(Expression* lhs, Expression* rhs) {
         ExprPtr i3(call->args.size() >= 3 ? call->args[2].release() : nullptr);
         auto* s = new ArrayAssignment(call->name, std::move(i1), ExprPtr(rhs), false,
                                       std::move(i2), std::move(i3));
+        for (size_t k = 3; k < call->args.size(); k++)
+            s->extraIndices.push_back(ExprPtr(call->args[k].release()));
         delete lhs; return s;
     }
     if (auto* ma = dynamic_cast<MemberAccess*>(lhs)) {
@@ -313,7 +331,7 @@ static Statement* makePrefixedBlock(const std::string& cls, Statement* blk,
 %type <vartype> virtual_is_rhs
 %type <stmtlist> top_level_decls
 %type <stmtlist> stmt_list class_body
-%type <exprlist> arg_list arg_list_ne
+%type <exprlist> arg_list arg_list_ne bound_pair_list
 %type <namelist> ident_list
 %type <sval> io_keyword
 %type <paramlist> typed_param_list opt_typed_params
@@ -557,36 +575,33 @@ declaration
     ;
 
 array_decl
-    : type_name T_ARRAY T_IDENT T_LPAREN expr T_COLON expr T_RPAREN {
-        $$ = new ArrayDeclaration((VarDeclaration::Type)$1, $3,
-                                  ExprPtr($5), ExprPtr($7));
+    : type_name T_ARRAY T_IDENT T_LPAREN bound_pair_list T_RPAREN {
+        $$ = makeArrayDecl((VarDeclaration::Type)$1, $3, "", $5);
       }
-    | type_name T_ARRAY T_IDENT T_LPAREN expr T_COLON expr T_RPAREN T_COMMA T_IDENT T_LPAREN expr T_COLON expr T_RPAREN {
-        /* Two arrays on one line: TYPE ARRAY a(lo:hi), b(lo:hi) */
+    | type_name T_ARRAY T_IDENT T_LPAREN bound_pair_list T_RPAREN T_COMMA T_IDENT T_LPAREN bound_pair_list T_RPAREN {
+        /* Two arrays on one line: TYPE ARRAY a(...), b(...) */
         auto stmts = new StmtList();
-        stmts->push_back(StmtPtr(new ArrayDeclaration((VarDeclaration::Type)$1, $3,
-                                  ExprPtr($5), ExprPtr($7))));
-        stmts->push_back(StmtPtr(new ArrayDeclaration((VarDeclaration::Type)$1, $10,
-                                  ExprPtr($12), ExprPtr($14))));
+        stmts->push_back(StmtPtr(makeArrayDecl((VarDeclaration::Type)$1, $3, "", $5)));
+        stmts->push_back(StmtPtr(makeArrayDecl((VarDeclaration::Type)$1, $8, "", $10)));
         $$ = new CompoundStmt(std::move(*stmts));
         delete stmts;
       }
-    | T_REF T_LPAREN T_IDENT T_RPAREN T_ARRAY T_IDENT T_LPAREN expr T_COLON expr T_RPAREN {
-        $$ = new ArrayDeclaration(VarDeclaration::TEXT, $6,
-                                  ExprPtr($8), ExprPtr($10), $3);
+    | T_REF T_LPAREN T_IDENT T_RPAREN T_ARRAY T_IDENT T_LPAREN bound_pair_list T_RPAREN {
+        $$ = makeArrayDecl(VarDeclaration::TEXT, $6, $3, $8);
       }
-    | type_name T_ARRAY T_IDENT T_LPAREN expr T_COLON expr T_COMMA expr T_COLON expr T_RPAREN {
-        /* 2D array: TYPE ARRAY a(lo1:hi1, lo2:hi2) */
-        $$ = new ArrayDeclaration((VarDeclaration::Type)$1, $3,
-                                  ExprPtr($5), ExprPtr($7),
-                                  "", ExprPtr($9), ExprPtr($11));
+    ;
+
+/* Flat list of bound pairs: lo1,hi1, lo2,hi2, ... (any number of dimensions) */
+bound_pair_list
+    : expr T_COLON expr {
+        $$ = new ExprList();
+        $$->push_back(ExprPtr($1));
+        $$->push_back(ExprPtr($3));
       }
-    | type_name T_ARRAY T_IDENT T_LPAREN expr T_COLON expr T_COMMA expr T_COLON expr T_COMMA expr T_COLON expr T_RPAREN {
-        /* 3D array: TYPE ARRAY a(lo1:hi1, lo2:hi2, lo3:hi3) */
-        $$ = new ArrayDeclaration((VarDeclaration::Type)$1, $3,
-                                  ExprPtr($5), ExprPtr($7),
-                                  "", ExprPtr($9), ExprPtr($11),
-                                  ExprPtr($13), ExprPtr($15));
+    | bound_pair_list T_COMMA expr T_COLON expr {
+        $$ = $1;
+        $$->push_back(ExprPtr($3));
+        $$->push_back(ExprPtr($5));
       }
     ;
 
@@ -1174,7 +1189,10 @@ expr_stmt
                 ExprPtr idx(call->args.empty() ? nullptr : call->args[0].release());
                 ExprPtr idx2(call->args.size() >= 2 ? call->args[1].release() : nullptr);
                 ExprPtr idx3(call->args.size() >= 3 ? call->args[2].release() : nullptr);
-                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), false, std::move(idx2), std::move(idx3));
+                auto* aa = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), false, std::move(idx2), std::move(idx3));
+                for (size_t k = 3; k < call->args.size(); k++)
+                    aa->extraIndices.push_back(ExprPtr(call->args[k].release()));
+                $$ = aa;
                 delete $1;
             } else {
                 MemberAccess* ma = dynamic_cast<MemberAccess*>($1);
@@ -1215,7 +1233,10 @@ expr_stmt
                 ExprPtr idx(call->args.empty() ? nullptr : call->args[0].release());
                 ExprPtr idx2(call->args.size() >= 2 ? call->args[1].release() : nullptr);
                 ExprPtr idx3(call->args.size() >= 3 ? call->args[2].release() : nullptr);
-                $$ = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), true, std::move(idx2), std::move(idx3));
+                auto* aa = new ArrayAssignment(call->name, std::move(idx), ExprPtr($3), true, std::move(idx2), std::move(idx3));
+                for (size_t k = 3; k < call->args.size(); k++)
+                    aa->extraIndices.push_back(ExprPtr(call->args[k].release()));
+                $$ = aa;
                 delete $1;
             } else {
                 MemberAccess* ma = dynamic_cast<MemberAccess*>($1);

@@ -250,6 +250,8 @@ public:
     ExprPtr lowerBound, upperBound;
     ExprPtr lowerBound2, upperBound2; // second dimension (nullptr = 1D)
     ExprPtr lowerBound3, upperBound3; // third dimension (nullptr = <=2D)
+    // Dimensions 4 and up (general N-dimensional arrays)
+    std::vector<std::pair<ExprPtr, ExprPtr>> extraBounds;
     std::string refClassName; // for REF arrays: the element class name
     ArrayDeclaration(VarDeclaration::Type t, std::string n, ExprPtr lo, ExprPtr hi,
                      std::string rc = "",
@@ -270,6 +272,7 @@ public:
     ExprPtr index;
     ExprPtr index2; // second dimension index (nullptr = 1D)
     ExprPtr index3; // third dimension index (nullptr = <=2D)
+    ExprList extraIndices; // dimensions 4+ (general N-dim arrays)
     ExprPtr value;
     bool isRef;     // true for :- (rebind), false for := (in-place for TEXT)
     ArrayAssignment(std::string n, ExprPtr i, ExprPtr v, bool ref,
