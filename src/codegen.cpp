@@ -1055,9 +1055,11 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
         return ait->second.basePtr;
     }
 
-    // Check if it's a no-arg function/procedure call (Simula allows omitting parens)
+    // Check if it's a no-arg function/procedure call (Simula allows omitting parens).
+    // "main" is excluded: in Simula it denotes the main program process (the null
+    // object in this runtime), never the C entry point.
     auto func = ctx.module->getFunction(name);
-    if (func) {
+    if (func && name != "main") {
         // Check if the function has only captured params (no explicit params)
         auto capIt = ctx.capturedVars.find(name);
         size_t numCaptured = (capIt != ctx.capturedVars.end()) ? capIt->second.size() : 0;
@@ -2600,7 +2602,10 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                 ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty, it->second, "lo2")
                 : (llvm::Value*)llvm::ConstantInt::get(i64Ty, info.lowerBound2);
         } else {
-            lo = llvm::ConstantInt::get(i64Ty, info.lowerBound3);
+            auto it = ctx.locals.find(id->name + "__lo3");
+            lo = it != ctx.locals.end()
+                ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty, it->second, "lo3")
+                : (llvm::Value*)llvm::ConstantInt::get(i64Ty, info.lowerBound3);
         }
         if (name == "lowerbound") return lo;
 
@@ -2615,7 +2620,10 @@ llvm::Value* ProcedureCall::codegen(CodeGenContext& ctx) {
                 ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty, it->second, "stride")
                 : (llvm::Value*)llvm::ConstantInt::get(i64Ty, info.stride > 0 ? info.stride : 1);
         } else {
-            extent = llvm::ConstantInt::get(i64Ty, info.stride2 > 0 ? info.stride2 : 1);
+            auto it = ctx.locals.find(id->name + "__stride2");
+            extent = it != ctx.locals.end()
+                ? (llvm::Value*)ctx.builder->CreateLoad(i64Ty, it->second, "stride2")
+                : (llvm::Value*)llvm::ConstantInt::get(i64Ty, info.stride2 > 0 ? info.stride2 : 1);
         }
         return ctx.builder->CreateAdd(lo,
             ctx.builder->CreateSub(extent, llvm::ConstantInt::get(i64Ty, 1), "ext_m1"), "hi");
@@ -3805,7 +3813,8 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
     }
 
     // PROCESS scheduling attributes (SIMULATION)
-    if (member == "evtime" || member == "idle" || member == "terminated") {
+    if (member == "evtime" || member == "idle" || member == "terminated" ||
+        member == "nextev") {
         auto i64TyP = llvm::Type::getInt64Ty(*ctx.llvmContext);
         auto doubleTyP = llvm::Type::getDoubleTy(*ctx.llvmContext);
         auto ptrTyP = llvm::PointerType::getUnqual(*ctx.llvmContext);
@@ -3813,6 +3822,11 @@ llvm::Value* MemberAccess::codegen(CodeGenContext& ctx) {
             auto fn = ctx.module->getOrInsertFunction("simula_sim_evtime",
                 llvm::FunctionType::get(doubleTyP, {ptrTyP}, false));
             return ctx.builder->CreateCall(fn, {obj}, "evtime");
+        }
+        if (member == "nextev") {
+            auto fn = ctx.module->getOrInsertFunction("simula_sim_nextev",
+                llvm::FunctionType::get(ptrTyP, {ptrTyP}, false));
+            return ctx.builder->CreateCall(fn, {obj}, "nextev");
         }
         auto fn = ctx.module->getOrInsertFunction(
             member == "idle" ? "simula_sim_idle" : "simula_sim_terminated",

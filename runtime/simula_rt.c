@@ -175,6 +175,9 @@ static SimulaCoro* _coro_current = NULL;  /* currently running coroutine; NULL =
  * HERE (Simula: control passes to the main program), never back into a stale
  * frame of whoever resumed it. */
 static ucontext_t* _main_react = NULL;
+/* Head (detached component) of the currently operating chain; NULL = the main
+ * program's component. Objects attached under it (NEW/CALL) share the head. */
+static SimulaCoro* _chain_head = NULL;
 
 static void coro_trampoline(void) {
     void (*func)(void*) = _pending_func;
@@ -211,12 +214,14 @@ void simula_coro_start(SimulaCoro* coro, void (*func)(void*), void* arg) {
     makecontext(&coro->context, coro_trampoline, 0);
 
     SimulaCoro* prev = _coro_current;
+    SimulaCoro* prev_head = _chain_head;
     coro->state = 1;
     coro->via_resume = 0;  /* initial operation is ATTACHED to the creator */
     _coro_current = coro;
     if (prev == NULL) _main_react = &coro->caller_ctx;
     swapcontext(&coro->caller_ctx, &coro->context);
     _coro_current = prev;
+    _chain_head = prev_head;
 }
 
 void simula_coro_detach(SimulaCoro* coro) {
@@ -240,9 +245,11 @@ void simula_coro_resume(SimulaCoro* coro) {
         exit(1);
     }
     SimulaCoro* prev = _coro_current;
+    SimulaCoro* prev_head = _chain_head;
     coro->state = 1;
     coro->via_resume = 1;
     _coro_current = coro;
+    _chain_head = coro;
     if (prev == NULL) {
         // Main program resuming a coroutine: main's reactivation point is here.
         _main_react = &coro->caller_ctx;
@@ -253,6 +260,13 @@ void simula_coro_resume(SimulaCoro* coro) {
         // resumed component's DETACH/termination goes to _main_react.
         prev->state = 2;
         swapcontext(&prev->context, &coro->context);
+    } else if (prev_head) {
+        // RESUME from inside an object ATTACHED (CALL/NEW) to a detached
+        // component: the whole component suspends with its reactivation point
+        // here, and becomes resumable through its head. The main program's
+        // reactivation point is untouched.
+        prev_head->state = 2;
+        swapcontext(&prev_head->context, &coro->context);
     } else {
         // An ATTACHED component (operating under CALL/NEW as part of the main
         // component's chain) executing RESUME suspends the main component; its
@@ -261,6 +275,7 @@ void simula_coro_resume(SimulaCoro* coro) {
         swapcontext(&prev->context, &coro->context);
     }
     _coro_current = prev;
+    _chain_head = prev_head;
 }
 
 /* CALL(X): transfer control to detached X, attaching it to the caller so that
@@ -277,12 +292,14 @@ void simula_coro_call(SimulaCoro* coro) {
         exit(1);
     }
     SimulaCoro* prev = _coro_current;
+    SimulaCoro* prev_head = _chain_head;
     coro->state = 1;
     coro->via_resume = 0;  /* CALL attaches: DETACH/termination returns here */
     _coro_current = coro;
     if (prev == NULL) _main_react = &coro->caller_ctx;
     swapcontext(&coro->caller_ctx, &coro->context);
     _coro_current = prev;
+    _chain_head = prev_head;
 }
 
 void simula_coro_free(SimulaCoro* coro) {
@@ -1280,6 +1297,16 @@ double simula_sim_evtime(void* obj) {
     exit(1);
 }
 
+/* NEXTEV: the process of the event notice following this process's notice.
+ * The operating process's own notice is (conceptually) the SQS head, so its
+ * NEXTEV is the first queued notice. Idle/last-scheduled processes give NULL. */
+void* simula_sim_nextev(void* obj) {
+    if (obj == sim_current_obj) return sim_sqs ? sim_sqs->obj : NULL;
+    for (SimNotice* n = sim_sqs; n; n = n->next)
+        if (n->obj == obj) return n->next ? n->next->obj : NULL;
+    return NULL;
+}
+
 void simula_sim_cancel(void* obj) {
     if (obj == NULL) return;
     /* Standard: cancel(current) is passivate. */
@@ -1378,8 +1405,12 @@ void simula_sim_hold(double dt) {
  * program, drain the whole event list. */
 void simula_sim_passivate(void) {
     if (sim_current_obj == NULL) {
+        /* Main's event notice is removed, so it can continue only if some
+         * process reactivates it; run the remaining events, and if the SQS
+         * empties the simulation is stuck (standard: error termination). */
         sim_main_loop(INFINITY);
-        return;
+        fprintf(stderr, "Runtime error: PASSIVATE left the sequencing set empty (no next event)\n");
+        exit(1);
     }
     void* self = sim_current_obj;
     simula_coro_detach(sim_coro_of(self));

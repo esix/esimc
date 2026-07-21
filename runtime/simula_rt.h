@@ -97,6 +97,7 @@ void* simula_sim_current(void);
 int64_t simula_sim_idle(void* obj);
 int64_t simula_sim_terminated(void* obj);
 double simula_sim_evtime(void* obj);
+void* simula_sim_nextev(void* obj);
 void simula_sim_cancel(void* obj);
 void simula_sim_activate(void* obj, double t, int64_t prior, int64_t reactivate);
 void simula_sim_activate_now(void* obj, int64_t reactivate);
