@@ -584,10 +584,12 @@ int64_t simula_text_pos(SimulaText* s) {
 }
 
 void simula_text_setpos(SimulaText* s, int64_t p) {
+    /* Standard: POS := if i < 1 or i > LENGTH+1 then LENGTH+1 else i,
+     * so any out-of-range argument (either side) parks the cursor at the end
+     * (MORE becomes false). */
     if (s == NULL) return;
     int64_t z = p - 1;
-    if (z < 0) z = 0;
-    if (z > s->length) z = s->length;
+    if (z < 0 || z > s->length) z = s->length;
     s->pos = z;
 }
 
@@ -703,26 +705,46 @@ void simula_outint(int64_t v, int64_t w) {
  * TEXT editing / de-editing procedures (Simula 67 ch. 8)
  * ================================================================ */
 
-/* De-editing scans the descriptor window from its cursor and advances pos
- * past the parsed item, so sequential GETINT/GETREAL/GETFRAC walk the text. */
+/* De-editing (Simula Standard 8.6): the numeric item is located from the
+ * START of the text (POS is an output, not an input); the sign part is
+ * BLANKS [SIGN] BLANKS; POS is left one past the item; finding no item of
+ * the requested form is a runtime error. */
+
+static void st_dedit_error(const char* what) {
+    fprintf(stderr, "Runtime error: %s: no numeric item in text\n", what);
+    exit(1);
+}
+
+/* SIGN-PART = BLANKS [SIGN] BLANKS. Returns the index after it. */
+static int64_t st_signpart(const char* f, int64_t n, int* neg) {
+    int64_t i = 0;
+    *neg = 0;
+    while (i < n && (f[i] == ' ' || f[i] == '\t')) i++;
+    if (i < n && (f[i] == '-' || f[i] == '+')) {
+        *neg = (f[i] == '-');
+        i++;
+        while (i < n && (f[i] == ' ' || f[i] == '\t')) i++;
+    }
+    return i;
+}
 
 int64_t simula_text_getint(SimulaText* t) {
-    if (t == NULL) return 0;
-    int64_t i = t->pos;
+    if (t == NULL) st_dedit_error("GETINT");
     const char* f = t->frame + t->start;
-    while (i < t->length && (f[i] == ' ' || f[i] == '\t')) i++;
-    int64_t v = 0, neg = 0, seen = 0;
-    if (i < t->length && (f[i] == '-' || f[i] == '+')) { neg = (f[i] == '-'); i++; }
+    int neg;
+    int64_t i = st_signpart(f, t->length, &neg);
+    int64_t v = 0, seen = 0;
     while (i < t->length && f[i] >= '0' && f[i] <= '9') { v = v * 10 + (f[i] - '0'); i++; seen = 1; }
-    if (seen) t->pos = i;
+    if (!seen) st_dedit_error("GETINT");
+    t->pos = i;
     return neg ? -v : v;
 }
 
 double simula_text_getreal(SimulaText* t) {
-    if (t == NULL) return 0.0;
-    int64_t i = t->pos;
+    if (t == NULL) st_dedit_error("GETREAL");
     const char* f = t->frame + t->start;
-    while (i < t->length && (f[i] == ' ' || f[i] == '\t')) i++;
+    int neg;
+    int64_t i = st_signpart(f, t->length, &neg);
     char buf[64]; size_t j = 0;
     int64_t startScan = i;
     while (i < t->length && j < 62) {
@@ -735,26 +757,26 @@ double simula_text_getreal(SimulaText* t) {
     }
     buf[j] = '\0';
     /* A bare-exponent numeral like "&2" means 1e2 (Simula de-editing). */
+    int prepended = 0;
     char fixed[66];
-    if (buf[0] == 'e' || buf[0] == 'E' ||
-        ((buf[0] == '+' || buf[0] == '-') && (buf[1] == 'e' || buf[1] == 'E'))) {
-        int neg = buf[0] == '-';
-        snprintf(fixed, sizeof fixed, "%s1%s", neg ? "-" : "", buf + (buf[0] == 'e' || buf[0] == 'E' ? 0 : 1));
+    if (buf[0] == 'e' || buf[0] == 'E') {
+        snprintf(fixed, sizeof fixed, "1%s", buf);
         memcpy(buf, fixed, strlen(fixed) + 1);
+        prepended = 1;
     }
     char* end = NULL;
     double v = strtod(buf, &end);
-    if (end && end != buf) t->pos = startScan + (int64_t)(end - buf);
-    return v;
+    if (end == NULL || end == buf) st_dedit_error("GETREAL");
+    t->pos = startScan + (int64_t)(end - buf) - prepended;
+    return neg ? -v : v;
 }
 
 int64_t simula_text_getfrac(SimulaText* t) {
-    if (t == NULL) return 0;
-    int64_t i = t->pos;
+    if (t == NULL) st_dedit_error("GETFRAC");
     const char* f = t->frame + t->start;
-    while (i < t->length && (f[i] == ' ' || f[i] == '\t')) i++;
-    int64_t v = 0, neg = 0, seen = 0;
-    if (i < t->length && (f[i] == '-' || f[i] == '+')) { neg = (f[i] == '-'); i++; }
+    int neg;
+    int64_t i = st_signpart(f, t->length, &neg);
+    int64_t v = 0, seen = 0;
     while (i < t->length) {
         char c = f[i];
         if (c >= '0' && c <= '9') { v = v * 10 + (c - '0'); seen = 1; i++; }
@@ -762,7 +784,8 @@ int64_t simula_text_getfrac(SimulaText* t) {
                  i + 1 < t->length && f[i+1] >= '0' && f[i+1] <= '9') i++;
         else break;
     }
-    if (seen) t->pos = i;
+    if (!seen) st_dedit_error("GETFRAC");
+    t->pos = i;
     return neg ? -v : v;
 }
 
@@ -876,9 +899,20 @@ void simula_file_outtext(int64_t handle, SimulaText* t) {
 
 /* INFILE INIMAGE/INTEXT support: read one line and wrap it as a TEXT. */
 SimulaText* simula_inreadtext(int64_t handle, int64_t maxlen) {
+    /* IMAGE is the full fixed-width buffer: the external record is left-
+     * justified and blank-padded to the image length (standard INIMAGE), so
+     * e.g. INTEXT(width) consumes exactly one image. */
     char* line = simula_inreadline(handle, maxlen);
     if (line == NULL) return NULL;
     int64_t n = (int64_t)strlen(line);
+    if (maxlen <= 0) maxlen = 132;
+    if (n < maxlen) {
+        char* padded = (char*)malloc((size_t)maxlen);
+        memcpy(padded, line, (size_t)n);
+        memset(padded + n, ' ', (size_t)(maxlen - n));
+        free(line);
+        return st_new(padded, 0, maxlen, 0, maxlen);
+    }
     return st_new(line, 0, n, 0, n);
 }
 

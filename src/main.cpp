@@ -271,15 +271,6 @@ static StmtPtr buildInfileClass() {
         inimageBody.push_back(StmtPtr(new IfStatement(isnone("image"),
             StmtPtr(new Assignment("endfile", ExprPtr(new BooleanLiteral(true)))))));
     }
-    // __ENSURE: skip to an image that still holds an item (crosses blank lines).
-    StmtList ensureBody;
-    {
-        auto cond = ExprPtr(new B(B::ANDTHEN, notE(id("endfile")),
-            ExprPtr(new B(B::ORELSE, isnone("image"),
-                          notE(mth("image", "moreitem", ExprList()))))));
-        ensureBody.push_back(StmtPtr(new WhileStatement(std::move(cond),
-            StmtPtr(new ExprStatement(icall("inimage", ExprList()))))));
-    }
     // If the image is exhausted (or absent), advance to the next one.
     auto refillIfEmpty = [&]() {
         return StmtPtr(new IfStatement(
@@ -296,28 +287,70 @@ static StmtPtr buildInfileClass() {
             StmtPtr(new Assignment("inchar", icall("char", std::move(c)))),
             StmtPtr(new Assignment("inchar", mth("image", "getchar", ExprList()))))));
     }
-    // ININT / INREAL / LASTITEM: de-edit the current image at its cursor.
+    auto blankChar = []() { return ExprPtr(new CharLiteral(' ')); };
+    // LASTITEM (standard body): consume blanks — across images via INCHAR —
+    // until a non-blank or EOF; leave POS at the first non-blank character.
+    StmtList lastitemBody;
+    {
+        lastitemBody.push_back(StmtPtr(new VarDeclaration(VarDeclaration::CHARACTER, "c")));
+        lastitemBody.push_back(StmtPtr(new Assignment("c", blankChar())));
+        lastitemBody.push_back(StmtPtr(new WhileStatement(
+            ExprPtr(new B(B::ANDTHEN, notE(id("endfile")),
+                          ExprPtr(new B(B::EQ, id("c"), blankChar())))),
+            StmtPtr(new Assignment("c", icall("inchar", ExprList()))))));
+        lastitemBody.push_back(StmtPtr(new Assignment("lastitem", id("endfile"))));
+        ExprList sp; sp.push_back(ExprPtr(new B(B::SUB,
+            mth("image", "pos", ExprList()), ExprPtr(new IntegerLiteral(1)))));
+        lastitemBody.push_back(StmtPtr(new IfStatement(
+            ExprPtr(new B(B::ANDTHEN, notE(id("endfile")),
+                          ExprPtr(new B(B::NE, id("c"), blankChar())))),
+            StmtPtr(new ExprStatement(mth("image", "setpos", std::move(sp)))))));
+    }
+    // ININT / INREAL / INFRAC (standard shape): skip blanks via LASTITEM, then
+    // de-edit a subtext running from POS and advance POS past the item. At end
+    // of file IMAGE is NOTEXT, so the de-edit raises the mandated runtime error.
     auto deEdit = [&](const char* ret, const char* op) {
         StmtList b;
-        b.push_back(StmtPtr(new ExprStatement(icall("__ensure", ExprList()))));
-        b.push_back(StmtPtr(new IfStatement(notE(id("endfile")),
+        b.push_back(StmtPtr(new VarDeclaration(VarDeclaration::TEXT, "t")));
+        StmtList inner;
+        {
+            ExprList sa;
+            sa.push_back(mth("image", "pos", ExprList()));
+            sa.push_back(ExprPtr(new B(B::SUB,
+                ExprPtr(new B(B::ADD, mth("image", "length", ExprList()),
+                              ExprPtr(new IntegerLiteral(1)))),
+                mth("image", "pos", ExprList()))));
+            inner.push_back(StmtPtr(new RefAssignment("t",
+                mth("image", "sub", std::move(sa)))));
+            inner.push_back(StmtPtr(new Assignment(ret, mth("t", op, ExprList()))));
+            ExprList sp; sp.push_back(ExprPtr(new B(B::SUB,
+                ExprPtr(new B(B::ADD, mth("image", "pos", ExprList()),
+                              mth("t", "pos", ExprList()))),
+                ExprPtr(new IntegerLiteral(1)))));
+            inner.push_back(StmtPtr(new ExprStatement(
+                mth("image", "setpos", std::move(sp)))));
+        }
+        b.push_back(StmtPtr(new IfStatement(
+            notE(icall("lastitem", ExprList())),
+            StmtPtr(new Block(std::move(inner))),
             StmtPtr(new Assignment(ret, mth("image", op, ExprList()))))));
         return b;
     };
     auto inintBody = deEdit("inint", "getint");
     auto inrealBody = deEdit("inreal", "getreal");
-    StmtList lastitemBody;
-    {
-        lastitemBody.push_back(StmtPtr(new ExprStatement(icall("__ensure", ExprList()))));
-        lastitemBody.push_back(StmtPtr(new Assignment("lastitem", id("endfile"))));
-    }
-    // INTEXT(N): next N characters from the cursor, advancing it.
+    auto infracBody = deEdit("infrac", "getfrac");
+    // INTEXT(N): exactly N characters, crossing image boundaries via INCHAR.
     StmtList intextBody;
     {
-        intextBody.push_back(refillIfEmpty());
-        ExprList a; a.push_back(id("n"));
-        intextBody.push_back(StmtPtr(new IfStatement(notE(id("endfile")),
-            StmtPtr(new RefAssignment("intext", mth("image", "intext", std::move(a)))))));
+        intextBody.push_back(StmtPtr(new VarDeclaration(VarDeclaration::TEXT, "t")));
+        ExprList bl; bl.push_back(id("n"));
+        intextBody.push_back(StmtPtr(new RefAssignment("t",
+            icall("blanks", std::move(bl)))));
+        ExprList pc; pc.push_back(icall("inchar", ExprList()));
+        intextBody.push_back(StmtPtr(new WhileStatement(
+            mth("t", "more", ExprList()),
+            StmtPtr(new ExprStatement(mth("t", "putchar", std::move(pc)))))));
+        intextBody.push_back(StmtPtr(new RefAssignment("intext", ExprPtr(new Identifier("t")))));
     }
     StmtList closeBody;
     {
@@ -340,10 +373,10 @@ static StmtPtr buildInfileClass() {
     body.push_back(StmtPtr(new VarDeclaration(VarDeclaration::BOOLEAN, "endfile")));
     body.push_back(proc("open", false, VarDeclaration::INTEGER, p1("buf", VarDeclaration::TEXT), std::move(openBody)));
     body.push_back(proc("inimage", false, VarDeclaration::INTEGER, {}, std::move(inimageBody)));
-    body.push_back(proc("__ensure", false, VarDeclaration::INTEGER, {}, std::move(ensureBody)));
     body.push_back(proc("inchar", true, VarDeclaration::CHARACTER, {}, std::move(incharBody)));
     body.push_back(proc("inint", true, VarDeclaration::INTEGER, {}, std::move(inintBody)));
     body.push_back(proc("inreal", true, VarDeclaration::REAL, {}, std::move(inrealBody)));
+    body.push_back(proc("infrac", true, VarDeclaration::INTEGER, {}, std::move(infracBody)));
     body.push_back(proc("lastitem", true, VarDeclaration::BOOLEAN, {}, std::move(lastitemBody)));
     body.push_back(proc("intext", true, VarDeclaration::TEXT, p1("n", VarDeclaration::INTEGER), std::move(intextBody)));
     body.push_back(proc("close", false, VarDeclaration::INTEGER, {}, std::move(closeBody)));
