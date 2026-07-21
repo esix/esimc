@@ -4520,20 +4520,22 @@ llvm::Value* Block::codegen(CodeGenContext& ctx) {
     ctx.blockDeclared.clear();
     ctx.blockDepth++;
 
-    // Pre-pass: declare all class skeletons in this block so sibling classes can
-    // reference each other regardless of declaration order (Simula sibling classes
-    // are mutually visible). Bodies are generated later in the execution pass.
-    for (auto& stmt : statements) {
-        if (auto* cd = dynamic_cast<ClassDecl*>(stmt.get()))
-            cd->declareSkeleton(ctx);
-    }
-
     // First pass: process all declarations (vars, arrays, refs, labels)
     // so that procedures declared later in the block can reference them
     for (auto& stmt : statements) {
         if (isDeclarationStmt(stmt.get())) {
             stmt->codegen(ctx);
         }
+    }
+
+    // Then declare all class skeletons in this block so sibling classes can
+    // reference each other regardless of declaration order (Simula sibling
+    // classes are mutually visible). Bodies are generated later in the
+    // execution pass. Runs AFTER the declarations pass so lexical capture
+    // sees every local of this block, wherever the class appears in it.
+    for (auto& stmt : statements) {
+        if (auto* cd = dynamic_cast<ClassDecl*>(stmt.get()))
+            cd->declareSkeleton(ctx);
     }
 
     // Forward-declare all top-level procedures so class methods (and earlier-declared
