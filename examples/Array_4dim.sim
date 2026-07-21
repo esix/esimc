@@ -1,0 +1,24 @@
+COMMENT Four-dimensional array with mixed bounds and bounds inquiries;
+BEGIN
+   INTEGER n;
+   n := 2;
+   BEGIN
+      INTEGER ARRAY D(1:2, 0:1, -1:1, 1:n);
+      INTEGER i, j, k, l, s;
+      FOR i := 1 STEP 1 UNTIL 2 DO
+      FOR j := 0 STEP 1 UNTIL 1 DO
+      FOR k := -1 STEP 1 UNTIL 1 DO
+      FOR l := 1 STEP 1 UNTIL n DO
+         D(i,j,k,l) := 1000*i + 100*j + 10*k + l;
+      s := 0;
+      FOR i := 1 STEP 1 UNTIL 2 DO
+      FOR j := 0 STEP 1 UNTIL 1 DO
+      FOR k := -1 STEP 1 UNTIL 1 DO
+      FOR l := 1 STEP 1 UNTIL n DO
+         s := s + D(i,j,k,l);
+      OUTINT(s, 7); OUTIMAGE;
+      OUTINT(D(2,1,-1,2), 6); OUTIMAGE;
+      OUTINT(LOWERBOUND(D,3), 3); OUTINT(UPPERBOUND(D,3), 3);
+      OUTINT(LOWERBOUND(D,4), 3); OUTINT(UPPERBOUND(D,4), 3); OUTIMAGE;
+   END
+END.

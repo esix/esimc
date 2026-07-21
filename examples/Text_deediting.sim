@@ -1,0 +1,16 @@
+COMMENT Standard TEXT de-editing: items located from the start of the text,
+        blanks allowed around the sign, POS left past the item. SETPOS out of
+        range parks the cursor at LENGTH+1. String quote doubling and ISO codes;
+BEGIN
+   TEXT t;
+   t :- COPY("77 88");
+   t.SETPOS(4);
+   OUTINT(t.GETINT, 0); OUTINT(t.POS, 3); OUTIMAGE;
+   t :- COPY("- 45");
+   OUTINT(t.GETINT, 0); OUTINT(t.POS, 3); OUTIMAGE;
+   t :- COPY("abc");
+   t.SETPOS(0);
+   OUTINT(t.POS, 0); OUTIMAGE;
+   OUTTEXT("a""b!66!c");
+   OUTIMAGE;
+END.

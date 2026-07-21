@@ -1,0 +1,20 @@
+COMMENT Designational expressions: conditional GOTO, conditional and
+        switch-designator switch elements, and a switch GOTO from inside
+        a procedure (non-local jump);
+BEGIN
+   INTEGER i;
+   SWITCH S := L1, IF i > 5 THEN L1 ELSE L2, S(1);
+   SWITCH T := S(2);
+   PROCEDURE jump;
+      GOTO T(1);
+
+   i := 2;
+   GOTO IF i = 2 THEN M1 ELSE M2;
+M2: OUTTEXT("wrong"); OUTIMAGE;
+M1: OUTTEXT("cond-goto"); OUTIMAGE;
+   jump;
+   OUTTEXT("unreached"); OUTIMAGE;
+L1: OUTTEXT("one"); OUTIMAGE; GOTO fin;
+L2: OUTTEXT("two"); OUTIMAGE;
+fin:
+END.

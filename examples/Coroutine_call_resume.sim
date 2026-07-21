@@ -1,0 +1,24 @@
+COMMENT Quasi-parallel sequencing: CALL of a resume-suspended component and
+        DETACH of a resumed component both transfer per ch. 7.3.1;
+BEGIN
+   REF(A) a; REF(B) b;
+   CLASS A;
+   BEGIN
+      DETACH;
+      OUTTEXT("A1"); OUTIMAGE;
+      RESUME(b);
+      OUTTEXT("A2"); OUTIMAGE;
+      DETACH;
+   END;
+   CLASS B;
+   BEGIN
+      DETACH;
+      OUTTEXT("B1"); OUTIMAGE;
+      CALL(a);
+      OUTTEXT("B2"); OUTIMAGE;
+      DETACH;
+   END;
+   a :- NEW A; b :- NEW B;
+   RESUME(a);
+   OUTTEXT("M1"); OUTIMAGE;
+END.
