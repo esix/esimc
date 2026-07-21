@@ -61,6 +61,21 @@ void CodeGenContext::emitNonLocalGotoSetup(llvm::Function* func, Statement* body
     // and for identifiers passed as call arguments (potential non-local GOTO
     // targets, i.e. LABEL actuals).
     std::set<std::string> localLabels, nonLocalTargets;
+    // Switch definitions in this body: a GOTO S(i) inside a nested procedure or
+    // class can jump to any of S's ultimate label targets, so those labels need
+    // dispatch entries just like directly-named ones.
+    std::map<std::string, std::vector<Statement*>> switchDefs;
+    std::function<void(Statement*)> collectSw = [&](Statement* s) {
+        if (!s) return;
+        if (auto* sd = dynamic_cast<SwitchDeclaration*>(s)) {
+            auto& v = switchDefs[sd->name];
+            for (auto& e : sd->elements) v.push_back(e.get());
+        }
+        if (auto* b = dynamic_cast<Block*>(s)) for (auto& st : b->statements) collectSw(st.get());
+        if (auto* cs = dynamic_cast<CompoundStmt*>(s)) for (auto& st : cs->statements) collectSw(st.get());
+        if (auto* ls = dynamic_cast<LabeledStatement*>(s)) collectSw(ls->statement.get());
+        if (auto* i2 = dynamic_cast<IfStatement*>(s)) { collectSw(i2->thenBranch.get()); collectSw(i2->elseBranch.get()); }
+    };
     std::function<void(Expression*)> scanExpr = [&](Expression* e) {
         if (!e) return;
         auto checkArgs = [&](ExprList& args) {
@@ -104,9 +119,17 @@ void CodeGenContext::emitNonLocalGotoSetup(llvm::Function* func, Statement* body
             // anonymous subclass of a prefixed block) that names one of THIS
             // function's labels is a non-local jump into us: give that label
             // a setjmp dispatch entry, like a LABEL actual would.
+            std::set<std::string> expandedSw;
             std::function<void(Statement*)> deepScan = [&](Statement* n) {
                 if (!n) return;
                 if (auto* g = dynamic_cast<GotoStatement*>(n)) nonLocalTargets.insert(g->label);
+                if (auto* cg = dynamic_cast<ComputedGoto*>(n)) {
+                    if (expandedSw.insert(cg->switchName).second) {
+                        auto sit = switchDefs.find(cg->switchName);
+                        if (sit != switchDefs.end())
+                            for (auto* e : sit->second) deepScan(e);
+                    }
+                }
                 if (auto* b2 = dynamic_cast<Block*>(n)) for (auto& st : b2->statements) deepScan(st.get());
                 if (auto* c2 = dynamic_cast<CompoundStmt*>(n)) for (auto& st : c2->statements) deepScan(st.get());
                 if (auto* i2 = dynamic_cast<IfStatement*>(n)) { deepScan(i2->thenBranch.get()); deepScan(i2->elseBranch.get()); }
@@ -124,6 +147,7 @@ void CodeGenContext::emitNonLocalGotoSetup(llvm::Function* func, Statement* body
                 for (auto& st : cd->bodyStmts) deepScan(st.get());
         }
     };
+    collectSw(body);
     scan(body);
 
     // Any local label passed as a call argument may be the target of a longjmp
@@ -5456,32 +5480,56 @@ llvm::Value* ActivateStatement::codegen(CodeGenContext& ctx) {
 }
 
 llvm::Value* SwitchDeclaration::codegen(CodeGenContext& ctx) {
-    // Store label list; basic blocks will be resolved at GO TO S(I) time.
-    ctx.switches[name] = labels;
-    // Pre-create label blocks so forward references work.
-    for (auto& lbl : labels)
-        ctx.getOrCreateLabel(lbl);
+    // Record the element jump statements; each GO TO S(I) evaluates the
+    // selected element at use time.
+    std::vector<Statement*> els;
+    for (auto& e : elements) els.push_back(e.get());
+    ctx.switches[name] = std::move(els);
+    // Pre-create label blocks for plain label elements so forward references work.
+    for (auto& e : elements)
+        if (auto* g = dynamic_cast<GotoStatement*>(e.get()))
+            ctx.getOrCreateLabel(g->label);
     return nullptr;
 }
 
 llvm::Value* ComputedGoto::codegen(CodeGenContext& ctx) {
-    // GO TO S(expr) — indirect branch to one of the labels in switch S.
+    // GO TO S(expr) — evaluate the selected switch element, itself a
+    // designational expression (label, conditional, or switch designator).
     auto it = ctx.switches.find(switchName);
     if (it == ctx.switches.end()) {
         ctx.errorAt(line) << "unknown switch '" << switchName << "'\n";
         return nullptr;
     }
-    auto& labels = it->second;
+    auto elements = it->second;  // copy: element codegen may re-enter ctx.switches
     auto func = ctx.builder->GetInsertBlock()->getParent();
     auto i64Ty = llvm::Type::getInt64Ty(*ctx.llvmContext);
 
     auto idxVal = index->codegen(ctx);
     if (!idxVal) return nullptr;
-    // Switch index is 1-based; truncate to i32 for LLVM switch
     if (!idxVal->getType()->isIntegerTy(64))
         idxVal = ctx.builder->CreateSExtOrTrunc(idxVal, i64Ty);
+
+    // A switch element referring back to a switch already being expanded at
+    // this site (SWITCH S := ..., S(k) or mutual references) re-dispatches
+    // through the active evaluation block with the new index — the loop is
+    // the evaluation semantics, without infinite inline expansion.
+    auto act = ctx.activeSwitchEvals.find(switchName);
+    if (act != ctx.activeSwitchEvals.end()) {
+        ctx.builder->CreateStore(idxVal, act->second.second);
+        ctx.builder->CreateBr(act->second.first);
+        auto deadBB = llvm::BasicBlock::Create(*ctx.llvmContext, "after_cgoto", func);
+        ctx.builder->SetInsertPoint(deadBB);
+        return nullptr;
+    }
+
+    auto idxSlot = ctx.createEntryBlockAlloca(func, "swidx_" + switchName, i64Ty);
+    ctx.builder->CreateStore(idxVal, idxSlot);
+    auto evalBB = llvm::BasicBlock::Create(*ctx.llvmContext, "sw_eval", func);
+    ctx.builder->CreateBr(evalBB);
+    ctx.builder->SetInsertPoint(evalBB);
+    auto idxCur = ctx.builder->CreateLoad(i64Ty, idxSlot, "sw_idx");
     auto one = llvm::ConstantInt::get(i64Ty, 1);
-    auto idx0 = ctx.builder->CreateSub(idxVal, one, "sw_idx0");
+    auto idx0 = ctx.builder->CreateSub(idxCur, one, "sw_idx0");
     auto idx32 = ctx.builder->CreateTrunc(idx0, llvm::Type::getInt32Ty(*ctx.llvmContext), "sw_i32");
 
     // Per ALGOL 60 / Simula, an out-of-range switch index (< 1 or > n) makes the
@@ -5492,14 +5540,23 @@ llvm::Value* ComputedGoto::codegen(CodeGenContext& ctx) {
     auto defaultBB = llvm::BasicBlock::Create(*ctx.llvmContext, "sw_default", func);
     { llvm::IRBuilder<> tmpB(defaultBB); tmpB.CreateBr(afterBB); }
 
-    // LLVM switch instruction (i32 index, i32 case values)
+    // Each case emits its element's jump. Routing through the element statement
+    // (not a raw label block) makes conditional elements and non-local targets
+    // (labels of an enclosing function) work identically to plain GOTO.
+    ctx.activeSwitchEvals[switchName] = {evalBB, idxSlot};
     auto i32Ty = llvm::Type::getInt32Ty(*ctx.llvmContext);
-    auto sw = ctx.builder->CreateSwitch(idx32, defaultBB, (unsigned)labels.size());
-    for (size_t i = 0; i < labels.size(); i++) {
-        auto lbb = ctx.getOrCreateLabel(labels[i]);
-        if (!lbb->getParent()) func->insert(func->end(), lbb);
-        sw->addCase(llvm::ConstantInt::get(i32Ty, (int32_t)i), lbb);
+    auto sw = ctx.builder->CreateSwitch(idx32, defaultBB, (unsigned)elements.size());
+    for (size_t i = 0; i < elements.size(); i++) {
+        auto caseBB = llvm::BasicBlock::Create(*ctx.llvmContext, "sw_case", func);
+        sw->addCase(llvm::ConstantInt::get(i32Ty, (int32_t)i), caseBB);
+        ctx.builder->SetInsertPoint(caseBB);
+        elements[i]->codegen(ctx);
+        // The element's jump leaves the builder in a dead continuation block;
+        // terminate it so the IR stays valid.
+        if (!ctx.builder->GetInsertBlock()->getTerminator())
+            ctx.builder->CreateBr(afterBB);
     }
+    ctx.activeSwitchEvals.erase(switchName);
 
     ctx.builder->SetInsertPoint(afterBB);
     return nullptr;

@@ -398,13 +398,15 @@ public:
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 
-// SWITCH S := L1, L2, ..., Ln  (computed goto declaration)
+// SWITCH S := D1, D2, ..., Dn — each element is a designational expression
+// (label, switch designator, conditional, or parenthesized combination),
+// stored as the jump statement it denotes and evaluated at each use.
 class SwitchDeclaration : public Statement {
 public:
     std::string name;
-    std::vector<std::string> labels;
-    SwitchDeclaration(std::string n, std::vector<std::string> ls)
-        : name(std::move(n)), labels(std::move(ls)) {}
+    StmtList elements;
+    SwitchDeclaration(std::string n, StmtList els)
+        : name(std::move(n)), elements(std::move(els)) {}
     llvm::Value* codegen(CodeGenContext& context) override;
 };
 

@@ -175,6 +175,10 @@ static SimulaCoro* _coro_current = NULL;  /* currently running coroutine; NULL =
  * HERE (Simula: control passes to the main program), never back into a stale
  * frame of whoever resumed it. */
 static ucontext_t* _main_react = NULL;
+/* Dedicated save slot for the main program suspending via RESUME. It must NOT
+ * live in the resumed coroutine's caller_ctx: a later CALL of that (by then
+ * detached) coroutine reuses caller_ctx and would clobber main's context. */
+static ucontext_t _main_resume_ctx;
 /* Head (detached component) of the currently operating chain; NULL = the main
  * program's component. Objects attached under it (NEW/CALL) share the head. */
 static SimulaCoro* _chain_head = NULL;
@@ -252,8 +256,8 @@ void simula_coro_resume(SimulaCoro* coro) {
     _chain_head = coro;
     if (prev == NULL) {
         // Main program resuming a coroutine: main's reactivation point is here.
-        _main_react = &coro->caller_ctx;
-        swapcontext(&coro->caller_ctx, &coro->context);
+        _main_react = &_main_resume_ctx;
+        swapcontext(&_main_resume_ctx, &coro->context);
     } else if (prev->via_resume) {
         // A detached component resuming another: the resumer becomes detached so
         // it can be resumed back (Simula RESUME is a symmetric transfer). The

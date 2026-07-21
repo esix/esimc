@@ -298,7 +298,8 @@ static Statement* makePrefixedBlock(const std::string& cls, Statement* blk,
 %type <expr> comparison additive multiplicative power unary postfix primary
 %type <stmt> statement block
 %type <stmt> declaration array_decl ref_declaration
-%type <stmt> label_decl labeled_stmt goto_stmt switch_decl
+%type <stmt> label_decl labeled_stmt goto_stmt switch_decl desig_expr
+%type <stmtlist> desig_list
 %type <stmt> if_stmt while_stmt for_stmt
 %type <forel> for_element
 %type <forels> for_list_els
@@ -313,7 +314,7 @@ static Statement* makePrefixedBlock(const std::string& cls, Statement* blk,
 %type <stmtlist> top_level_decls
 %type <stmtlist> stmt_list class_body
 %type <exprlist> arg_list arg_list_ne
-%type <namelist> ident_list switch_label_list
+%type <namelist> ident_list
 %type <sval> io_keyword
 %type <paramlist> typed_param_list opt_typed_params
 %type <speclist> param_specs
@@ -627,32 +628,45 @@ labeled_stmt
     ;
 
 goto_stmt
-    : T_GOTO T_IDENT {
-        $$ = new GotoStatement($2);
+    : T_GOTO desig_expr {
+        $$ = $2;
         $$->line = @1.first_line;
       }
-    | T_GOTO T_IDENT T_LPAREN expr T_RPAREN {
-        /* Computed goto: GO TO S(expr) */
-        $$ = new ComputedGoto($2, ExprPtr($4));
+    ;
+
+/* Designational expression, parsed directly as the jump statement it denotes:
+ * label, switch designator S(e), parenthesized form, or conditional. */
+desig_expr
+    : T_IDENT {
+        $$ = new GotoStatement($1);
+        $$->line = @1.first_line;
+      }
+    | T_IDENT T_LPAREN expr T_RPAREN {
+        $$ = new ComputedGoto($1, ExprPtr($3));
+        $$->line = @1.first_line;
+      }
+    | T_LPAREN desig_expr T_RPAREN { $$ = $2; }
+    | T_IF expr T_THEN desig_expr T_ELSE desig_expr {
+        $$ = new IfStatement(ExprPtr($2), StmtPtr($4), StmtPtr($6));
         $$->line = @1.first_line;
       }
     ;
 
 switch_decl
-    : T_SWITCH T_IDENT T_ASSIGN switch_label_list {
+    : T_SWITCH T_IDENT T_ASSIGN desig_list {
         $$ = new SwitchDeclaration($2, std::move(*$4));
         delete $4;
       }
     ;
 
-switch_label_list
-    : T_IDENT {
-        $$ = new std::vector<std::string>();
-        $$->push_back($1);
+desig_list
+    : desig_expr {
+        $$ = new StmtList();
+        $$->push_back(StmtPtr($1));
       }
-    | switch_label_list T_COMMA T_IDENT {
+    | desig_list T_COMMA desig_expr {
         $$ = $1;
-        $$->push_back($3);
+        $$->push_back(StmtPtr($3));
       }
     ;
 

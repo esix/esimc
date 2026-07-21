@@ -154,7 +154,11 @@ public:
     llvm::Function* longjmpFunc = nullptr;
 
     // SWITCH declarations: name -> ordered list of label names
-    std::map<std::string, std::vector<std::string>> switches;
+    std::map<std::string, std::vector<Statement*>> switches;
+    // Switch evaluations currently being expanded at this GOTO site:
+    // name -> {dispatch block, index slot}. A cyclic switch reference stores
+    // the new index and branches back instead of expanding forever.
+    std::map<std::string, std::pair<llvm::BasicBlock*, llvm::Value*>> activeSwitchEvals;
 
     // Active INSPECT connections enclosing the current code (outermost first).
     // Identifier lookup falls back to these so nested INSPECT bodies still see
