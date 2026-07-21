@@ -1296,10 +1296,10 @@ llvm::Value* Identifier::codegen(CodeGenContext& ctx) {
     return nullptr;
 }
 
-// Implicit real-to-integer conversion. Simula's Round = Sign(R)*Entier(Abs(R)+0.5),
-// i.e. round to nearest with ties broken AWAY FROM ZERO — exactly llvm.round
-// (not floor(x+0.5), which rounds negative ties toward zero). Used at every
-// assignment/parameter/array-store coercion; explicit ENTIER/TRUNCATE differ.
+// Implicit real-to-integer conversion. The Common Base defines it as
+// entier(r + 0.5): round to nearest with ties toward +infinity (-2.5 -> -2),
+// i.e. floor(r + 0.5) — NOT llvm.round, whose ties go away from zero. Used at
+// every assignment/parameter/array-store coercion; explicit ENTIER/TRUNCATE differ.
 // Emit: if (bad) { simula_math_error(code, line); unreachable }. Codes are
 // defined in the runtime (1 SQRT, 2 LN/LOG, 3 EXP, 4 **, 5 real->integer).
 static void emitMathCheck(CodeGenContext& ctx, llvm::Value* bad, long long code,
@@ -1338,9 +1338,11 @@ static void emitDivZeroCheck(CodeGenContext& ctx, llvm::Value* divisor, int line
 
 static llvm::Value* simulaRealToInt(CodeGenContext& ctx, llvm::Value* v,
                                     llvm::Type* destTy) {
-    auto roundF = llvm::Intrinsic::getOrInsertDeclaration(ctx.module.get(),
-        llvm::Intrinsic::round, {v->getType()});
-    auto rounded = ctx.builder->CreateCall(roundF, {v}, "rnd");
+    auto floorF = llvm::Intrinsic::getOrInsertDeclaration(ctx.module.get(),
+        llvm::Intrinsic::floor, {v->getType()});
+    auto shifted = ctx.builder->CreateFAdd(v,
+        llvm::ConstantFP::get(v->getType(), 0.5), "rnd_half");
+    auto rounded = ctx.builder->CreateCall(floorF, {shifted}, "rnd");
     // Out-of-range (or NaN) real->integer conversion is a runtime error, not
     // LLVM poison. Unordered compares make NaN take the error path.
     auto dTy = v->getType();
