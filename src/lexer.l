@@ -4,6 +4,34 @@
 #include "parser.tab.hpp"
 
 #define YY_USER_ACTION yylloc.first_line = yylineno;
+
+/* Decode a Simula string token: one or more quoted segments separated by
+ * blanks/line breaks (a multi-part string denotes the concatenation). Inside
+ * a segment, "" denotes one quote character and !ddd! is an ISO-code. */
+static char* simula_string_token(const char* s) {
+    size_t n = strlen(s);
+    char* out = (char*)malloc(n + 1);
+    size_t i = 0, j = 0;
+    while (i < n) {
+        if (s[i] != '"') { i++; continue; }   /* skip separator between segments */
+        i++;                                   /* inside a segment */
+        while (i < n) {
+            if (s[i] == '"') {
+                if (i + 1 < n && s[i+1] == '"') { out[j++] = '"'; i += 2; }
+                else { i++; break; }           /* closing quote */
+            } else if (s[i] == '!') {
+                size_t k = i + 1; int v = 0, nd = 0;
+                while (k < n && s[k] >= '0' && s[k] <= '9' && nd < 3) {
+                    v = v * 10 + (s[k] - '0'); k++; nd++;
+                }
+                if (nd > 0 && k < n && s[k] == '!') { out[j++] = (char)v; i = k + 1; }
+                else out[j++] = s[i++];
+            } else out[j++] = s[i++];
+        }
+    }
+    out[j] = 0;
+    return out;
+}
 %}
 
 %option noyywrap
@@ -155,9 +183,10 @@
                                   buf[j] = 0;
                                   yylval.dval = atof(buf); return T_REALLIT; }
 [0-9]+                          { yylval.ival = atoll(yytext); return T_INTLIT; }
-\"([^"\\]|\\.)*\"               { yytext[yyleng-1] = '\0';
-                                  yylval.sval = strdup(yytext+1);
+\"([^"]|\"\")*\"([ \t\r\n]+\"([^"]|\"\")*\")*   { yylval.sval = simula_string_token(yytext);
                                   return T_TEXTLIT; }
+'![0-9]{1,3}!'                  { yylval.ival = atoi(yytext + 2); return T_CHARLIT; }
+'''                             { yylval.ival = '\''; return T_CHARLIT; }
 '[^']'                          { yylval.ival = yytext[1]; return T_CHARLIT; }
 
 .                               { fprintf(stderr, "Lexer error line %d: unexpected '%s'\n",
